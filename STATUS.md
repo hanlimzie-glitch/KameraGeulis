@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-12 (M1 selesai — artifact `kamerageulis-m1-windows-x64`; M1b mendarat di kode — artifact `kamerageulis-m1b-windows-x64` diunggah setiap milestone via CI)**
+Terakhir diperbarui: **2026-11-12 (M1 selesai — artifact `kamerageulis-m1-windows-x64`; M1b hijau di CI — run 43174282611, artifact `kamerageulis-m1b-windows-x64` (6,8 MB, berisi onnxruntime.dll))**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -11,7 +11,7 @@ Legenda status:
 |---|---|---|---|---|---|
 | M0 | Riset + capability check + arsitektur | ✅ | ✅ capability workflow hijau (vswhere/cmake/git) | n/a | Log Actions tidak bisa dibaca dari sandbox (lihat di bawah) |
 | M1 | CMake + CI build window + GPUPixel + camera preview | 🔨 | ✅ (run 43166017897) | ⬜ | Runtime GL/MF BELUM diverifikasi (tidak ada GPU/webcam di CI/sandbox); artifact M1: `kamerageulis-m1-windows-x64` (581 KB) |
-| M1b | Pipeline landmark (ORT CPU, 468 pt) + kg_core decode/ROI/OneEuro | 🔨 | (lihat CI run terbaru di branch) | ⬜ | Windows runtime belum diverifikasi; models-v1 belum berisi aset → efek landmark nonaktif; GPUPixel landmark filters **tidak di-wire** (pemetaan 468→Mars tidak kredibel, docs/LANDMARKS.md §8); kg_core hijau di Linux (45 TC / 8319 assertions) |
+| M1b | Pipeline landmark (ORT CPU, 468 pt) + kg_core decode/ROI/OneEuro | 🔨 | ✅ (run 43174282611) | ⬜ | Windows runtime belum diverifikasi; models-v1 belum berisi aset → efek landmark nonaktif; GPUPixel landmark filters **tidak di-wire** (pemetaan 468→Mars tidak kredibel, docs/LANDMARKS.md §8); kg_core hijau di Linux (45 TC / 8319 assertions) |
 | M2 | Built-in beauty sliders + UI | ⬜ | ⬜ | ⬜ | — |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
@@ -49,5 +49,5 @@ Legenda status:
 - **OrtLandmarkProvider** (Windows, `kg_pipeline`): BlazeFace 128² → decode → ROI mata-sejajar → FaceMesh 468 → gate faceflag → OneEuro + fade via FaceTracker. Download first-run dari rilis GitHub `models-v1` (SHA-256 tertanam: det `613ee7…`, mesh `5497a6…`); env override `KAMENAGEULIS_MODELS_DIR` untuk CI/dev; gagal → efek nonaktif + pesan jujur (tidak pernah crash).
 - **Efek landmark v1 TIDAK di-wire** (FaceReshape/Lipstick/Blusher GPUPixel): pemetaan 468→106/111 titik Mars tidak bisa diandalkan (proporsi canonical berbeda; residual busur OK 0.010 tetapi alis/mata salah anatomi; docs/LANDMARKS.md §8). UI menyatakannya jujur.
 - **THIRD_PARTY.md**: model ONNX tetap Apache-2.0 via konversi tf2onnx; tidak di-commit. `canonical_face_model.obj` hanya referensi analisis offline (tidak di-commit).
-- **CI**: Windows job kini mengunduh ONNX Runtime 1.31.1 win-x64 saat configure (pin SHA-256) + menyalin `onnxruntime.dll` ke artifact. Nama artifact: `kamerageulis-m1b-windows-x64`.
+- **CI**: run 43174282611 hijau (Linux: kg_core tests; Windows: configure mengunduh ONNX Runtime 1.31.1 win-x64 dengan pin SHA-256, build+link sukses termasuk `onnxruntime.dll`, ctest hijau, artifact `kamerageulis-m1b-windows-x64` 6,8 MB). Catatan: run sebelumnya (43173665412) Linux Test exit 8 tanpa ::error::; Test step kini meng-annotasi output ctest; kegagalan itu tidak berulang dan tidak terdiagnosis (jeda infra?) — dicatat jujur.
 - **Belum terverifikasi**: provider di Windows nyata (belum pernah jalan), performa CPU, kualitas ROI/rotasi pada wajah nyata, models-v1 download dari release (masih 404), artifact vcam (belum ada).
