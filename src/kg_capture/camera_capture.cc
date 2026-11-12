@@ -169,7 +169,9 @@ std::vector<VideoMode> CameraCapture::EnumerateModes(int device_index) {
     IMFMediaType* type = nullptr;
     hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                                     type_index, &type);
-    if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
+    // End of the list is signalled by MF_E_NO_MORE_TYPES (an HRESULT error),
+    // so ANY failure ends the enumeration — no constant needed.
+    if (FAILED(hr)) break;
     GUID major{};
     if (SUCCEEDED(type->GetGUID(MF_MT_MAJOR_TYPE, &major)) &&
         IsEqualGUID(major, MFMediaType_Video)) {
