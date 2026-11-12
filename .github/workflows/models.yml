@@ -86,6 +86,11 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/models-out"
+          if ! gh release view models-v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create models-v1 --repo "$GITHUB_REPOSITORY" \
+              --title "models-v1" \
+              --notes "Model ONNX ter-pin SHA-256 (BlazeFace short-range + FaceMesh 468) — dikonversi dari model MediaPipe Apache-2.0 via tf2onnx; lihat docs/LANDMARKS.md."
+          fi
           gh release upload models-v1 \
             "$out/face_detection_short_range.onnx" \
             "$out/face_mesh.onnx" \
