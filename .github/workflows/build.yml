@@ -81,18 +81,35 @@ jobs:
           # binaries, so a clean Windows box needs the v143 CRT. App-local
           # deployment (vcruntime140/_1 + msvcp140) is permitted by the VS
           # redist license and needs no admin install. See docs/REDISTRIBUTABLES.md.
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vsRoot = & $vswhere -latest -products * -property installationPath
-          $redistRoot = Join-Path $vsRoot 'VC\Redist\MSVC'
-          $crt = Get-ChildItem $redistRoot -Directory -Recurse -Filter 'Microsoft.VC*.CRT' |
-                 Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $crt) { throw 'VC++ redist CRT folder not found (Microsoft.VC*.CRT)' }
-          foreach ($dll in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') {
-            $src = Join-Path $crt.FullName $dll
-            if (-not (Test-Path $src)) { throw "redist DLL missing: $src" }
-            Copy-Item $src -Destination dist -Force
+          try {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            Write-Host "vswhere: $vswhere (exists: $(Test-Path $vswhere))"
+            $vsRoot = & $vswhere -latest -products * -property installationPath
+            Write-Host "vsRoot: $vsRoot"
+            $redistRoot = Join-Path $vsRoot 'VC\Redist\MSVC'
+            Write-Host "redistRoot: $redistRoot (exists: $(Test-Path $redistRoot))"
+            if (Test-Path $redistRoot) {
+              Get-ChildItem $redistRoot | ForEach-Object { Write-Host "  msvc redist: $($_.Name)" }
+            }
+            $want = 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll'
+            $candidates = @(Get-ChildItem -Path $redistRoot -Directory -Recurse -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue |
+                            Sort-Object FullName -Descending)
+            Write-Host "CRT candidates: $($candidates.Count)"
+            $crt = $null
+            foreach ($cand in $candidates) {
+              $missing = $want | Where-Object { -not (Test-Path (Join-Path $cand.FullName $_)) }
+              Write-Host "  candidate: $($cand.FullName) missing: $($missing -join ', ')"
+              if (-not $missing) { $crt = $cand; break }
+            }
+            if (-not $crt) { throw 'no complete Microsoft.VC*.CRT folder with vcruntime140/vcruntime140_1/msvcp140' }
+            foreach ($dll in $want) {
+              Copy-Item (Join-Path $crt.FullName $dll) -Destination dist -Force
+            }
+            Write-Host "redist CRT copied from: $($crt.FullName)"
+          } catch {
+            Write-Host "::error ::redistributable packaging failed: $($_.Exception.Message)"
+            throw
           }
-          Write-Host "redist CRT copied from: $($crt.FullName)"
           Copy-Item THIRD_PARTY.md, README.md, STATUS.md -Destination dist
           Get-ChildItem dist | ForEach-Object { Write-Host "dist: $($_.Name) ($($_.Length) B)" }
 
