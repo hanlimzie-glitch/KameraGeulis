@@ -29,7 +29,7 @@ constexpr char kTag[] = "landmark";
 
 // Model provenance: docs/LANDMARKS.md §2.3 (SHA-256 of the two ONNX files).
 // Models are NEVER committed; they are downloaded on first run from the
-// project GitHub Release `models-v1` (or taken from KAMENAGEULIS_MODELS_DIR).
+// project GitHub Release `models-v1` (or taken from KAMERAGEULIS_MODELS_DIR).
 constexpr wchar_t kDetFile[] = L"face_detection_short_range.onnx";
 constexpr wchar_t kMeshFile[] = L"face_mesh.onnx";
 constexpr char kDetSha256[] = "613ee7148e56c9d904ba672a7c6065f8c0179ea3c2cc3c451e9ddc6970ab536c";
@@ -116,7 +116,7 @@ bool OrtLandmarkProvider::Available() const { return available_; }
 
 std::wstring OrtLandmarkProvider::ModelDir_() const {
   wchar_t override_dir[MAX_PATH]{};
-  const DWORD n = GetEnvironmentVariableW(L"KAMENAGEULIS_MODELS_DIR", override_dir, MAX_PATH);
+  const DWORD n = GetEnvironmentVariableW(L"KAMERAGEULIS_MODELS_DIR", override_dir, MAX_PATH);
   if (n > 0 && n < MAX_PATH) return std::wstring(override_dir);
   wchar_t local[MAX_PATH]{};
   const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
@@ -254,7 +254,7 @@ bool OrtLandmarkProvider::EnsureModelsLoaded_() {
   load_attempted_ = true;
   const std::wstring dir = ModelDir_();
   if (dir.empty()) {
-    last_error_ = "KAMENAGEULIS_MODELS_DIR/LOCALAPPDATA tidak tersedia";
+    last_error_ = "KAMERAGEULIS_MODELS_DIR/LOCALAPPDATA tidak tersedia";
     Log(kTag, "%s", last_error_.c_str());
     available_ = false;
     return false;
@@ -313,63 +313,30 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
     return out;
   }
 
-  // ---------- Step 1: letterbox 128x128, [-1,1] ----------
   const int src_w = frame.width, src_h = frame.height;
-  const LetterboxInfo lb = ComputeLetterbox(src_w, src_h, 128);
-  std::vector<float> det_input(static_cast<size_t>(128) * 128 * 3, 0.0f);
-  for (int ty = 0; ty < 128; ++ty) {
-    const float sy = ((ty + 0.5f) - lb.pad_y) / lb.scale - 0.5f;
-    for (int tx = 0; tx < 128; ++tx) {
-      const float sx = ((tx + 0.5f) - lb.pad_x) / lb.scale - 0.5f;
-      float* dst = det_input.data() + (static_cast<size_t>(ty) * 128 + tx) * 3;
-      for (int c = 0; c < 3; ++c) {
-        dst[c] = (SampleChannel(frame, sx, sy, c) / 255.0f) * 2.0f - 1.0f;
+
+  // ---------- Cadence: detect only when lost / first frame / safety ----------
+  const bool need_detection = !have_prev_roi_ || lost_streak_ >= 2 ||
+                              frames_since_detect_ >= kSafetyRedetectFrames;
+  AlignedRoi roi{};
+  if (need_detection) {
+    if (DetectionStage_(frame, &roi, &out.face_score)) {
+      pending_roi_anchor_ = true;
+    } else {
+      ++lost_streak_;
+      if (have_prev_roi_ && lost_streak_ < 2) {
+        // Detector failed but we still hold a usable previous ROI: track instead.
+        roi = TrackRoiFromPreviousLandmarks_(src_w, src_h);
+        out.face_score = prev_face_score_;
+      } else {
+        have_prev_roi_ = false;
+        return out;
       }
     }
+  } else {
+    roi = TrackRoiFromPreviousLandmarks_(src_w, src_h);
+    out.face_score = prev_face_score_;
   }
-
-  const auto anchors = GenerateFaceAnchors();
-  std::vector<float> regressors;
-  std::vector<float> classificators;
-  try {
-    Ort::MemoryInfo memInfo =
-        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
-    const int64_t det_shape[4] = {1, 128, 128, 3};
-    Ort::Value det_tensor = Ort::Value::CreateTensor<float>(memInfo, det_input.data(),
-                                                             det_input.size(), det_shape, 4);
-    const char* input_names[] = {"input"};
-    const char* output_names[] = {"regressors", "classificators"};
-    Ort::RunOptions run_opts;
-    auto det_out = det_->Run(run_opts, input_names, &det_tensor, 1, output_names, 2);
-    const float* reg = det_out[0].GetTensorData<float>();
-    const float* cls = det_out[1].GetTensorData<float>();
-    regressors.assign(reg, reg + 896 * 16);
-    classificators.assign(cls, cls + 896);
-  } catch (const Ort::Exception& e) {
-    Log(kTag, "detector inference failed: %s", e.what());
-    return out;
-  }
-
-  // ---------- Step 2: decode + NMS ----------
-  const std::vector<Detection> dets =
-      DecodeDetections(regressors.data(), classificators.data(), anchors, 0.5f, 0.3f);
-  if (dets.empty()) return out;  // no face
-  const Detection& det = dets[0];
-  out.face_score = det.score;
-
-  // ---------- Step 3: map the detection back to frame pixels ----------
-  const Vec2 box_center_norm =
-      lb.MapToFrame({det.cx * 128.0f, det.cy * 128.0f});
-  const float box_w_px = det.w * 128.0f / lb.scale;
-  const float box_h_px = det.h * 128.0f / lb.scale;
-  const float box_cx_px = box_center_norm.x * src_w;
-  const float box_cy_px = box_center_norm.y * src_h;
-  const Vec2 kp0_norm = lb.MapToFrame({det.keypoints[0].x * 128.0f, det.keypoints[0].y * 128.0f});
-  const Vec2 kp1_norm = lb.MapToFrame({det.keypoints[1].x * 128.0f, det.keypoints[1].y * 128.0f});
-  const Vec2 kp0_px{kp0_norm.x * src_w, kp0_norm.y * src_h};
-  const Vec2 kp1_px{kp1_norm.x * src_w, kp1_norm.y * src_h};
-  const AlignedRoi roi =
-      ComputeAlignedRoi(box_cx_px, box_cy_px, box_w_px, box_h_px, kp0_px, kp1_px, 1.5f);
 
   // ---------- Step 4: rotated square crop 192x192, [0,1] ----------
   std::vector<float> mesh_input(static_cast<size_t>(192) * 192 * 3, 0.0f);
@@ -404,15 +371,132 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
     face_flag = ReadMeshFaceFlag(mesh_out[1].GetTensorData<float>());
   } catch (const Ort::Exception& e) {
     Log(kTag, "mesh inference failed: %s", e.what());
+    out = LandmarkSet{};
+    out.ts_ms = frame.timestamp_ms;
+    NoteMeshOutcome_(out, roi, src_w, src_h);
     return out;
   }
-  if (face_flag <= 0.0f) return out;  // ROI does not contain a face
+  if (face_flag <= 0.0f) {
+    // ROI does not contain a face — count it; re-detect on the next frame.
+    out = LandmarkSet{};
+    out.ts_ms = frame.timestamp_ms;
+    NoteMeshOutcome_(out, roi, src_w, src_h);
+    return out;
+  }
 
   // ---------- Step 6: unmap to frame coordinates ----------
   for (size_t i = 0; i < kLandmarkCount; ++i) {
     out.pts[i] = MeshCanvasToFrame(canvas_pts[i], roi, src_w, src_h);
   }
   out.valid = true;
+  NoteMeshOutcome_(out, roi, src_w, src_h);
   return out;
+}
+
+bool OrtLandmarkProvider::DetectionStage_(const Frame& frame, AlignedRoi* roi_out,
+                                          float* face_score_out) {
+  const int src_w = frame.width, src_h = frame.height;
+  const LetterboxInfo lb = ComputeLetterbox(src_w, src_h, 128);
+  std::vector<float> det_input(static_cast<size_t>(128) * 128 * 3, 0.0f);
+  for (int ty = 0; ty < 128; ++ty) {
+    const float sy = ((ty + 0.5f) - lb.pad_y) / lb.scale - 0.5f;
+    for (int tx = 0; tx < 128; ++tx) {
+      const float sx = ((tx + 0.5f) - lb.pad_x) / lb.scale - 0.5f;
+      float* dst = det_input.data() + (static_cast<size_t>(ty) * 128 + tx) * 3;
+      for (int c = 0; c < 3; ++c) {
+        dst[c] = (SampleChannel(frame, sx, sy, c) / 255.0f) * 2.0f - 1.0f;
+      }
+    }
+  }
+
+  const auto anchors = GenerateFaceAnchors();
+  std::vector<float> regressors;
+  std::vector<float> classificators;
+  try {
+    Ort::MemoryInfo memInfo =
+        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+    const int64_t det_shape[4] = {1, 128, 128, 3};
+    Ort::Value det_tensor = Ort::Value::CreateTensor<float>(memInfo, det_input.data(),
+                                                             det_input.size(), det_shape, 4);
+    const char* input_names[] = {"input"};
+    const char* output_names[] = {"regressors", "classificators"};
+    Ort::RunOptions run_opts;
+    auto det_out = det_->Run(run_opts, input_names, &det_tensor, 1, output_names, 2);
+    const float* reg = det_out[0].GetTensorData<float>();
+    const float* cls = det_out[1].GetTensorData<float>();
+    regressors.assign(reg, reg + 896 * 16);
+    classificators.assign(cls, cls + 896);
+  } catch (const Ort::Exception& e) {
+    Log(kTag, "detector inference failed: %s", e.what());
+    return false;
+  }
+
+  // ---------- decode + NMS ----------
+  const std::vector<Detection> dets =
+      DecodeDetections(regressors.data(), classificators.data(), anchors, 0.5f, 0.3f);
+  if (dets.empty()) return false;  // no face in frame
+  const Detection& det = dets[0];
+  *face_score_out = det.score;
+
+  // ---------- map the detection back to frame pixels ----------
+  const Vec2 box_center_norm =
+      lb.MapToFrame({det.cx * 128.0f, det.cy * 128.0f});
+  const float box_w_px = det.w * 128.0f / lb.scale;
+  const float box_h_px = det.h * 128.0f / lb.scale;
+  const float box_cx_px = box_center_norm.x * src_w;
+  const float box_cy_px = box_center_norm.y * src_h;
+  const Vec2 kp0_norm = lb.MapToFrame({det.keypoints[0].x * 128.0f, det.keypoints[0].y * 128.0f});
+  const Vec2 kp1_norm = lb.MapToFrame({det.keypoints[1].x * 128.0f, det.keypoints[1].y * 128.0f});
+  const Vec2 kp0_px{kp0_norm.x * src_w, kp0_norm.y * src_h};
+  const Vec2 kp1_px{kp1_norm.x * src_w, kp1_norm.y * src_h};
+  *roi_out = ComputeAlignedRoi(box_cx_px, box_cy_px, box_w_px, box_h_px, kp0_px, kp1_px, 1.5f);
+  return true;
+}
+
+AlignedRoi OrtLandmarkProvider::TrackRoiFromPreviousLandmarks_(int src_w, int src_h) const {
+  Vec2 sum{};
+  for (size_t i = 0; i < kLandmarkCount; ++i) sum = sum + prev_pts_[i];
+  const float inv = 1.0f / static_cast<float>(kLandmarkCount);
+  const Vec2 centroid{sum.x * inv, sum.y * inv};  // normalized [0,1]
+  const Vec2 right_mid{(prev_pts_[33].x + prev_pts_[133].x) * 0.5f,
+                       (prev_pts_[33].y + prev_pts_[133].y) * 0.5f};
+  const Vec2 left_mid{(prev_pts_[362].x + prev_pts_[263].x) * 0.5f,
+                      (prev_pts_[362].y + prev_pts_[263].y) * 0.5f};
+  const float dx = (left_mid.x - right_mid.x) * static_cast<float>(src_w);
+  const float dy = (left_mid.y - right_mid.y) * static_cast<float>(src_h);
+  AlignedRoi roi = prev_roi_;  // side_px carried over
+  roi.cx_px = (centroid.x + roi_center_offset_.x) * static_cast<float>(src_w);
+  roi.cy_px = (centroid.y + roi_center_offset_.y) * static_cast<float>(src_h);
+  roi.angle_rad = std::atan2(dy, dx);
+  return roi;
+}
+
+void OrtLandmarkProvider::NoteMeshOutcome_(const LandmarkSet& result, const AlignedRoi& roi_used,
+                                           int src_w, int src_h) {
+  if (!result.valid) {
+    ++lost_streak_;
+    if (lost_streak_ >= 2) {
+      have_prev_roi_ = false;
+      pending_roi_anchor_ = false;
+    }
+    return;
+  }
+  lost_streak_ = 0;
+  prev_pts_ = result.pts;
+  prev_face_score_ = result.face_score;
+  prev_roi_ = roi_used;
+  have_prev_roi_ = true;
+  if (pending_roi_anchor_) {
+    Vec2 sum{};
+    for (size_t i = 0; i < kLandmarkCount; ++i) sum = sum + prev_pts_[i];
+    const float inv = 1.0f / static_cast<float>(kLandmarkCount);
+    const Vec2 centroid{sum.x * inv, sum.y * inv};
+    roi_center_offset_ = Vec2{roi_used.cx_px / static_cast<float>(src_w) - centroid.x,
+                              roi_used.cy_px / static_cast<float>(src_h) - centroid.y};
+    pending_roi_anchor_ = false;
+    frames_since_detect_ = 0;
+  } else {
+    ++frames_since_detect_;
+  }
 }
 }  // namespace kgcore

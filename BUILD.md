@@ -31,7 +31,7 @@ Efek landmark memakai dua model ONNX (Apache-2.0, Google MediaPipe, hasil konver
 
 **Status 2026-11-12: rilis `models-v1` belum berisi aset** (upload `gh release upload models-v1 face_detection_short_range.onnx face_mesh.onnx` harus dijalankan maintainer di mesin yang bisa akses GitHub; sandbox tidak bisa). Sampai itu terjadi, download gagal → efek landmark nonaktif dengan pesan jujur di UI/log; aplikasi tetap jalan normal.
 
-Untuk CI/dev tanpa internet: arahkan `KAMENAGEULIS_MODELS_DIR` ke folder yang berisi kedua file di atas (harus lolos SHA-256, tidak diunduh ulang).
+Untuk CI/dev tanpa internet: arahkan `KAMERAGEULIS_MODELS_DIR` ke folder yang berisi kedua file di atas (harus lolos SHA-256, tidak diunduh ulang).
 
 ## Struktur build
 
@@ -43,5 +43,5 @@ Untuk CI/dev tanpa internet: arahkan `KAMENAGEULIS_MODELS_DIR` ke folder yang be
 
 - **Configure gagal di download ONNX Runtime**: cek koneksi; hapus `build\_deps\onnxruntime-win-x64-1.31.1.zip` lalu configure ulang (file yang korup tidak akan lolos SHA-256).
 - **GPUPixel gagal**: hanya didukung Release (bukan Debug) + x64.
-- **Efek landmark "model tidak tersedia"**: lihat `%LOCALAPPDATA%\KameraGeulis\models` (ada `face_detection_short_range.onnx`/`face_mesh.onnx`?); jalankan dari konsol/log untuk melihat alasan gagal (`KAMENAGEULIS_MODELS_DIR` mem-bypass download).
+- **Efek landmark "model tidak tersedia"**: lihat `%LOCALAPPDATA%\KameraGeulis\models` (ada `face_detection_short_range.onnx`/`face_mesh.onnx`?); jalankan dari konsol/log untuk melihat alasan gagal (`KAMERAGEULIS_MODELS_DIR` mem-bypass download).
 - **Kamera virtual**: butuh `softcam.dll` (dibangun terpisah, M3/M5) + registrasi admin 1× — belum termasuk artifact M1/M1b.
