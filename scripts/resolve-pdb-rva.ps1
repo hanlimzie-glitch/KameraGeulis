@@ -68,7 +68,9 @@ foreach ($l in $lines) {
     if ($abs -ge $preferred) { $entryRva = $abs - $preferred }
   }
   if ($entryRva -eq $null) { continue }
-  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva; Section = $mode })
+  $raw = $l.Trim()
+  if ($raw.Length -gt 700) { $raw = $raw.Substring(0, 700) + ' ...[truncated]' }
+  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva; Section = $mode; Raw = $raw })
 }
 $pub = @($entries | Where-Object Section -eq 'publics').Count
 $sta = @($entries | Where-Object Section -eq 'static').Count
@@ -108,6 +110,21 @@ if ($probe.Count -gt 0) {
   $probeNote = '; probes: ' + (($probe | ForEach-Object { '{0} @0x{1:X}' -f $_.Sym, $_.Rva }) -join ', ')
 }
 Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]{4}" -f $Rva, $best.Sym, $best.Section, $best.Rva, $probeNote)
+# Raw evidence via annotations (sandbox cannot read step logs):
+if ($preferred) { Write-Host ("::notice::map preferred=0x{0:X}" -f $preferred) }
+Write-Host ("::notice::map raw best: {0}" -f $best.Raw)
+$rawSeen = 0
+foreach ($p in $probe) {
+  if ($rawSeen -ge 3) { break }
+  if ($p.Rva -eq $best.Rva -and $p.Sym -eq $best.Sym) { continue }
+  Write-Host ("::notice::map raw probe: {0}" -f $p.Raw)
+  $rawSeen++
+}
+# the actual DoRender function entry (regex: symbol starts with ?DoRender@)
+$fn = @($entries | Where-Object { $_.Sym -match '^\?DoRender@' })
+foreach ($f in $fn) {
+  Write-Host ("::notice::map raw DoRender-fn: {0}" -f $f.Raw)
+}
 
 # window around the RVA for manual cross-check
 $entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x400) -and $_.Rva -le ($target + 0x400) } |
