@@ -7,6 +7,7 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -32,8 +33,8 @@ constexpr char kTag[] = "landmark";
 // project GitHub Release `models-v1` (or taken from KAMERAGEULIS_MODELS_DIR).
 constexpr wchar_t kDetFile[] = L"face_detection_short_range.onnx";
 constexpr wchar_t kMeshFile[] = L"face_mesh.onnx";
-constexpr char kDetSha256[] = "613ee7148e56c9d904ba672a7c6065f8c0179ea3c2cc3c451e9ddc6970ab536c";
-constexpr char kMeshSha256[] = "5497a6c18f18c37ebf38b63b31e98a3f97ed1a7aedf86a882f4627e97a875e8d";
+constexpr char kDetSha256[] = "82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d";
+constexpr char kMeshSha256[] = "ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337";
 constexpr wchar_t kDownloadBase[] =
     L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =
@@ -302,9 +303,26 @@ float SampleChannel(const Frame& f, float fx, float fy, int channel_bgr_or_rgb) 
 }  // namespace
 
 LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
+  const auto t0 = std::chrono::steady_clock::now();
+  LandmarkSet out = TrackImpl_(frame);
+  stage_.track_ms = std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+  return out;
+}
+
+bool OrtLandmarkProvider::GetStageTimings(StageTimings* out) const {
+  if (!out) return false;
+  *out = stage_;
+  return true;
+}
+
+LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
   LandmarkSet out;
   out.ts_ms = frame.timestamp_ms;
   if (!frame.IsValid()) return out;
+  stage_.detect_ms = 0.0f;
+  stage_.mesh_ms = 0.0f;
+  stage_.frames_since_detect = frames_since_detect_;
   if (!EnsureModelsLoaded_()) {
     if (!logged_failure_) {
       Log(kTag, "landmark provider unavailable: %s", last_error_.c_str());
@@ -320,7 +338,11 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
                               frames_since_detect_ >= kSafetyRedetectFrames;
   AlignedRoi roi{};
   if (need_detection) {
-    if (DetectionStage_(frame, &roi, &out.face_score)) {
+    const auto det_start = std::chrono::steady_clock::now();
+    const bool det_ok = DetectionStage_(frame, &roi, &out.face_score);
+    stage_.detect_ms = std::chrono::duration<float, std::milli>(
+                           std::chrono::steady_clock::now() - det_start).count();
+    if (det_ok) {
       pending_roi_anchor_ = true;
     } else {
       ++lost_streak_;
@@ -339,6 +361,7 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
   }
 
   // ---------- Step 4: rotated square crop 192x192, [0,1] ----------
+  const auto mesh_start = std::chrono::steady_clock::now();
   std::vector<float> mesh_input(static_cast<size_t>(192) * 192 * 3, 0.0f);
   const float ca = std::cos(roi.angle_rad), sa = std::sin(roi.angle_rad);
   for (int ty = 0; ty < 192; ++ty) {
@@ -370,17 +393,23 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
     DecodeMeshTensor(mesh_out[0].GetTensorData<float>(), &canvas_pts);
     face_flag = ReadMeshFaceFlag(mesh_out[1].GetTensorData<float>());
   } catch (const Ort::Exception& e) {
+    stage_.mesh_ms = std::chrono::duration<float, std::milli>(
+                         std::chrono::steady_clock::now() - mesh_start).count();
     Log(kTag, "mesh inference failed: %s", e.what());
     out = LandmarkSet{};
     out.ts_ms = frame.timestamp_ms;
     NoteMeshOutcome_(out, roi, src_w, src_h);
+    stage_.frames_since_detect = frames_since_detect_;
     return out;
   }
+  stage_.mesh_ms = std::chrono::duration<float, std::milli>(
+                       std::chrono::steady_clock::now() - mesh_start).count();
   if (face_flag <= 0.0f) {
     // ROI does not contain a face — count it; re-detect on the next frame.
     out = LandmarkSet{};
     out.ts_ms = frame.timestamp_ms;
     NoteMeshOutcome_(out, roi, src_w, src_h);
+    stage_.frames_since_detect = frames_since_detect_;
     return out;
   }
 
@@ -390,6 +419,7 @@ LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
   }
   out.valid = true;
   NoteMeshOutcome_(out, roi, src_w, src_h);
+  stage_.frames_since_detect = frames_since_detect_;
   return out;
 }
 

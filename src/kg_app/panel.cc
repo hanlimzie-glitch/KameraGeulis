@@ -1,91 +1,329 @@
 #include "panel.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <vector>
+
 #include "imgui.h"
+#include "camera_capture.h"  // kg_capture: EnumerateDevices / EnumerateModes
+#include "kgcore/presets.h"
 #include "kgcore/strings.h"
 
 namespace kgcore {
 namespace {
-void DisabledWithTooltip(const char* label, const char* tooltip) {
+// Cached device/mode lists (camera open/close is expensive; only refresh
+// on Refresh button / selection change).
+struct CameraEnumCache {
+  bool loaded = false;
+  std::vector<VideoDeviceInfo> devices;
+  std::vector<VideoMode> modes;  // for `modes_for_device`
+  int modes_for_device = -1;
+  void RefreshDevices() { devices = CameraCapture::EnumerateDevices(); }
+  void RefreshModes(int device) {
+    modes = CameraCapture::EnumerateModes(device);
+    modes_for_device = device;
+  }
+};
+CameraEnumCache& CamCache() {
+  static CameraEnumCache cache;
+  return cache;
+}
+
+void SliderPct(const char* label, float* v01) {
+  int pct = static_cast<int>(std::lround(*v01 * 100.0f));
+  if (ImGui::SliderInt(label, &pct, 0, 100, "%d %%")) {
+    *v01 = static_cast<float>(pct) / 100.0f;
+  }
+}
+
+void DisabledComingSoon(const char* label) {
+  auto& s = Strings::Instance();
+  float dummy = 0.0f;
   ImGui::BeginDisabled();
-  ImGui::Button(label);
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+  ImGui::SliderFloat(label, &dummy, 0.0f, 1.0f, "0%%");
+  ImGui::SameLine();
+  ImGui::Button(s.Get("common.coming_soon").c_str());
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("%s", s.Get("common.coming_soon_tip").c_str());
+  }
   ImGui::EndDisabled();
 }
-}  // namespace
 
-void RenderPanel(AppUiState& state) {
+void ApplyPreset(AppUiState& ui, const char* name) {
+  if (const PresetDef* p = FindPreset(name)) {
+    ui.smoothing = p->smoothing;
+    ui.whitening = p->whitening;
+    ui.preset = p->name;
+  }
+}
+
+void DrawPresetsTab(AppUiState& ui) {
   auto& s = Strings::Instance();
-  static float dummy_smoothing = 0.0f, dummy_whitening = 0.0f;
-  static float dummy_slim = 0.0f, dummy_eyes = 0.0f;
-  static bool dummy_vcam = false;
-
-  ImGui::Begin("KameraGeulis", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-  ImGui::TextUnformatted(s.Get("app.title").c_str());
+  const char* names[] = {"Natural", "Soft", "Glam", "ClearSkin"};
+  for (int i = 0; i < 4; ++i) {
+    if (i > 0) ImGui::SameLine();
+    if (ImGui::Button(names[i])) ApplyPreset(ui, names[i]);
+  }
   ImGui::Separator();
-
-  ImGui::Text("Kamera: %s (%dx%d, %llu frame)", state.camera_ok ? "OK" : "—",
-              state.cam_width, state.cam_height,
-              static_cast<unsigned long long>(state.frames_captured));
-  ImGui::Text("FPS: %.1f", state.fps);
-  ImGui::Text("Status: %s", state.status_message.c_str());
-  ImGui::Separator();
-
-  // --- Landmark status (honest, always visible) ---
-  ImGui::Text("%s:", s.Get("landmark.status").c_str());
-  if (state.landmark_available) {
-    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "%s",
-                       s.Get("landmark.active").c_str());
+  const bool is_custom = ui.preset == "Custom";
+  ImGui::Text("%s:", s.Get("presets.active").c_str());
+  ImGui::SameLine();
+  if (is_custom) {
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "%s", s.Get("presets.custom").c_str());
   } else {
-    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s",
-                       s.Get("landmark.inactive").c_str());
+    ImGui::TextColored(ImVec4(0.55f, 0.9f, 0.55f, 1.0f), "%s", ui.preset.c_str());
+  }
+  ImGui::Separator();
+  if (ImGui::Button(s.Get("presets.reset").c_str())) {
+    ui.request_reset_defaults = true;
+  }
+  ImGui::Separator();
+  if (ImGui::Button(s.Get("common.save").c_str(), ImVec2(-1.0f, 0.0f))) {
+    ui.request_save_settings = true;
+  }
+  if (ImGui::Button(s.Get("common.load").c_str(), ImVec2(-1.0f, 0.0f))) {
+    ui.request_load_settings = true;
+  }
+}
+
+void DrawCameraTab(AppUiState& ui) {
+  auto& s = Strings::Instance();
+  auto& cache = CamCache();
+  if (!cache.loaded) {
+    cache.RefreshDevices();
+    cache.RefreshModes(ui.camera_device);
+    cache.loaded = true;
+  }
+
+  if (cache.devices.empty()) {
+    ImGui::TextWrapped("%s", s.Get("camera.none").c_str());
+  } else {
+    const std::string preview =
+        (ui.camera_device >= 0 && ui.camera_device < static_cast<int>(cache.devices.size()))
+            ? cache.devices[ui.camera_device].name
+            : ("Kamera #" + std::to_string(ui.camera_device));
+    if (ImGui::BeginCombo(s.Get("camera.device").c_str(), preview.c_str())) {
+      for (size_t i = 0; i < cache.devices.size(); ++i) {
+        const bool sel = (static_cast<int>(i) == ui.camera_device);
+        if (ImGui::Selectable(cache.devices[i].name.c_str(), sel)) {
+          ui.camera_device = static_cast<int>(i);
+          cache.RefreshModes(ui.camera_device);
+        }
+        if (sel) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+  }
+
+  // Resolution list from native modes (unique w×h), or a safe fallback.
+  struct Res { int w, h; };
+  std::vector<Res> resolutions;
+  for (const auto& m : cache.modes) {
+    bool dup = false;
+    for (const auto& r : resolutions) {
+      if (r.w == m.width && r.h == m.height) { dup = true; break; }
+    }
+    if (!dup) resolutions.push_back({m.width, m.height});
+  }
+  const bool using_fallback_modes = resolutions.empty();
+  if (using_fallback_modes) {
+    resolutions = {{1280, 720}, {640, 480}};
+  }
+  std::string res_preview =
+      std::to_string(ui.capture_width) + "x" + std::to_string(ui.capture_height);
+  if (ImGui::BeginCombo(s.Get("camera.resolution").c_str(), res_preview.c_str())) {
+    for (const auto& r : resolutions) {
+      const bool sel = (r.w == ui.capture_width && r.h == ui.capture_height);
+      char label[32];
+      std::snprintf(label, sizeof(label), "%dx%d", r.w, r.h);
+      if (ImGui::Selectable(label, sel)) {
+        ui.capture_width = r.w;
+        ui.capture_height = r.h;
+        // Pick the highest fps available for the new resolution.
+        int best_fps = 0;
+        for (const auto& m : cache.modes) {
+          if (m.width == r.w && m.height == r.h && m.fps > best_fps) best_fps = m.fps;
+        }
+        ui.capture_fps = best_fps > 0 ? best_fps : 30;
+      }
+      if (sel) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+
+  // FPS list for the chosen resolution.
+  std::vector<int> fps_values;
+  for (const auto& m : cache.modes) {
+    if (m.width == ui.capture_width && m.height == ui.capture_height && m.fps > 0) {
+      bool dup = false;
+      for (int f : fps_values) if (f == m.fps) { dup = true; break; }
+      if (!dup) fps_values.push_back(m.fps);
+    }
+  }
+  if (fps_values.empty()) fps_values = {30, 60};
+  std::sort(fps_values.begin(), fps_values.end());
+  char fps_preview[16];
+  std::snprintf(fps_preview, sizeof(fps_preview), "%d", ui.capture_fps);
+  if (ImGui::BeginCombo(s.Get("camera.fps").c_str(), fps_preview)) {
+    for (int f : fps_values) {
+      const bool sel = (f == ui.capture_fps);
+      char label[16];
+      std::snprintf(label, sizeof(label), "%d", f);
+      if (ImGui::Selectable(label, sel)) ui.capture_fps = f;
+      if (sel) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  if (using_fallback_modes) {
+    ImGui::TextWrapped("%s", s.Get("camera.no_modes").c_str());
+  }
+
+  if (ImGui::Button(s.Get("camera.apply").c_str())) {
+    ui.request_camera_apply = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button(s.Get("camera.refresh").c_str())) {
+    cache.RefreshDevices();
+    cache.RefreshModes(ui.camera_device);
+  }
+  ImGui::Separator();
+  ImGui::Text("%s: %dx%d", s.Get("camera.current").c_str(), ui.cam_width, ui.cam_height);
+  ImGui::Text("FPS: %.1f", ui.fps);
+  ImGui::Separator();
+
+  // Virtual camera — disabled until M3 (softcam + registrasi admin).
+  ImGui::BeginDisabled();
+  bool vcam = false;
+  ImGui::Checkbox(s.Get("vcam.toggle").c_str(), &vcam);
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("%s", s.Get("vcam.need_register").c_str());
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::TextDisabled("%s", s.Get("vcam.coming_soon").c_str());
+}
+
+void DrawAboutTab(AppUiState& ui) {
+  auto& s = Strings::Instance();
+  ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.8f, 1.0f), "KameraGeulis 0.2.0");
+  ImGui::Separator();
+
+  ImGui::Text("%s:", s.Get("landmark.status").c_str());
+  if (ui.landmark_available) {
+    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "%s", s.Get("landmark.active").c_str());
+  } else {
+    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", s.Get("landmark.inactive").c_str());
     ImGui::TextWrapped("%s", s.Get("landmark.unavailable").c_str());
   }
   ImGui::Separator();
 
+  ImGui::Checkbox(s.Get("debug.overlay").c_str(), &ui.show_debug);
+  ImGui::TextWrapped("%s", s.Get("debug.note").c_str());
+  ImGui::Spacing();
+  ImGui::Text("capture  %.2f ms", ui.capture_ms);
+  ImGui::Text("detect   %.2f ms (%s: %d)", ui.detect_ms,
+              s.Get("debug.since_detect").c_str(), ui.frames_since_detect);
+  ImGui::Text("mesh     %.2f ms", ui.mesh_ms);
+  ImGui::Text("track    %.2f ms", ui.track_ms);
+  ImGui::Text("render   %.2f ms", ui.render_ms);
+  ImGui::TextWrapped("%s", s.Get("debug.unverified").c_str());
+  ImGui::Separator();
+
+  ImGui::BeginDisabled();
+  ImGui::Button(s.Get("common.snapshot").c_str());
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("%s", s.Get("common.coming_soon").c_str());
+  }
+  ImGui::EndDisabled();
+  ImGui::Separator();
+  ImGui::TextWrapped("%s", s.Get("about.license_note").c_str());
+}
+}  // namespace
+
+void RenderPanel(AppUiState& ui) {
+  auto& s = Strings::Instance();
+
+  ImGui::Begin("KameraGeulis", nullptr,
+               ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::TextUnformatted(s.Get("app.title").c_str());
+  ImGui::Separator();
+
+  // --- Status line ---
+  ImGui::Text("%s: %s (%dx%d, %llu frame)", s.Get("status.camera").c_str(),
+              ui.camera_ok ? "OK" : "—", ui.cam_width, ui.cam_height,
+              static_cast<unsigned long long>(ui.frames_captured));
+  ImGui::Text("FPS: %.1f", ui.fps);
+  ImGui::Text("Status: %s", ui.status_message.c_str());
+  ImGui::Separator();
+
   if (ImGui::BeginTabBar("kgeulis_tabs")) {
     if (ImGui::BeginTabItem(s.Get("tab.skin").c_str())) {
-      ImGui::BeginDisabled();
-      ImGui::SliderFloat(s.Get("skin.smoothing").c_str(), &dummy_smoothing, 0.0f, 1.0f);
-      ImGui::SliderFloat(s.Get("skin.whitening").c_str(), &dummy_whitening, 0.0f, 1.0f);
-      ImGui::EndDisabled();
-      ImGui::SetTooltip("M2 — slider menyusul");
+      const float prev_smoothing = ui.smoothing;
+      const float prev_whitening = ui.whitening;
+      SliderPct(s.Get("skin.smoothing").c_str(), &ui.smoothing);
+      SliderPct(s.Get("skin.whitening").c_str(), &ui.whitening);
+      if (ui.smoothing != prev_smoothing || ui.whitening != prev_whitening) {
+        ui.preset = "Custom";
+      }
+      ImGui::Spacing();
+      ImGui::TextWrapped("%s", s.Get("skin.coming_soon_note").c_str());
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem(s.Get("tab.face").c_str())) {
-      ImGui::BeginDisabled();
-      ImGui::SliderFloat(s.Get("face.slim").c_str(), &dummy_slim, 0.0f, 1.0f);
-      ImGui::SliderFloat(s.Get("face.bigeyes").c_str(), &dummy_eyes, 0.0f, 1.0f);
-      ImGui::EndDisabled();
-      ImGui::SetTooltip("Belum tersedia di v1 — mapping 468 poin ke filter GPUPixel belum terverifikasi (docs/LANDMARKS.md)");
+      DisabledComingSoon(s.Get("face.slim").c_str());
+      DisabledComingSoon(s.Get("face.bigeyes").c_str());
+      ImGui::Spacing();
+      ImGui::TextWrapped("%s", s.Get("common.coming_soon_tip").c_str());
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem(s.Get("tab.makeup").c_str())) {
-      ImGui::TextWrapped("M4 — lipstick, blusher, foundation, eyeliner, eyeshadow menyusul.");
+      DisabledComingSoon(s.Get("makeup.lipstick").c_str());
+      DisabledComingSoon(s.Get("makeup.blusher").c_str());
+      DisabledComingSoon(s.Get("makeup.foundation").c_str());
+      DisabledComingSoon(s.Get("makeup.eyeliner").c_str());
+      DisabledComingSoon(s.Get("makeup.eyeshadow").c_str());
+      DisabledComingSoon(s.Get("makeup.browtint").c_str());
+      ImGui::Spacing();
+      ImGui::TextWrapped("%s", s.Get("common.coming_soon_tip").c_str());
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem(s.Get("tab.presets").c_str())) {
-      DisabledWithTooltip("Natural", "M2");
-      ImGui::SameLine();
-      DisabledWithTooltip("Soft", "M2");
-      ImGui::SameLine();
-      DisabledWithTooltip("Glam", "M2");
-      ImGui::SameLine();
-      DisabledWithTooltip("ClearSkin", "M2");
+      DrawPresetsTab(ui);
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(s.Get("tab.camera").c_str())) {
+      DrawCameraTab(ui);
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(s.Get("tab.about").c_str())) {
+      DrawAboutTab(ui);
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
   }
 
   ImGui::Separator();
-  ImGui::Checkbox(s.Get("common.mirror").c_str(), &state.mirror);
-  ImGui::BeginDisabled();
-  ImGui::Checkbox(s.Get("vcam.toggle").c_str(), &dummy_vcam);
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", s.Get("vcam.need_register").c_str());
-  }
-  ImGui::EndDisabled();
+  ImGui::Checkbox(s.Get("common.mirror").c_str(), &ui.mirror);
+  ImGui::SameLine();
+  ImGui::Text("%s:", s.Get("common.language").c_str());
+  ImGui::SameLine();
+  if (ImGui::RadioButton("ID", ui.language == "id")) ui.language = "id";
+  ImGui::SameLine();
+  if (ImGui::RadioButton("EN", ui.language == "en")) ui.language = "en";
+  ImGui::Separator();
 
-  if (ImGui::Button(s.Get("common.quit").c_str())) {
-    state.quit_requested = true;
+  if (!ui.notice.empty()) {
+    if (ui.notice_is_error) {
+      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", ui.notice.c_str());
+    } else {
+      ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", ui.notice.c_str());
+    }
+    ImGui::Separator();
+  }
+  if (ImGui::Button(s.Get("common.quit").c_str(), ImVec2(-1.0f, 0.0f))) {
+    ui.quit_requested = true;
   }
   ImGui::End();
 }

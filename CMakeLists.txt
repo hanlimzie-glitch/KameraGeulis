@@ -58,6 +58,7 @@ if(KG_BUILD_TESTS)
     src/kg_tests/landmark_test.cc
     src/kg_tests/strings_test.cc
     src/kg_tests/settings_test.cc
+    src/kg_tests/presets_test.cc
     src/kg_tests/face_anchors_test.cc
     src/kg_tests/face_detection_decode_test.cc
     src/kg_tests/face_mesh_decode_test.cc

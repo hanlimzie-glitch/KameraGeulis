@@ -62,3 +62,37 @@ TEST_CASE("unknown extra fields are ignored") {
   REQUIRE(s.FromJson(R"({"smoothing": 0.9, "future_field": {"nested": true}})"));
   REQUIRE(s.smoothing == 0.9f);
 }
+
+TEST_CASE("camera fields round-trip and clamp") {
+  kgcore::Settings a;
+  REQUIRE(a.camera_device == 0);
+  REQUIRE(a.capture_width == 1280);
+  REQUIRE(a.capture_height == 720);
+  REQUIRE(a.capture_fps == 30);
+  a.camera_device = 3;
+  a.capture_width = 640;
+  a.capture_height = 480;
+  a.capture_fps = 60;
+  const std::string path = TempPath();
+  REQUIRE(a.Save(path));
+  kgcore::Settings b;
+  REQUIRE(b.Load(path));
+  REQUIRE(b.camera_device == 3);
+  REQUIRE(b.capture_width == 640);
+  REQUIRE(b.capture_height == 480);
+  REQUIRE(b.capture_fps == 60);
+  std::remove(path.c_str());
+}
+
+TEST_CASE("camera fields clamp out-of-range and junk") {
+  kgcore::Settings s;
+  REQUIRE(s.FromJson(R"({"camera_device": 99, "capture_width": -5, "capture_height": 99999, "capture_fps": 1000})"));
+  REQUIRE(s.camera_device == 16);
+  REQUIRE(s.capture_width == 16);
+  REQUIRE(s.capture_height == 4320);
+  REQUIRE(s.capture_fps == 240);
+  kgcore::Settings s2;
+  REQUIRE(s2.FromJson(R"({"camera_device": "x", "capture_fps": "30"})"));
+  REQUIRE(s2.camera_device == 0);
+  REQUIRE(s2.capture_fps == 30);
+}

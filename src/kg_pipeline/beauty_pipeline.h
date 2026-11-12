@@ -37,6 +37,11 @@ class BeautyPipeline {
   int OutputWidth() const;
   int OutputHeight() const;
 
+  // Debug overlay (M2): per-stage timings (capture dipisah, diukur app).
+  // Isi detect/mesh dari provider (0 bila detector tidak jalan),
+  // track_ms dari FaceTracker. false hanya bila pipeline belum Init.
+  bool GetStageTimings(StageTimings* out) const;
+
   gpupixel::BeautyFaceFilter* BeautyFilter() const { return beauty_filter_.get(); }
   FaceTracker& Tracker() { return *tracker_; }
 

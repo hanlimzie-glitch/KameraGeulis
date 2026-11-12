@@ -1,4 +1,5 @@
 #include "camera_capture.h"
+#include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -6,6 +7,7 @@
 #include <propvarutil.h>
 #include <ks.h>
 #include <ksmedia.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -66,9 +68,143 @@ HRESULT SelectRgb32Output(IMFSourceReader* reader) {
   type->Release();
   return hr;
 }
+
+// Requests RGB32 output at the given size/rate. Returns true when the
+// camera accepted it; false -> caller must fall back (SelectRgb32Output).
+HRESULT SelectRgb32OutputAt(IMFSourceReader* reader, int width, int height,
+                            int fps) {
+  IMFMediaType* type = nullptr;
+  HRESULT hr = MFCreateMediaType(&type);
+  if (FAILED(hr)) return hr;
+  type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+  type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);  // BGRA byte order
+  type->SetUINT64(MF_MT_FRAME_SIZE,
+                  (static_cast<UINT64>(static_cast<UINT32>(width)) << 32) |
+                      static_cast<UINT32>(height));
+  type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+  if (fps > 0) {
+    type->SetUINT64(MF_MT_FRAME_RATE,
+                    (static_cast<UINT64>(static_cast<UINT32>(fps)) << 32) | 1u);
+  }
+  hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                   nullptr, type);
+  type->Release();
+  return hr;
+}
+
+std::string FriendlyName(IMFActivate* activate) {
+  LPWSTR name = nullptr;
+  UINT32 len = 0;
+  if (SUCCEEDED(activate->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                                             &name, &len)) && name) {
+    std::wstring ws(name);
+    CoTaskMemFree(name);
+    const int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()),
+                                      nullptr, 0, nullptr, nullptr);
+    if (n > 0) {
+      std::string out(n, '\0');
+      WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), out.data(), n,
+                          nullptr, nullptr);
+      return out;
+    }
+  }
+  return "Camera";
+}
 }  // namespace
 
-bool CameraCapture::Start(int device_index) {
+std::vector<VideoDeviceInfo> CameraCapture::EnumerateDevices() {
+  std::vector<VideoDeviceInfo> out;
+  MfStartup mf;
+  if (!mf.ok) return out;
+  IMFActivate** devices = nullptr;
+  UINT32 count = 0;
+  HRESULT hr = EnumerateDevices(&devices, &count);
+  if (FAILED(hr)) return out;
+  out.reserve(count);
+  for (UINT32 i = 0; i < count; ++i) {
+    VideoDeviceInfo info;
+    info.index = static_cast<int>(i);
+    info.name = FriendlyName(devices[i]);
+    out.push_back(std::move(info));
+    SafeRelease(devices[i]);
+  }
+  CoTaskMemFree(devices);
+  return out;
+}
+
+std::vector<VideoMode> CameraCapture::EnumerateModes(int device_index) {
+  std::vector<VideoMode> modes;
+  MfStartup mf;
+  if (!mf.ok) return modes;
+  IMFActivate** devices = nullptr;
+  UINT32 count = 0;
+  HRESULT hr = EnumerateDevices(&devices, &count);
+  if (FAILED(hr) || static_cast<UINT32>(device_index) >= count) {
+    if (devices) {
+      for (UINT32 i = 0; i < count; ++i) SafeRelease(devices[i]);
+      CoTaskMemFree(devices);
+    }
+    return modes;
+  }
+  IMFMediaSource* source = nullptr;
+  hr = devices[device_index]->ActivateObject(IID_PPV_ARGS(&source));
+  for (UINT32 i = 0; i < count; ++i) SafeRelease(devices[i]);
+  CoTaskMemFree(devices);
+  if (FAILED(hr)) return modes;
+
+  IMFAttributes* reader_attrs = nullptr;
+  MFCreateAttributes(&reader_attrs, 1);
+  if (reader_attrs) {
+    reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+  }
+  IMFSourceReader* reader = nullptr;
+  hr = MFCreateSourceReaderFromMediaSource(source, reader_attrs, &reader);
+  SafeRelease(reader_attrs);
+  if (FAILED(hr)) {
+    source->Shutdown();
+    SafeRelease(source);
+    return modes;
+  }
+  for (DWORD type_index = 0;; ++type_index) {
+    IMFMediaType* type = nullptr;
+    hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                    type_index, &type);
+    if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
+    GUID major{};
+    if (SUCCEEDED(type->GetGUID(MF_MT_MAJOR_TYPE, &major)) &&
+        IsEqualGUID(major, MFMediaType_Video)) {
+      UINT32 w = 0, h = 0;
+      if (SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &w, &h)) &&
+          w > 0 && h > 0) {
+        UINT32 num = 0, den = 0;
+        int fps = 0;
+        if (SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &num, &den)) &&
+            den > 0) {
+          fps = static_cast<int>((num + den / 2) / den);
+        }
+        VideoMode m{static_cast<int>(w), static_cast<int>(h), fps};
+        const bool dup =
+            std::any_of(modes.begin(), modes.end(), [&](const VideoMode& o) {
+              return o.width == m.width && o.height == m.height && o.fps == m.fps;
+            });
+        if (!dup) modes.push_back(m);
+      }
+    }
+    type->Release();
+  }
+  SafeRelease(reader);
+  source->Shutdown();
+  SafeRelease(source);
+  std::sort(modes.begin(), modes.end(), [](const VideoMode& a, const VideoMode& b) {
+    const int64_t pa = static_cast<int64_t>(a.width) * a.height;
+    const int64_t pb = static_cast<int64_t>(b.width) * b.height;
+    if (pa != pb) return pa > pb;
+    return a.fps > b.fps;
+  });
+  return modes;
+}
+
+bool CameraCapture::Start(int device_index, int width, int height, int fps) {
   if (running_.load()) return true;
 
   // Preflight: enumerate devices synchronously so the UI can report "no
@@ -97,7 +233,8 @@ bool CameraCapture::Start(int device_index) {
 
   queue_ = std::make_unique<BoundedQueue<Frame>>(2);
   running_.store(true);
-  thread_ = std::thread(&CameraCapture::CaptureThread, this, device_index);
+  thread_ = std::thread(&CameraCapture::CaptureThread, this, device_index, width,
+                        height, fps);
   return true;
 }
 
@@ -125,7 +262,8 @@ void CameraCapture::SetError(const char* fmt, ...) {
   Log(kTag, "%s", buf);
 }
 
-void CameraCapture::CaptureThread(int device_index) {
+void CameraCapture::CaptureThread(int device_index, int req_width, int req_height,
+                                  int req_fps) {
   MfStartup mf;
   if (!mf.ok) {
     SetError("MFStartup failed");
@@ -167,7 +305,16 @@ void CameraCapture::CaptureThread(int device_index) {
       goto cleanup_devices;
     }
 
-    hr = SelectRgb32Output(reader);
+    if (req_width > 0 && req_height > 0) {
+      hr = SelectRgb32OutputAt(reader, req_width, req_height, req_fps);
+      if (FAILED(hr)) {
+        Log(kTag, "requested mode %dx%d@%d not accepted (0x%08lx) — falling back to default RGB32",
+            req_width, req_height, req_fps, static_cast<unsigned long>(hr));
+      }
+    }
+    if (FAILED(hr) || req_width <= 0 || req_height <= 0) {
+      hr = SelectRgb32Output(reader);
+    }
     if (FAILED(hr)) {
       SetError("camera does not provide RGB32/BGRA output (0x%08lx); "
                "NV12 fallback not implemented yet",

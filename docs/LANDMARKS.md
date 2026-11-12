@@ -44,16 +44,22 @@ Sumber kebenaran checksum: `third_party/external_files.bzl` repo `google-ai-edge
 | `@mediapipe/face_mesh@0.4.1633559619` tarball (`/-/face_mesh-0.4.1633559619.tgz`) | `a65c9a7509560f29e574c026dc6a667d2154617eb3ba0c287db02350de0c116f` |
 | `face_mesh_solution_packed_assets.data` di dalamnya | `dbe5905c582c0462cdaea17e7e6ecea92edaa8cccc515c5e2e7291f2cbb5fb99` |
 | `facemesh_iris_faceflag_blaze` record @ offset 0 (panjang 2495952) | `883b7411747bac657c30c462d305d312e9dec6adbf8b85e2f5d8d722fca9455d` — **byte-identik dengan `face_landmark_with_attention.tflite` resmi** (`external_files.bzl` baris 223-226, sama dengan `modules/face_landmark/face_landmark_with_attention.tflite`) ✓ |
-| 468-pt mesh record @ offset 2495952 (panjang 1261272, dipakai v1) | `2b2f627418607684489e86dbe1293439a13a19f3e7761fe246a5a8584cfba559` — model lawas "facemesh-lite" (`facemesh_facecontours_faceflag_blaze`); **tidak ada di `external_files.bzl` main branch saat ini** (hanya ada varian iris/attention dan testdata). Provenance: paket npm Apache-2.0 (model card paket: Apache-2.0). Checksum record **kita sendiri terbitkan** di release `models-v1`. |
+| `face_landmark.tflite` record @ offset 2495952, berhenti di 3737848 (**panjang 1241896**, dipakai v1) | `c603fa6149219a3e9487dc9abd7a0c24474c77263273d24868378cdf40aa26d1` — model lawas "facemesh_facecontours_faceflag_blaze"; **tidak ada di `external_files.bzl` main branch saat ini** (hanya ada varian iris/attention dan testdata). Provenance: paket npm Apache-2.0 (model card paket: Apache-2.0). |
+| `geometry_pipeline_metadata_landmarks.binarypb` record @ offset 3737848, berhenti di 3757224 (panjang 19376) | `bdbcda96dfcb7da883da124aaa2c55dee49770d934f0fcc71747f8c21bdc75b4` — tidak dipakai v1 (metadata pipa GPU), diverifikasi hanya sebagai penguat rantai |
+| `face_detection_short_range.tflite` di dalam packed assets @ offset 3757224 (panjang 229032) | `3bc182eb9f33925d9e58b5c8d59308a760f4adea8f282370e428c51212c26633` — **identik dengan paket `@mediapipe/face_detection`** → dua sumber npm sepakat ✓ |
 
-### 2.3 Model ONNX hasil konversi (yang akan di-download build)
+Koreksi M1c (2026-11-12): dokumen versi awal menulis record mesh sebagai "panjang 1261272" dengan SHA `2b2f6274…` — itu sebenarnya `face_landmark.tflite` **ditambah 19376 B binarypb di belakangnya** (end offset keliru menunjuk 3757224). tf2onnx mengabaikan byte trailing sehingga konversi tetap berhasil; record yang benar adalah `c603fa61…` di atas. Pipeline CI (`scripts/models/prepare_sources.py`) sekarang memotong tepat sesuai offset dari metadata loader paket dan memverifikasi semua digest di atas — tidak ada lagi pencarakan manual.
 
-Keduanya dikonversi dari `.tflite` di atas dengan `tf2onnx==1.16.1` (MIT), opset 13, tanpa modifikasi bobot/graf (hanya Transpose/Cast/Const/Reshape fusion lipatan dari optimizer tf2onnx):
+### 2.3 Model ONNX hasil konversi (yang di-download build)
 
-| File ONNX | Sumber .tflite | SHA-256 ONNX (yang dipin di CMake) |
+Keduanya dikonversi dari `.tflite` di atas secara **otomatis di GitHub Actions** (workflow `Models`, `.github/workflows/models.yml`) oleh `scripts/models/prepare_sources.py` + `tf2onnx==1.17.0` / `tensorflow==2.17.1` / opset 15 — tanpa modifikasi bobot/graf (hanya Transpose/Cast/Const/Reshape fusion dari optimizer tf2onnx). Verifikasi I/O via onnxruntime CPU: nama & bentuk input/output dicek ketat (inference test lulus di run 43179962364). Digest di bawah adalah **keluaran CI** (bukan dari mesin dev) dan dipin di `ort_landmark_provider.cc`:
+
+Model di-upload ke release **`models-v1`** (workflow create-if-missing; asset published 2026-11-12 — `face_detection_short_range.onnx` 418.502 B + `face_mesh.onnx` 2.429.059 B). Download sisi klien terverifikasi SHA-256 di `ort_landmark_provider.cc` — pin tidak cocok → file dihapus → efek landmark nonaktif dengan pesan jujur.
+
+| File ONNX | Sumber .tflite | SHA-256 ONNX (pin di `ort_landmark_provider.cc`) |
 |---|---|---|
-| `face_detection_short_range.onnx` | npm face_detection (sha tflite `3bc1…` ✓) | `613ee7148e56c9d904ba672a7c6065f8c0179ea3c2cc3c451e9ddc6970ab536c` |
-| `face_mesh.onnx` | carve record 1 `2b2f…` (468-pt) | `5497a6c18f18c37ebf38b63b31e98a3f97ed1a7aedf86a882f4627e97a875e8d` |
+| `face_detection_short_range.onnx` | npm face_detection (sha tflite `3bc1…` ✓) | `82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d` |
+| `face_mesh.onnx` | carve `face_landmark.tflite` `c603fa61…` ✓ | `ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337` |
 
 I/O ONNX (diverifikasi dengan onnxruntime 1.31.1):
 - `face_detection_short_range.onnx`: input `input` `[1,128,128,3]` f32, range `[-1,1]` (letterbox, keep-aspect, zero border). Output `regressors` `[1,896,16]` (x,y,w,h + 6 keypoints ×2, ternormalisasi ke 128-px tensor), output `classificators` `[1,896,1]` (logit, apply sigmoid).
@@ -123,8 +129,8 @@ Catatan: implementasi final adalah C++ (di `kg_core/landmark/`) dengan matematik
 
 ## 5. Yang BELUM diverifikasi / pekerjaan maintainer
 
-1. **Upload 2 ONNX ke release `models-v1`** — terblokir dari sandbox (`uploads.github.com` koneksi EOF; `gh release create` berhasil membuat release kosong `442526549`, asset upload gagal). Harus dijalankan di mesin maintainer (perintah di §4.1). Sampai itu terjadi, M1b tidak bisa di-build hijau dengan model. Alternatif sementara untuk CI: `KAMERAGEULIS_MODELS_DIR` env var menunjuk folder model lokal (didokumentasikan di README build).
-2. **Reachability `github.com/.../releases/download/...` dari runner Windows CI** — belum dites (release asset belum ada; sandbox tidak bisa akses host uploads, tapi host download `github.com` sendiri tidak dites download 2.8 MB juga). Akan diverifikasi di M1b CI dengan cache `_models`.
+1. ~~Upload 2 ONNX ke release `models-v1`~~ — **SELESAI (M1c, 2026-11-12):** workflow `Models` mengunggah kedua ONNX ke release `models-v1` (run 43179962364 hijau; I/O diverifikasi onnxruntime di CI). Download first-run dari mesin bersih belum diverifikasi (tidak ada Windows+koneksi bebas di lingkungan pengembang) — first-run di mesin user bisa gagal dengan pesan jujur (efek landmark nonaktif) bila `github.com` tidak terjangkau; `KAMERAGEULIS_MODELS_DIR` bisa menunjuk folder model lokal.
+2. **Reachability `github.com/.../releases/download/...` dari runner Windows CI / mesin bersih** — belum dites end-to-end (asset sekarang sudah ada; download 2,8 MB dari sandbox tidak mungkin). Pertama-tama akan terjawab saat M2 artifact diuji di Windows nyata.
 3. **`face_mesh.onnx` (468, facecontours) tidak punya SHA-256 terbitan Google** — checksum record berasal dari tarball npm `a65c…` yang kita unduh; kita terbitkan checksum hasil carve. Risiko residual: mirror npm yang dikompromikan akan gagal di checksum tarball/record (berlapis: tgz → .data → record). Dapat diterima untuk proyek ini; didokumentasikan jujur.
 4. **Kualitas mesh 468** vs 478 (iris/attention): v1 **tidak punya** 10 titik iris & refinement bibir/mata dari with-Attention. Untuk efek v1 (slim, big eyes, lipstick, blush, chin, nose) 468 cukup; iris-tracking **bukan** bagian v1. Peningkatan masa depan: konversi with_attention ke runtime yang mendukung custom op (MediaPipe GPU delegate / TFLite) atau ONNX op kustom — didokumentasikan di `docs/ROADMAP.md` (dibuat nanti).
 5. **Performa CPU** belum diukur di hardware nyata (estimasi: detektor ~1–3 ms, mesh ~2–5 ms @ 720p CPU; BELUM DIVERIFIKASI).

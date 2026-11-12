@@ -57,4 +57,13 @@ const uint8_t* BeautyPipeline::OutputRGBA() const {
 }
 int BeautyPipeline::OutputWidth() const { return sink_ ? sink_->GetWidth() : 0; }
 int BeautyPipeline::OutputHeight() const { return sink_ ? sink_->GetHeight() : 0; }
+
+bool BeautyPipeline::GetStageTimings(StageTimings* out) const {
+  if (!out || !tracker_) return false;
+  bool ok = false;
+  if (tracker_->Provider()) ok = tracker_->Provider()->GetStageTimings(out);
+  else *out = StageTimings{};
+  out->track_ms = tracker_->LastTrackMs();
+  return true;
+}
 }  // namespace kgcore

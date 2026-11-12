@@ -1,4 +1,5 @@
 #include "kgcore/settings.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -15,7 +16,9 @@ bool Settings::operator==(const Settings& o) const {
          feq(lipstick, o.lipstick) && feq(blusher, o.blusher) &&
          mirror == o.mirror && virtual_camera == o.virtual_camera &&
          landmark_enabled == o.landmark_enabled && preset == o.preset &&
-         language == o.language;
+         language == o.language && camera_device == o.camera_device &&
+         capture_width == o.capture_width && capture_height == o.capture_height &&
+         capture_fps == o.capture_fps;
 }
 
 static float ClampUnit(const json& j, const char* key, float def) {
@@ -28,6 +31,12 @@ static float ClampUnit(const json& j, const char* key, float def) {
 static bool ClampBool(const json& j, const char* key, bool def) {
   if (!j.contains(key)) return def;
   try { return j.at(key).get<bool>(); } catch (const std::exception&) { return def; }
+}
+static int ClampInt(const json& j, const char* key, int def, int lo, int hi) {
+  if (!j.contains(key)) return def;
+  int v = def;
+  try { v = j.at(key).get<int>(); } catch (const std::exception&) { return def; }
+  return std::clamp(v, lo, hi);
 }
 static std::string ClampString(const json& j, const char* key,
                                const std::string& def, size_t max_len) {
@@ -55,6 +64,10 @@ bool Settings::FromJson(const std::string& text) {
   preset = ClampString(j, "preset", preset, 32);
   language = ClampString(j, "language", language, 8);
   if (language != "id" && language != "en") language = "id";
+  camera_device = ClampInt(j, "camera_device", camera_device, 0, 16);
+  capture_width = ClampInt(j, "capture_width", capture_width, 16, 7680);
+  capture_height = ClampInt(j, "capture_height", capture_height, 16, 4320);
+  capture_fps = ClampInt(j, "capture_fps", capture_fps, 1, 240);
   return true;
 }
 
@@ -71,6 +84,10 @@ std::string Settings::ToJson() const {
   j["landmark_enabled"] = landmark_enabled;
   j["preset"] = preset;
   j["language"] = language;
+  j["camera_device"] = camera_device;
+  j["capture_width"] = capture_width;
+  j["capture_height"] = capture_height;
+  j["capture_fps"] = capture_fps;
   return j.dump(2);
 }
 

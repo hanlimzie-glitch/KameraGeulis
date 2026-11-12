@@ -76,6 +76,31 @@ class ILandmarkProvider { public: virtual ~ILandmarkProvider(); virtual bool Ava
 - `NullLandmarkProvider` (fallback bila model tidak tersedia/download gagal): `Available()==false`, semua efek landmark UI disabled dengan tooltip jujur.
 - `SyntheticLandmarkProvider` (test/demo `--selftest`): wajah prosedural statis untuk CI logs/screenshot.
 
+### 5.1 Cadence detektor wajah (M1c — temuan & keputusan)
+
+**Temuan (sebelum M1c):** `OrtLandmarkProvider::Track` menjalankan BlazeFace **setiap frame** — letterbox 128² + inference + decode 896 anchor + NMS — disusul mesh pada ROI. Itu biaya CPU terbesar pipeline (detektor ≈ mesh), padahal posisi wajah antar-frame hanya bergeser sedikit.
+
+**Keputusan (diimplementasikan di `ort_landmark_provider.{h,cc}`):** detektor dijalankan **hanya saat wajah hilang** — bukan pada cadence tetap:
+
+| Momen | Perilaku |
+|---|---|
+| Frame pertama / `have_prev_roi_ == false` | deteksi penuh (letterbox → infer → decode → NMS) |
+| Mesh faceflag ≤ 0 atau inference mesh gagal — 1× berturut-turut | tracking masih dibolehkan 1 frame (fallback ke ROI sebelumnya) |
+| **2 frame invalid berturut-turut** ("lost streak") | ROI dibatalkan (`have_prev_roi_ = false`) → deteksi lagi di frame berikutnya |
+| Tracking normal | mesh di-crop dari **ROI yang diwariskan dari frame sebelumnya** |
+| Safety | re-deteksi setelah **300 frame** tanpa deteksi (~10 dtk @ 30 fps) untuk mengikat drift halus yang tidak memicu faceflag |
+| Wajah tidak ada di frame | `have_prev_roi_ == false` → detektor tetap jalan tiap frame (mode pencarian) — memang diinginkan |
+
+**ROI tracking dari frame sebelumnya** (bukan detektor): center ROI diikat ke **centroid landmark 468 frame sebelumnya** ditambah offset konstan yang dikunci saat deteksi (`roi_center_offset_`, sehingga posisi ROI transisi dari mode deteksi → tracking **tidak melompat**); sudut ROI di-refresh tiap frame dari sumbu mata (indeks MP kanan 33/133, kiri 362/263) dalam ruang piksel; sisi ROI (1,5× ukuran terbesar kotak deteksi) dipertahankan sampai deteksi berikutnya. Landmark disimpan **mentah** (sebelum smoothing OneEuro) agar anchor tidak dipengaruhi filter.
+
+**Telemetri:** `frames_since_detect_` diekspos via `StageTimings` (`GetStageTimings`) → overlay debug (M2) menampilkannya bersama `detect_ms` / `mesh_ms` / `track_ms`.
+
+**Keterbatasan (jujur):**
+1. Tidak ada model gerak (Kalman/optical flow) — ROI mengikuti dengan **lag 1 frame** (titik pusat dari frame lalu); pada 30 fps itu ≤ ~33 ms gerakan.
+2. Skala ROI tidak berubah di antara deteksi — wajah yang mendekat/menjauh ekstrem dapat memicu faceflag → 2 strike → deteksi ulang (mekanisme yang sama).
+3. Rotasi kepala besar dapat memutus sumbu mata sesaat; sama, ditangani lost-streak + re-deteksi.
+4. **Belum diverifikasi di Windows nyata** (tidak ada GPU/webcam di CI/sandbox) — perilaku flag/edge case hanya teruji melalui unit test matematika (ROI round-trip, anchor, decode), bukan pada wajah asli.
+
 ## 6. Efek (status di STATUS.md)
 
 **Built-in GPUPixel (slider 0–100):** skin smoothing, whitening, face slim, big eyes, lipstick, blush.

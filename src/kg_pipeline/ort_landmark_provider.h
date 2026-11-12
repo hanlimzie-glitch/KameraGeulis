@@ -28,6 +28,7 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   bool Available() const override;
   const char* Name() const override { return "ort-cpu"; }
   LandmarkSet Track(const Frame& frame) override;
+  bool GetStageTimings(StageTimings* out) const override;
 
   // Human-readable reason when Available()==false ("models missing",
   // "download failed (…)", "hash mismatch …", "session error …", "ok").
@@ -43,6 +44,7 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   // kSafetyRedetectFrames tracked frames.
   static constexpr int kSafetyRedetectFrames = 300;  // ~10 s @ 30 fps
 
+  LandmarkSet TrackImpl_(const Frame& frame);  // Track() = wrapper ber-timing
   bool DetectionStage_(const Frame& frame, AlignedRoi* roi_out, float* face_score_out);
   AlignedRoi TrackRoiFromPreviousLandmarks_(int src_w, int src_h) const;
   void NoteMeshOutcome_(const LandmarkSet& result, const AlignedRoi& roi_used,
@@ -72,5 +74,6 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   int lost_streak_ = 0;          // consecutive invalid frames (flag<=0 / inference failure)
   int frames_since_detect_ = 0;  // telemetry: frames tracked without detector
   bool pending_roi_anchor_ = false;  // true after a detection; offset set on next mesh ok
+  StageTimings stage_;               // debug-overlay per-stage timings
 };
 }  // namespace kgcore

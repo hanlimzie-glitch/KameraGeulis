@@ -20,16 +20,16 @@ cmake --build build --config Release -j
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Hasil: `build\Release\KameraGeulis.exe` (subsistem GUI). `onnxruntime.dll` (dan `onnxruntime_providers_shared.dll` bila ada) otomatis disalin ke folder yang sama via POST_BUILD. Runtime GPUPixel (`gpupixel.dll`, `glfw3.dll`) ikut di `build\Release\` melalui build GPUPixel shared.
+Hasil: `build\Release\KameraGeulis.exe` (subsistem GUI). `onnxruntime.dll` (dan `onnxruntime_providers_shared.dll` bila ada) otomatis disalin ke folder yang sama via POST_BUILD. Runtime GPUPixel (`gpupixel.dll`) ikut di `build\Release\` melalui build GPUPixel shared. Artifact CI juga membundel `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll` (app-local CRT — tidak perlu install "Visual C++ Redistributable"); daftar DLL lengkap + alasan `/MD` (bukan `/MT`): `docs/REDISTRIBUTABLES.md`.
 
 ## Model landmark (opsional, first-run)
 
 Efek landmark memakai dua model ONNX (Apache-2.0, Google MediaPipe, hasil konversi tf2onnx), **tidak dibundel di repo**. Saat aplikasi pertama kali berjalan, `OrtLandmarkProvider` mengunduh dari rilis GitHub `models-v1` ke `%LOCALAPPDATA%\KameraGeulis\models` dan memverifikasi SHA-256 yang tertanam di kode:
 
-- `face_detection_short_range.onnx` — sha256 `613ee7148e56c9d904ba672a7c6065f8c0179ea3c2cc3c451e9ddc6970ab536c`
-- `face_mesh.onnx` — sha256 `5497a6c18f18c37ebf38b63b31e98a3f97ed1a7aedf86a882f4627e97a875e8d`
+- `face_detection_short_range.onnx` — sha256 `82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d`
+- `face_mesh.onnx` — sha256 `ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337`
 
-**Status 2026-11-12: rilis `models-v1` belum berisi aset** (upload `gh release upload models-v1 face_detection_short_range.onnx face_mesh.onnx` harus dijalankan maintainer di mesin yang bisa akses GitHub; sandbox tidak bisa). Sampai itu terjadi, download gagal → efek landmark nonaktif dengan pesan jujur di UI/log; aplikasi tetap jalan normal.
+**Status 2026-11-12 (M1c): rilis `models-v1` SUDAH berisi kedua aset** — diunduh oleh workflow `Models` (`.github/workflows/models.yml`) dari sumber npm ter-pin, dikonversi di CI (tf2onnx 1.17.0/opset 15), diverifikasi onnxruntime, di-upload dengan `--clobber`. Digest yang dipin di kode = digest keluaran CI (lihat `docs/LANDMARKS.md` §2.3). First-run dari mesin bersih **belum** diverifikasi (butuh koneksi ke GitHub; unduh ~2,8 MB) — bila gagal, efek landmark nonaktif dengan pesan jujur di UI/log; aplikasi tetap jalan normal.
 
 Untuk CI/dev tanpa internet: arahkan `KAMERAGEULIS_MODELS_DIR` ke folder yang berisi kedua file di atas (harus lolos SHA-256, tidak diunduh ulang).
 

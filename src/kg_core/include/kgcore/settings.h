@@ -16,6 +16,10 @@ struct Settings {
   bool landmark_enabled = true;  // honored only when a provider is available
   std::string preset = "Natural";   // Natural|Soft|Glam|ClearSkin|Custom
   std::string language = "id";      // id|en
+  int camera_device = 0;            // MF device index
+  int capture_width = 1280;         // requested capture mode (best effort)
+  int capture_height = 720;
+  int capture_fps = 30;
 
   bool operator==(const Settings& o) const;
   bool operator!=(const Settings& o) const { return !(*this == o); }
