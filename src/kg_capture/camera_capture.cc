@@ -42,7 +42,7 @@ struct MfStartup {
 
 // Enumerates video capture devices; returns count (devices must be freed by
 // caller via SafeRelease each). nullptr on failure.
-HRESULT EnumerateDevices(IMFActivate*** out_devices, UINT32* out_count) {
+HRESULT EnumerateDevicesRaw(IMFActivate*** out_devices, UINT32* out_count) {
   *out_devices = nullptr;
   *out_count = 0;
   IMFAttributes* attrs = nullptr;
@@ -118,7 +118,7 @@ std::vector<VideoDeviceInfo> CameraCapture::EnumerateDevices() {
   if (!mf.ok) return out;
   IMFActivate** devices = nullptr;
   UINT32 count = 0;
-  HRESULT hr = EnumerateDevices(&devices, &count);
+  HRESULT hr = EnumerateDevicesRaw(&devices, &count);
   if (FAILED(hr)) return out;
   out.reserve(count);
   for (UINT32 i = 0; i < count; ++i) {
@@ -138,7 +138,7 @@ std::vector<VideoMode> CameraCapture::EnumerateModes(int device_index) {
   if (!mf.ok) return modes;
   IMFActivate** devices = nullptr;
   UINT32 count = 0;
-  HRESULT hr = EnumerateDevices(&devices, &count);
+  HRESULT hr = EnumerateDevicesRaw(&devices, &count);
   if (FAILED(hr) || static_cast<UINT32>(device_index) >= count) {
     if (devices) {
       for (UINT32 i = 0; i < count; ++i) SafeRelease(devices[i]);
@@ -211,7 +211,7 @@ bool CameraCapture::Start(int device_index, int width, int height, int fps) {
   // camera" immediately instead of failing silently on a worker thread.
   IMFActivate** devices = nullptr;
   UINT32 device_count = 0;
-  HRESULT hr = EnumerateDevices(&devices, &device_count);
+  HRESULT hr = EnumerateDevicesRaw(&devices, &device_count);
   bool any = SUCCEEDED(hr) && device_count > 0 &&
              device_index >= 0 &&
              static_cast<UINT32>(device_index) < device_count;
@@ -273,7 +273,7 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
 
   IMFActivate** devices = nullptr;
   UINT32 device_count = 0;
-  HRESULT hr = EnumerateDevices(&devices, &device_count);
+  HRESULT hr = EnumerateDevicesRaw(&devices, &device_count);
   if (FAILED(hr) || static_cast<UINT32>(device_index) >= device_count) {
     SetError("device disappeared between preflight and open (hr=0x%08lx)",
              static_cast<unsigned long>(hr));
