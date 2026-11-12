@@ -1,6 +1,6 @@
 # TESTING-WINDOWS.md — Menguji KameraGeulis (artifact CI) di Windows nyata
 
-**Tanggal:** 2026-11-12 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir:** [43184507751](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184507751) · **Kedaluwarsa:** 2026-11-26
+**Tanggal:** 2026-11-12 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2c, dengan smoke test):** [43192212350](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350) · **Kedaluwarsa:** 2026-11-26
 
 > Dokumen ini jujur: artifact **belum pernah dijalankan di Windows mana pun** sebelum kamu mengujinya.
 > Semua yang di bawah "Checklist" adalah hal yang **perlu kamu verifikasi**, bukan jaminan yang sudah hijau.
@@ -16,13 +16,13 @@
 ## 2. Unduh & ekstrak
 
 **Cara A — via browser (paling mudah):**
-1. Buka <https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184507751>
+1. Buka <https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350>
 2. Scroll ke bagian **Artifacts** di bawah → klik `kamerageulis-m2-windows-x64` → unduh zip.
 3. Ekstrak zip ke folder mana pun (mis. `C:\KameraGeulis\`).
 
 **Cara B — via gh CLI:**
 ```bat
-gh run download 43184507751 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D C:\KameraGeulis
+gh run download 43192212350 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D C:\KameraGeulis
 ```
 
 **Isi folder hasil ekstrak:**
@@ -40,7 +40,16 @@ gh run download 43184507751 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-
    ```
    lalu buka `log.txt`.
 
-## 4. Checklist pengujian (urut)
+## 4. Diagnosis dump force-close (artifact M2c)
+
+Artifact M2 dulu force-close di PC kamu. Artifact ini (M2c) menambahkan logging + isolasi. Urutan:
+
+1. `KameraGeulis.exe --selftest` → catat exit code (0 = sehat; selain itu lihat `docs/TROUBLESHOOTING.md` §4).
+2. `KameraGeulis.exe --safe` → apakah window + UI muncul (gradien sintetis, tanpa kamera/ORT/GPUPixel)?
+3. `KameraGeulis.exe` → normal.
+4. Di semua kasus, log tersimpan di `%APPDATA%\KameraGeulis\log.txt` — kirim isinya. Kalau crash, file `crash-*.dmp` muncul di folder yang sama — kirim juga. Faulting module: Event Viewer → Application → Event ID 1000 (lihat TROUBLESHOOTING.md §1).
+
+## 5. Checklist pengujian (urut)
 
 | # | Aksi | Yang diharapkan | Hasil (isi) |
 |---|------|-----------------|-------------|

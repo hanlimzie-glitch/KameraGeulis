@@ -5,7 +5,7 @@
 
 [![CI](https://github.com/hanlimzie-glitch/KameraGeulis/actions/workflows/build.yml/badge.svg)](https://github.com/hanlimzie-glitch/KameraGeulis/actions/workflows/build.yml)
 
-> **Status:** M2 (UI ImGui lengkap: preview besar, panel 6 tab — Kulit/Wajah/Makeup/Preset/Kamera/Info, slider smoothing & whitening terhubung live, preset Natural/Soft/Glam/ClearSkin, picker kamera MF + resolusi/fps, debug overlay F3 (468 titik + bbox + timing per stage), settings JSON otomatis, ID/EN) — **CI hijau** (run 43183762692, artifact `kamerageulis-m2-windows-x64`, ~7,1 MB). Belum diverifikasi di Windows nyata. **Efek landmark tetap nonaktif** (pemetaan 468→Mars tidak kredibel; lihat [docs/LANDMARKS.md](docs/LANDMARKS.md) §8). Lihat [STATUS.md](STATUS.md) untuk tabel fitur yang jujur dan [BUILD.md](BUILD.md) untuk langkah build + cara mengunduh artifact.
+> **Status:** M2 (UI ImGui lengkap: preview besar, panel 6 tab — Kulit/Wajah/Makeup/Preset/Kamera/Info, slider smoothing & whitening terhubung live, preset Natural/Soft/Glam/ClearSkin, picker kamera MF + resolusi/fps, debug overlay F3 (468 titik + bbox + timing per stage), settings JSON otomatis, ID/EN) — **CI hijau** (run 43192212350 — termasuk smoke test `--selftest`; artifact `kamerageulis-m2-windows-x64`, ~7,5 MB). Belum diverifikasi di Windows nyata. **Efek landmark tetap nonaktif** (pemetaan 468→Mars tidak kredibel; lihat [docs/LANDMARKS.md](docs/LANDMARKS.md) §8). Lihat [STATUS.md](STATUS.md) untuk tabel fitur yang jujur dan [BUILD.md](BUILD.md) untuk langkah build + cara mengunduh artifact.
 
 ## Bahasa Indonesia
 

@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-12 (M2 hijau di CI — run 43183762692, artifact `kamerageulis-m2-windows-x64` (~7,1 MB); M2 belum diverifikasi di Windows nyata)**
+Terakhir diperbarui: **2026-11-12 (M2c hijau di CI — run 43192212350, artifact `kamerageulis-m2-windows-x64` (7.510.560 B) termasuk step smoke test `--selftest`; crash di PC pengguna masih belum terdiagnosis)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -12,7 +12,8 @@ Legenda status:
 | M0 | Riset + capability check + arsitektur | ✅ | ✅ capability workflow hijau (vswhere/cmake/git) | n/a | Log Actions tidak bisa dibaca dari sandbox (lihat di bawah) |
 | M1 | CMake + CI build window + GPUPixel + camera preview | 🔨 | ✅ (run 43166017897) | ⬜ | Runtime GL/MF BELUM diverifikasi (tidak ada GPU/webcam di CI/sandbox); artifact M1: `kamerageulis-m1-windows-x64` (581 KB) |
 | M1b | Pipeline landmark (ORT CPU, 468 pt) + kg_core decode/ROI/OneEuro | 🔨 | ✅ (run 43174282611) | ⬜ | Windows runtime belum diverifikasi di mesin nyata; GPUPixel landmark filters **tidak di-wire** (pemetaan 468→Mars tidak kredibel, docs/LANDMARKS.md §8); kg_core hijau di Linux (45 TC / 8319 assertions) |
-| M2 | UI ImGui lengkap + slider skin live + debug overlay | ✅ (dikode) | ✅ (run 43183762692) | ⬜ | belum diverifikasi di Windows nyata (GPU/webcam/capture headless di CI); snapshot PNG belum |
+| M2 | UI ImGui lengkap + slider skin live + debug overlay | ✅ (dikode) | ✅ (run 43183762692) | ⬜ (crash: force-close saat startup) | belum diverifikasi di Windows nyata; snapshot PNG belum |
+| M2c | Stabilitas startup: log file flush/baris, crash handler + dump + MessageBox, preload DLL app-local + OrtGetApiBase, GL fallback 3 tahap, `--safe`, `--selftest` + CI smoke test | ✅ | ✅ (run 43192212350 — termasuk step smoke test `--selftest` hijau) | ⬜ | belum diverifikasi di PC pengguna; penyebab force-close belum diketahui — setelah M2c, kegagalan tercatat di log.txt/dump, bukan keluar diam-diam |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -42,6 +43,35 @@ Legenda status:
 3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
 4. Setiap milestone CI meng-upload artifact (`kamerageulis-mN-windows-x64`; M1b: `kamerageulis-m1b-windows-x64`). Log mentah Actions tidak bisa diunduh dari sandbox — error MSVC dibaca via anotasi `::error::` (workflow memancarkannya; lihat `.github/workflows/build.yml` langkah Build).
 5. Detil fix CI selalu dianotasikan di commit message fix (analisis + akar masalah + perbaikan).
+
+## M2c — detail (2026-11-12)
+
+**Latar:** artifact M2 langsung *force-close* saat dibuka di PC pengguna — tanpa pesan apa pun. M2c bukan perbaikan tebakan, melainkan (a) agar crash berikutnya **tercatat** (log + dump + faulting module + MessageBox), dan (b) **mengisolasi** tahap yang gagal lewat `--selftest` (DLL/ORT/model), `--safe` (window/UI tanpa kamera/ORT/GPUPixel), dan normal.
+
+**Artifact terbaru:** `kamerageulis-m2-windows-x64` — **CI hijau, run [43192212350](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350)** (Configure → Build → Test → Package → **Smoke test** → Upload ✅; 7.510.560 B; kedaluwarsa 2026-11-26).
+
+**Yang diverifikasi di CI (bukan di Windows nyata):**
+- `--selftest` **exit 0** di runner windows-latest dari folder artifact yang dipaketkan (`dist/`, bukan build dir): preload `onnxruntime.dll` + `gpupixel.dll` dari folder app-local (path modul aktual dicatat di log), `OrtGetApiBase()->GetVersionString()` jalan, kedua model `models-v1` diunduh (`gh release download`) lalu dimuat ORT CPU dengan verifikasi SHA-256 + ukuran, satu inferensi per model dengan output shape sesuai pin (BlazeFace `regressors[1,896,16]`, `classificators[1,896]`; FaceMesh `conv2d_21[1404]`, `conv2d_31[1]`), semua finite. Model dihapus dari `dist/` sebelum upload artifact (tidak ikut).
+- Log `%APPDATA%\KameraGeulis\log.txt` ber-timestamp per baris, di-flush tiap baris — di runner terbukti berisi jejak ini (dibaca di CI step).
+- Crash handler: **belum pernah terpicu di CI** (tidak ada crash); sintaks/struktur benar, perilakunya belum diuji di kasus nyata (dump validitas, isi MessageBox).
+- Linux: `kg_core` tests hijau (log.h baru backward-compatible).
+
+**Yang BELUM diverifikasi (jujur):**
+- App normal (`KameraGeulis.exe`) tetap **belum pernah berhasil dibuka** di Windows nyata mana pun — penyebab force-close awal **belum diketahui**. M2c hanya menjamin penyebabnya kini tercatat + bisa diisolasi.
+- GL context 3 tahap + log `GL_VERSION/RENDERER` — belum pernah jalan di mesin nyata.
+- `--safe` dan `--selftest` di PC pengguna — belum dicoba; ini langkah diagnosis berikutnya.
+- GPUPixel init di mesin nyata; MF capture; UI.
+- GPU/VRAM: `--selftest` tidak menyentuh GL sama sekali.
+
+**Untuk pengembang/pemilik (urut):**
+```bat
+KameraGeulis.exe --selftest   :: exit 0 = DLL+ORT+model OK; kode lain → docs/TROUBLESHOOTING.md §4
+KameraGeulis.exe --safe       :: window+UI hidup? tanpa kamera/ORT/GPUPixel
+KameraGeulis.exe              :: normal
+```
+Kirim `%APPDATA%\KameraGeulis\log.txt` + `crash-*.dmp` (bila ada) + faulting module dari Event Viewer (TROUBLESHOOTING.md §1).
+
+**Catatan proses CI:** 1 run merah (43191736110 — `glfwGetError` signature GLFW 3.3 salah + `RunSelftest` tidak dideklarasikan; diperbaiki a7e3721), lalu hijau penuh termasuk smoke test. Ini sekaligus membuktikan step smoke test bekerja (kalau `--selftest` gagal exit, job merah).
 
 ## M2 — detail (2026-11-12)
 
