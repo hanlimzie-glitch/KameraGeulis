@@ -1,13 +1,18 @@
 # Symbolizes an RVA in gpupixel.dll against the linker .map file produced by
 # the CI build (target_compile_options /Zi + target_link_options /DEBUG /MAP).
 #
-# Parses ONLY the "Publics by Value" section of the map (up to the first blank
-# line after entries begin). Two address shapes are accepted:
-#   A) seg:offset  sym  abs16  [rva]     e.g. 0001:00001000 ?sym@@... 0000000140001000 1000
-#   B) abs16       sym  abs16  [rva]     e.g. 0000000140001000 ?sym@@... 0000000140001000 1000
+# Parses BOTH "Publics by Value" and "Static symbols" sections (a non-public
+# function such as a COMDAT member can live in the latter). Two address shapes
+# are accepted per entry line:
+#   A) seg:offset  sym  abs16  [rva]   e.g. 0001:00001000 ?sym@@... 0000000140001000 1000
+#   B) abs16       sym  abs16  [rva]   e.g. 0000000140001000 ?sym@@... 0000000140001000 1000
 # The explicit "Rva" column (small hex, when present) is preferred; otherwise
 # RVA = abs16 - "Preferred load address". The containing function is the last
-# public with RVA <= target.
+# symbol with RVA <= target.
+#
+# CAVEAT: Release links with /OPT:ICF - identical functions fold, so the
+# reported name can be an ICF alias of the real one.
+#
 # Exit: 0 = resolved (prints symbol + ::notice::) - 2 = unresolved (::error::)
 param(
   [Parameter(Mandatory = $true)][string]$MapPath,
@@ -31,18 +36,18 @@ foreach ($l in $lines) {
 if ($preferred) { Write-Host ("Preferred load address: 0x{0:X}" -f $preferred) }
 Write-Host ("Target RVA: 0x{0:X}" -f $Rva)
 
-# --- slice the "Publics by Value" section ---
-$hdr = -1
-for ($i = 0; $i -lt $lines.Count; $i++) {
-  if ($lines[$i] -match 'Publics by Value') { $hdr = $i; break }
-}
-if ($hdr -lt 0) { Write-Host "::error::'Publics by Value' section not found in $MapPath"; exit 2 }
-
+# --- walk the whole map, parsing Publics + Static sections ---
+# NOTE: never name a local $rva - PowerShell variables are case-insensitive
+# and $rva would clobber the $Rva parameter (that bug once symbolized
+# against the last entry instead of the requested RVA).
 $entries = New-Object System.Collections.Generic.List[object]
-for ($i = $hdr + 1; $i -lt $lines.Count; $i++) {
-  $l = $lines[$i]
-  if ($l -match '^\s*$') { if ($entries.Count -gt 0) { break } else { continue } }
-  if ($l -match 'Static symbols|Section Allocation|^Start\s+Length') { break }
+$mode = 'none'
+foreach ($l in $lines) {
+  if ($l -match 'Publics by Value') { $mode = 'publics'; continue }
+  if ($l -match 'Static symbols')    { $mode = 'static';  continue }
+  if ($l -match 'Finished symbol|^Libraries|^Section Allocation|^Start\s+Length') { $mode = 'none'; continue }
+  if ($mode -eq 'none') { continue }
+
   $t = $l.Trim() -split '\s+'
   if ($t.Count -lt 3) { continue }
   # t[0] = seg:offset or abs16 - must look like an address
@@ -55,10 +60,7 @@ for ($i = $hdr + 1; $i -lt $lines.Count; $i++) {
   $abs = $null
   if ($t[2] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[2], 16) }
   elseif ($t[0] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[0], 16) }
-  # t[3] = explicit Rva column (optional, small hex).
-  # NOTE: never name this $rva - PowerShell variables are case-insensitive
-  # and $rva would clobber the $Rva parameter (that bug once symbolized
-  # against the last entry instead of the requested RVA).
+  # t[3] = explicit Rva column (optional, small hex)
   $entryRva = $null
   if ($t.Count -ge 4 -and $t[3] -match '^[0-9A-Fa-f]{1,8}$') {
     $entryRva = [Convert]::ToUInt64($t[3], 16)
@@ -66,27 +68,44 @@ for ($i = $hdr + 1; $i -lt $lines.Count; $i++) {
     if ($abs -ge $preferred) { $entryRva = $abs - $preferred }
   }
   if ($entryRva -eq $null) { continue }
-  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva })
+  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva; Section = $mode })
 }
-Write-Host ("publics entries parsed: {0}" -f $entries.Count)
+$pub = @($entries | Where-Object Section -eq 'publics').Count
+$sta = @($entries | Where-Object Section -eq 'static').Count
+Write-Host ("symbols parsed: {0} (publics {1}, static {2})" -f $entries.Count, $pub, $sta)
 if ($entries.Count -eq 0) {
-  Write-Host "::error::no publics parsed from $MapPath - cannot symbolize RVA"
+  Write-Host "::error::no symbols parsed from $MapPath - cannot symbolize RVA"
   exit 2
 }
 
 $target = [uint64]$Rva
 $best = $null
-foreach ($e in $entries) {
-  if ($e.Rva -le $target -and ($null -eq $best -or $e.Rva -gt $best.Rva)) { $best = $e }
+$above = $null
+foreach ($e in ($entries | Sort-Object Rva)) {
+  if ($e.Rva -le $target) { $best = $e }
+  elseif ($above -eq $null) { $above = $e }
 }
 if (-not $best) {
-  Write-Host ("::error::no publics entry at or below RVA 0x{0:X} - cannot resolve" -f $Rva)
+  Write-Host ("::error::no symbol at or below RVA 0x{0:X} - cannot resolve" -f $Rva)
   exit 2
 }
 
-Write-Host ("CONTAINING FUNCTION (last public at or below RVA): {0}  (starts at RVA 0x{1:X})" -f $best.Sym, $best.Rva)
-Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1}" -f $Rva, $best.Sym)
+# Extra evidence: where do the known crash-candidate functions start?
+$probe = @($entries | Where-Object { $_.Sym -match 'DoRender|BeautyFaceUnitFilter' } |
+           Sort-Object Rva | Select-Object -First 6)
+foreach ($p in $probe) {
+  Write-Host ("probe: {0}  RVA 0x{1:X}  [{2}]" -f $p.Sym, $p.Rva, $p.Section)
+}
+
+Write-Host ("CONTAINING FUNCTION (last symbol at/below RVA): {0}  (starts RVA 0x{1:X} [{2}])" -f $best.Sym, $best.Rva, $best.Section)
+if ($above) { Write-Host ("next symbol above: {0}  (RVA 0x{1:X})" -f $above.Sym, $above.Rva) }
+$probeNote = ''
+if ($probe.Count -gt 0) {
+  $probeNote = '; probes: ' + (($probe | ForEach-Object { '{0}@0x{1:X}' -f ($_.Sym -replace '^.*::', ''), $_.Rva }) -join ', ')
+}
+Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]{4}" -f $Rva, $best.Sym, $best.Section, $best.Rva, $probeNote)
+
 # window around the RVA for manual cross-check
-$entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x200) -and $_.Rva -le ($target + 0x200) } |
-  ForEach-Object { Write-Host ("  RVA 0x{0:X}  {1}" -f $_.Rva, $_.Sym) }
+$entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x400) -and $_.Rva -le ($target + 0x400) } |
+  ForEach-Object { Write-Host ("  RVA 0x{0:X}  [{1}]  {2}" -f $_.Rva, $_.Section, $_.Sym) }
 exit 0
