@@ -42,6 +42,12 @@ void BeautyPipeline::Shutdown() {
   initialized_ = false;
 }
 
+void BeautyPipeline::SetBeautyStrength(float smoothing, float whitening) {
+  if (!beauty_filter_) return;
+  beauty_filter_->SetBlurAlpha(smoothing);
+  beauty_filter_->SetWhite(whitening);
+}
+
 void BeautyPipeline::ProcessFrame(const Frame& frame) {
   if (!initialized_) return;
   tracker_->Track(frame);

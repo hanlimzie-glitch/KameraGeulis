@@ -328,10 +328,7 @@ int RunApp() {
     int out_w = 0, out_h = 0;
     if (have_frame) {
       // Live-apply the two global beauty parameters (cheap; idempotent).
-      if (auto* beauty = pipeline.BeautyFilter()) {
-        beauty->SetBlurAlpha(ui.smoothing);
-        beauty->SetWhite(ui.whitening);
-      }
+      pipeline.SetBeautyStrength(ui.smoothing, ui.whitening);
       pipeline.ProcessFrame(frame);
       kg::StageTimings st;
       if (pipeline.GetStageTimings(&st)) {

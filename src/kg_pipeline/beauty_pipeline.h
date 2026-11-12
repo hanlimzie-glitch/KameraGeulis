@@ -33,6 +33,9 @@ class BeautyPipeline {
   // OutputRGBA() (valid until the next ProcessFrame call).
   void ProcessFrame(const Frame& frame);
 
+  // Live-apply the two global beauty parameters ([0,1] each); idempotent.
+  void SetBeautyStrength(float smoothing, float whitening);
+
   const uint8_t* OutputRGBA() const;
   int OutputWidth() const;
   int OutputHeight() const;
