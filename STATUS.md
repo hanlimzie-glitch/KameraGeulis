@@ -45,7 +45,7 @@ Legenda status:
 
 ## M2 — detail (2026-11-12)
 
-**Artifact:** `kamerageulis-m2-windows-x64` — **CI hijau, run [43183762692](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43183762692)** (Linux unit tests ✅ 37 detik; Windows x64 Release: Configure → Build → Test → Package → Upload ✅). Ukuran ~7,1 MB (7.488.666 byte). Kedaluwarsa artifact: **2026-11-26**.
+**Artifact:** `kamerageulis-m2-windows-x64` — **CI hijau penuh** pada run [43183762692](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43183762692) (Configure → Build → Test → Package → Upload ✅, 7.488.666 byte) dan di-rebuild identik untuk commit docs terakhir (run [43184275535](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184275535), 7.491.609 byte). Kedaluwarsa: **2026-11-26**. Utamakan mengunduh dari run terakhir (43184275535); perintah di bawah memakai run terakhir.
 
 **Isi artifact** (diverifikasi dari langkah Package/Upload CI, bukan unduhan sandbox — unduhan dari sandbox gagal di blob storage; isi persis sesuai `dist/` di workflow): `KameraGeulis.exe`, `gpupixel.dll`, `onnxruntime.dll`, CRT app-local `vcruntime140.dll` + `vcruntime140_1.dll` + `msvcp140.dll` (VS binary terdistribusi ulang, diizinkan app-local, tanpa admin — lihat [docs/REDISTRIBUTABLES.md](docs/REDISTRIBUTABLES.md)), `THIRD_PARTY.md`, `README.md`, `STATUS.md`.
 
@@ -53,10 +53,10 @@ Legenda status:
 
 ```bat
 :: via gh CLI (perlu gh auth login)
-gh run download 43183762692 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D kamerageulis-m2
+gh run download 43184275535 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D kamerageulis-m2
 ```
 
-atau buka https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43183762692 → bagian **Artifacts** → `kamerageulis-m2-windows-x64` → ekstrak → jalankan `KameraGeulis.exe`. Tidak perlu installer; CRT sudah app-local.
+atau buka https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184275535 → bagian **Artifacts** → `kamerageulis-m2-windows-x64` → ekstrak → jalankan `KameraGeulis.exe`. Tidak perlu installer; CRT sudah app-local. (Run 43183762692 juga masih tersedia dengan isi yang sama.)
 
 **Yang diimplementasikan (M2):**
 - Preview besar + panel 6 tab (**Kulit | Wajah | Makeup | Preset | Kamera | Info**), tema gelap.
