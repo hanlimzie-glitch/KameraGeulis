@@ -55,15 +55,18 @@ for ($i = $hdr + 1; $i -lt $lines.Count; $i++) {
   $abs = $null
   if ($t[2] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[2], 16) }
   elseif ($t[0] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[0], 16) }
-  # t[3] = explicit Rva column (optional, small hex)
-  $rva = $null
+  # t[3] = explicit Rva column (optional, small hex).
+  # NOTE: never name this $rva - PowerShell variables are case-insensitive
+  # and $rva would clobber the $Rva parameter (that bug once symbolized
+  # against the last entry instead of the requested RVA).
+  $entryRva = $null
   if ($t.Count -ge 4 -and $t[3] -match '^[0-9A-Fa-f]{1,8}$') {
-    $rva = [Convert]::ToUInt64($t[3], 16)
+    $entryRva = [Convert]::ToUInt64($t[3], 16)
   } elseif ($abs -ne $null -and $preferred -ne $null) {
-    if ($abs -ge $preferred) { $rva = $abs - $preferred }
+    if ($abs -ge $preferred) { $entryRva = $abs - $preferred }
   }
-  if ($rva -eq $null) { continue }
-  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $rva })
+  if ($entryRva -eq $null) { continue }
+  $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva })
 }
 Write-Host ("publics entries parsed: {0}" -f $entries.Count)
 if ($entries.Count -eq 0) {
