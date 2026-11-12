@@ -31,7 +31,7 @@
 
 1. **Satu proses, tiga thread** — capture (MF) / render+GPU / (virtual camera consume async di thread sama dgn render, kirim setelah readback). Antrian frame bounded (kapasitas 2), **drop-oldest**, tidak pernah menaikkan latency demi kelengkapan frame.
 2. **GPU-only untuk efek.** Semua filter di GPU (GPUPixel). CPU hanya: capture convert, landmark smoothing (murah), readback untuk virtual cam + preview upload.
-3. **Landmark abstraction.** Semua filter landmark menerima `LandmarkSet` (111 normalized pts + `valid` flag + `confidence`), bukan sumber konkret → kompatibel dengan Mars-Face (106/111) dan provider masa depan (MediaPipe, dsb). Landmark smoothing (OneEuro) diterapkan di satu tempat (sebelum dibagikan ke filter), bukan per filter.
+3. **Landmark abstraction.** Semua filter landmark menerima `LandmarkSet` (468 normalized pts + `valid` flag + `confidence`), bukan sumber konkret → kompatibel dengan provider ONNX Runtime (M1b, semua platform) dan provider lain di masa depan. Landmark smoothing (OneEuro) diterapkan di satu tempat (sebelum dibagikan ke filter), bukan per filter. Detail pipeline deteksi/ROI/mesh: `docs/LANDMARKS.md`.
 4. **Face lost ≠ crash.** Jika wajah hilang > N ms: envelope gain landmark → 0 (fade-out mulus 300 ms), filter landmark dinonaktifkan, preview tetap 30/60 fps, UI menampilkan indikator "Wajah tidak terdeteksi".
 5. **Zero pop.** Semua parameter efek ramping (lerp) saat berubah — baik dari slider maupun dari preset (hold-compare tidak memicu lompatan).
 6. **Kejujuran fitur.** Setiap efek punya status `DONE / PARTIAL / DISABLED_ON_THIS_BUILD` — ditampilkan jujur di STATUS.md, bukan stub tersembunyi.
@@ -67,12 +67,13 @@ Budget (720p30): capture convert ~2-4 ms, GL 5-10 ms, readback 3-6 ms, UI 1-2 ms
 ## 5. Landmark provider
 
 ```cpp
-struct LandmarkSet { std::array<Vec2,111> pts; bool valid; float confidence; int64_t ts_ms; };
+struct LandmarkSet { std::array<Vec2,468> pts; bool valid; float confidence; int64_t ts_ms; };
 class ILandmarkProvider { public: virtual ~ILandmarkProvider(); virtual bool Available() const; virtual LandmarkSet Track(const Frame&) = 0; };
 ```
 
-- `MarsFaceLandmarkProvider` (`GPUPIXEL_ENABLE_FACE_DETECTOR=ON`, Linux/macOS): panggil `FaceDetector::Detect`, bungkus + smooth.
-- `NullLandmarkProvider` (default Windows): `Available()==false`, semua efek landmark UI disabled dengan tooltip jujur.
+- `OrtLandmarkProvider` (M1b, semua platform dengan model tersedia): ONNX Runtime CPU — BlazeFace short-range (deteksi) + FaceMesh 468 (mesh); detail & checksum di `docs/LANDMARKS.md`. Gerbang `valid` = skor NMS deteksi + faceflag mesh.
+- `MarsFaceLandmarkProvider` (opsional, `GPUPIXEL_ENABLE_FACE_DETECTOR=ON`, Linux/macOS): panggil `FaceDetector::Detect`, bungkus + smooth. Tidak dipakai di Windows.
+- `NullLandmarkProvider` (fallback bila model tidak tersedia/download gagal): `Available()==false`, semua efek landmark UI disabled dengan tooltip jujur.
 - `SyntheticLandmarkProvider` (test/demo `--selftest`): wajah prosedural statis untuk CI logs/screenshot.
 
 ## 6. Efek (status di STATUS.md)

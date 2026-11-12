@@ -19,7 +19,7 @@ KameraGeulis adalah aplikasi desktop native (C++17/OpenGL) yang mempercantik vid
 ### Catatan penting (kejujuran)
 
 - CMake build GPUPixel **wajib Release x64** di Windows; MSVC 2019+ (2022 direkomendasikan). 
-- **Efek yang bergantung pada landmark wajah nonaktif di Windows build default** (binary Mars-Face untuk Windows tidak tersedia publik; upstream GPUPixel mem-build Windows dengan `GPUPIXEL_ENABLE_FACE_DETECTOR=OFF`). Skin smoothing & whitening tetap berfungsi penuh. Detail: [docs/RESEARCH.md](docs/RESEARCH.md).
+- **Efek landmark** dirancang aktif di semua platform via ONNX Runtime + model Apache-2.0 hasil konversi (468 titik) — detail & checksum di [docs/LANDMARKS.md](docs/LANDMARKS.md). Sampai pipeline M1b mendarat, status efek landmark di Windows: **disabled** (lihat [STATUS.md](STATUS.md)). Skin smoothing & whitening tetap berfungsi penuh.
 - **Kamera virtual memerlukan registrasi 1× dengan admin** (softcam, DirectShow) dan hanya terlihat oleh aplikasi berbasis DirectShow. Windows 11 punya API MFCreateVirtualCamera (didokumentasikan sebagai opsi masa depan).
 
 ### Build singkat
@@ -39,7 +39,7 @@ KameraGeulis is a native desktop app (C++17/OpenGL) that beautifies your webcam 
 - One-tap presets, hold-to-compare, PNG snapshot, JSON settings.
 - Dear ImGui + GLFW + OpenGL dark UI, tabs Face/Skin/Makeup/Presets, Indonesian (default) + English strings.
 
-> **Honesty notes:** Windows x64 **Release only**; MSVC required. Landmark-dependent effects are **disabled in the default Windows build** (no public Mars-Face Windows binaries); skin smoothing/whitening always work. Virtual camera needs a **one-time admin registration** (softcam/DirectShow). See [docs/RESEARCH.md](docs/RESEARCH.md) and [STATUS.md](STATUS.md).
+> **Honesty notes:** Windows x64 **Release only**; MSVC required. Landmark-dependent effects are **being wired up via ONNX Runtime + Apache-2.0-derived models** (468 pts) — until that lands they stay disabled; skin smoothing/whitening always work. Virtual camera needs a **one-time admin registration** (softcam/DirectShow). See [docs/LANDMARKS.md](docs/LANDMARKS.md) and [STATUS.md](STATUS.md).
 
 ## Struktur repo
 

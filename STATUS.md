@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-12 (selesai M0)**
+Terakhir diperbarui: **2026-11-12 (M1b sedang berjalan — `docs/LANDMARKS.md` selesai, implementasi belum)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -36,6 +36,6 @@ Legenda status:
 
 ## Keputusan jujur yang sudah diambil
 
-1. Windows default: **tanpa face detector** (sesuai upstream GPUPixel). Semua efek landmark dimatikan dengan pesan jelas di UI + STATUS ini. Alasan lengkap: `docs/RESEARCH.md` §1 & §6.
+1. Windows default: **tanpa Mars-Face** (sesuai upstream GPUPixel). Efek landmark dijadwalkan aktif via **ONNX Runtime + model hasil konversi Apache-2.0 (468 titik)** — rencana, provenance & checksum di `docs/LANDMARKS.md`; sampai M1b mendarat, efek landmark tetap **disabled** dengan pesan jujur di UI. Alasan historis: `docs/RESEARCH.md` §1 & §6.
 2. Tidak ada model wajah di-bundling di Windows; model Mars-Face hanya ada di build Linux/macOS via GPUPixel dan lisensinya belum dikonfirmasi upstream (issue #253) → tidak untuk rilis komersial sebelum klarifikasi.
 3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
