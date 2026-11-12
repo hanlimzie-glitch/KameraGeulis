@@ -12,8 +12,17 @@
 # Manual trigger only (models change rarely; releases are deliberate):
 #   gh workflow run Models --repo hanlimzie-glitch/KameraGeulis
 name: Models
+# workflow_dispatch (manual, seperti diminta spec M1c) + path-limited push
+# supaya perubahan pipeline model ikut ter-verifikasi; push dari branch lain
+# tidak menyentuh release kecuali dispatch manual.
+# (403 dari integrasi sandbox: "Resource not accessible by integration" —
+# dispatch dari UI tetap tersedia.)
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/models.yml
+      - scripts/models/**
 
 permissions:
   contents: write  # upload release assets to models-v1
