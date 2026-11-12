@@ -195,8 +195,13 @@ void CameraCapture::CaptureThread(int device_index) {
       }
     }
     if (width <= 0 || height <= 0) {
-      MFCalculateImageSize(MFVideoFormat_RGB32, width > 0 ? width : 640,
-                           height > 0 ? height : 480, reinterpret_cast<ULONG*>(&stride));
+      DWORD stride_dword = 0;
+      if (SUCCEEDED(MFCalculateImageSize(MFVideoFormat_RGB32,
+                                         static_cast<UINT32>(width > 0 ? width : 640),
+                                         static_cast<UINT32>(height > 0 ? height : 480),
+                                         &stride_dword))) {
+        stride = static_cast<int>(stride_dword);
+      }
     }
     if (stride < width * 4) stride = width * 4;
     Log(kTag, "capture started: %dx%d stride=%d (RGB32/BGRA)", width, height, stride);
