@@ -204,8 +204,9 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       kgcore::Log("app", "GL context: %s — BERHASIL", a.label);
       break;
     }
-    int code = 0;
-    const char* desc = glfwGetError(&code);
+    // GLFW 3.3 API: int glfwGetError(const char** description)
+    const char* desc = nullptr;
+    const int code = glfwGetError(&desc);
     kgcore::Log("app", "GL context: %s — GAGAL (glfw error %d: %s)", a.label, code,
                 desc ? desc : "(tidak ada deskripsi)");
   }

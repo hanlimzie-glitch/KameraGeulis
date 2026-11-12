@@ -64,4 +64,11 @@ DllPreloadResult PreloadRuntimeDlls(const StartupPaths& paths);
 // Used for fatal init failures (GL/GLFW/window/DLL) — never fails silently.
 void ShowFatalAndExit(const wchar_t* context, const std::wstring& detail, int exit_code);
 
+// Runs the headless smoke test (--selftest). No window, no GL, no MessageBox.
+// Downloads nothing; loads DLLs from exe_dir and models from
+// KAMERAGEULIS_MODELS_DIR (or <exe_dir>\models). Returns process exit code:
+//   0 pass · 2 DLL preload · 3 ORT API · 4 model · 5 ORT session · 6 inference
+// Implemented in selftest.cc.
+int RunSelftest(const StartupPaths& paths);
+
 }  // namespace kgcore
