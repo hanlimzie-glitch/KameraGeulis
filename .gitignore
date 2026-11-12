@@ -1,0 +1,45 @@
+# Build artifacts
+build/
+out/
+dist/
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.exe
+*.dll
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.sln
+*.vcxproj*
+!cmake/*.cmake
+
+# IDE
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# App data / logs
+logs/
+*.log
+snapshots/
+settings.local.json
+
+# Test artifacts
+Testing/
+*.png
+!docs/**/*.png
+!assets/**/*.png
+
+# External deps fetched at configure time (FetchContent)
+_deps/
