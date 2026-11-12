@@ -1,0 +1,109 @@
+# KameraGeulis — reproducible model pipeline (M1c).
+#
+# Downloads the MediaPipe model sources from the npm registry (pinned
+# tarballs, SHA-256 verified), carves the embedded FaceMesh/detector .tflite
+# files (packed-assets offsets from the package's own loader metadata),
+# converts them to ONNX with tf2onnx (pinned), verifies the result with
+# onnxruntime (input/output names + shapes), uploads both ONNX files to the
+# `models-v1` GitHub release, and prints the SHA-256 of the converted files
+# (the pins embedded in the app come from this workflow's output — never
+# from a developer machine).
+#
+# Manual trigger only (models change rarely; releases are deliberate):
+#   gh workflow run Models --repo hanlimzie-glitch/KameraGeulis
+name: Models
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # upload release assets to models-v1
+
+env:
+  DET_TGZ_URL: https://registry.npmjs.org/@mediapipe/face_detection/-/face_detection-0.4.1646425229.tgz
+  DET_TGZ_SHA256: 0860724d3ad0de680dd5da59c0b1333f2330aa4ea969157d0aea5d7c0d6e2a95
+  MESH_TGZ_URL: https://registry.npmjs.org/@mediapipe/face_mesh/-/face_mesh-0.4.1633559619.tgz
+  MESH_TGZ_SHA256: a65c9a7509560f29e574c026dc6a667d2154617eb3ba0c287db02350de0c116f
+  TF2ONNX_OPSET: "15"
+
+jobs:
+  build-models:
+    name: Build + verify ONNX models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install converter + verifier (pinned)
+        run: |
+          python -m pip install --disable-pip-version-check "tensorflow==2.17.1" "tf2onnx==1.17.0" "onnx==1.17.0" "onnxruntime==1.31.1" "numpy<2"
+
+      - name: Download npm MediaPipe packages (SHA-256 verified)
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/models-src"
+          mkdir -p "$workdir"
+          curl -fSL --retry 3 "$DET_TGZ_URL" -o "$workdir/mediapipe-face_detection-0.4.1646425229.tgz"
+          curl -fSL --retry 3 "$MESH_TGZ_URL" -o "$workdir/mediapipe-face_mesh-0.4.1633559619.tgz"
+          cd "$workdir"
+          echo "$DET_TGZ_SHA256  mediapipe-face_detection-0.4.1646425229.tgz" | sha256sum -c -
+          echo "$MESH_TGZ_SHA256  mediapipe-face_mesh-0.4.1633559619.tgz" | sha256sum -c -
+
+      - name: Extract + verify .tflite sources (byte-pinned)
+        run: |
+          set -euo pipefail
+          python scripts/models/prepare_sources.py "$RUNNER_TEMP/models-src" "$RUNNER_TEMP/models-out"
+
+      - name: Convert to ONNX (tf2onnx, pinned, opset ${{ env.TF2ONNX_OPSET }})
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/models-out"
+          python -m tf2onnx.convert --tflite "$out/face_detection_short_range.tflite" \
+            --output "$out/face_detection_short_range.onnx" --opset "$TF2ONNX_OPSET"
+          python -m tf2onnx.convert --tflite "$out/face_landmark.tflite" \
+            --output "$out/face_mesh.onnx" --opset "$TF2ONNX_OPSET"
+
+      - name: Verify ONNX (onnxruntime: names, shapes, inference)
+        run: |
+          set -euo pipefail
+          python scripts/models/verify_onnx.py "$RUNNER_TEMP/models-out" | tee "$RUNNER_TEMP/models-out/verify.txt"
+
+      - name: Upload models to the models-v1 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/models-out"
+          gh release upload models-v1 \
+            "$out/face_detection_short_range.onnx" \
+            "$out/face_mesh.onnx" \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+      # NOTE: GitHub Actions logs are not reachable from every environment;
+      # the SHA-256 is emitted as a workflow annotation so it can be read
+      # reliably via the REST API (check-runs annotations).
+      - name: Announce SHA-256 (workflow annotation)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/models-out"
+          det=$(sha256sum "$out/face_detection_short_range.onnx" | cut -d' ' -f1)
+          mesh=$(sha256sum "$out/face_mesh.onnx" | cut -d' ' -f1)
+          echo "::notice title=models-v1 SHA-256::face_detection_short_range.onnx=$det face_mesh.onnx=$mesh"
+
+      - name: Publish SHA-256 summary
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/models-out"
+          {
+            echo "## Models built & uploaded to \`models-v1\`"
+            echo ""
+            echo '```'
+            (cd "$out" && sha256sum face_detection_short_range.onnx face_mesh.onnx)
+            echo "tf2onnx opset: $TF2ONNX_OPSET (tensorflow 2.17.1 / tf2onnx 1.17.0 / onnxruntime 1.31.1)"
+            echo '```'
+            echo ""
+            echo "Pin these values in \`ort_landmark_provider.cc\` + \`docs/LANDMARKS.md\`."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
