@@ -15,6 +15,7 @@ Semua dependensi di-pin ke versi/commit persis. Tidak ada yang divendor sebagai 
 | GPUPixel bundled: glad | (di tree gpupixel) | MIT | OpenGL loader | via GPUPixel |
 | GPUPixel bundled: libyuv | (di tree gpupixel) | BSD-3-Clause | YUV conversion (kebutuhan internal gpupixel) | via GPUPixel |
 | GPUPixel bundled: stb_image | (di tree gpupixel) | Public domain / MIT | SourceImage PNG (mouth/blusher) | via GPUPixel |
+| `canonical_face_model.obj` (MediaPipe face_geometry) — **referensi offline saja** untuk analisis pemetaan landmark (docs/LANDMARKS.md §8) | commit `master` 2026-11-12 (raw.githubusercontent.com) | **Apache-2.0** © Google LLC | Tidak dipakai di runtime; tidak di-commit/dibundel | diunduh sekali oleh maintainer (analisis) |
 | GPUPixel resources: `mouth.png`, `blusher.png`, `lookup_*.png` | (di tree gpupixel) | Apache-2.0 (bagian dari gpupixel) | Tekstur makeup built-in | via GPUPixel install |
 | GPUPixel bundled: mars-face-kit + models | v0.0.2, `face_det/face_align.mars_model` (~1.25 MB) | **TIDAK JELAS** — GPUPixel Apache-2.0, tetapi lisensi eksplisit binary/model belum dikonfirmasi (upstream issue #253 open) | Face detection **hanya Linux/macOS**; di Windows `GPUPIXEL_ENABLE_FACE_DETECTOR=OFF` | via GPUPixel (Linux only) |
 

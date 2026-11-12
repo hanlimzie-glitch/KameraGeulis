@@ -55,7 +55,7 @@ void RenderPanel(AppUiState& state) {
       ImGui::SliderFloat(s.Get("face.slim").c_str(), &dummy_slim, 0.0f, 1.0f);
       ImGui::SliderFloat(s.Get("face.bigeyes").c_str(), &dummy_eyes, 0.0f, 1.0f);
       ImGui::EndDisabled();
-      ImGui::SetTooltip("M4 — menunggu provider landmark (M1b)");
+      ImGui::SetTooltip("Belum tersedia di v1 — mapping 468 poin ke filter GPUPixel belum terverifikasi (docs/LANDMARKS.md)");
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem(s.Get("tab.makeup").c_str())) {

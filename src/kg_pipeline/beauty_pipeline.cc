@@ -1,12 +1,13 @@
 #include "beauty_pipeline.h"
 #include <gpupixel/gpupixel.h>
 #include "kgcore/log.h"
+#include "ort_landmark_provider.h"
 
 namespace kgcore {
 constexpr char kTag[] = "pipeline";
 
 BeautyPipeline::BeautyPipeline()
-    : tracker_(std::make_unique<FaceTracker>(std::make_unique<NullLandmarkProvider>())) {}
+    : tracker_(std::make_unique<FaceTracker>(std::make_unique<OrtLandmarkProvider>())) {}
 
 BeautyPipeline::~BeautyPipeline() { Shutdown(); }
 

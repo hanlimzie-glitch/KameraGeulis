@@ -43,3 +43,10 @@ Testing/
 
 # External deps fetched at configure time (FetchContent)
 _deps/
+
+# Face models are NEVER committed (downloaded at first run / build with SHA-256 pin)
+*.onnx
+*.tflite
+*.mars_model
+*.task
+*.pt

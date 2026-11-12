@@ -1,6 +1,6 @@
 # LANDMARKS.md — Landmark wajah di KameraGeulis (M1b)
 
-**Tanggal:** 2026-11-12 · **Status:** keputusan M1b selesai & terverifikasi numerik (Python/ORT); implementasi C++ menunggu M1 (CMake+CI) dan M1b.
+**Tanggal:** 2026-11-12 · **Status:** implementasi C++ M1b mendarat (kg_core: anchor/decode/ROI/mesh decode + OneEuro teruji hijau di Linux — 8319 assertions; provider ORT Windows); pemetaan 468→GPUPixel-Mars **ditolak** (§8); efek landmark v1 tidak di-wire; models-v1 belum berisi aset.
 Bahasa dokumen: Indonesia (konsisten dengan dokumen lain). English key terms dipertahankan.
 
 Dokumen ini **menggantikan** keputusan M0 ("tidak pakai model wajah di v1") di `docs/RESEARCH.md` §1/§2 dan catatan di `STATUS.md`. Riset baru (di bawah) menemukan jalur yang jelas-jelas berlisensi Apache-2.0 **dan** bisa dipin dengan SHA-256.
@@ -153,3 +153,27 @@ Semua detail numerik di atas **sudah dijalankan dan menghasilkan overlay landmar
 - `THIRD_PARTY.md` — tambah ONNX Runtime (MIT) + catatan model (§4.6).
 - `docs/ARCHITECTURE.md` §5 — `LandmarkSet` jadi 468 titik; provider baru `OrtLandmarkProvider`; `NullLandmarkProvider` tetap ada sebagai fallback saat model tidak tersedia.
 - `docs/ROADMAP.md` (dibuat saat M5) — "478/iris via custom op" + "Option A revisit jika checksum produksi diterbitkan".
+
+---
+
+## 8. Temuan M1b (2026-11-12): pemetaan 468 → 106/111 titik Mars TIDAK kredibel — efek GPUPixel tidak di-wire di v1
+
+Saat implementasi, pertanyaan arsitektural "468 titik MP → 106/111 titik Mars (FaceReshape/Lipstick/Blusher)" dianalisis dengan kedua canonical model yang tersedia:
+
+**Metode:** `canonical_face_model.obj` (MediaPipe, Apache-2.0; 468 vertex 3D, diunduh via GitHub raw 2026-11-12, dipakai hanya sebagai referensi offline — tidak di-commit/di-bundle) vs `FaceTextureCoordinates()` GPUPixel `face_makeup_filter.cc` (111 titik uv 2D; indeks untuk `FaceReshapeFilter` mengacu `face_reshape_filter.cc`).
+
+**Hasil numerik:**
+
+1. Kedua canonical model ber*proporsi berbeda*: model MP menempatkan mata di y_norm ≈ 0.30–0.34 dan alis ≈ 0.18; kanonikal Mars menempatkan alis di v ≈ 0.33, mata di v ≈ 0.39–0.42, bibir di v ≈ 0.58–0.65, dagu v ≈ 0.71 — dan oval Mars (indeks 0–32) hanya busur pipi→dagu (v 0.384–0.710), bukan seluruh wajah. Tidak ada transformasi affine global yang menyejajarkan keduanya secara serentak.
+2. Fit affine anisotropik pada busur oval (32/33 titik, traversal sama) konvergen dengan residual mean 0.010, max 0.018 — **hanya untuk region busur bawah wajah**. Region jidat/alis/mata melenceng sistematis ±0.08–0.12.
+3. Hungarian 1:1 global di atas transform oval menghasilkan penugasan alis/mata ke titik anatomi yang salah (indeks mata Mars → cheekbone/under-eye MP; jarak 0.01–0.04 tetapi beda struktur), termasuk indeks MP duplikat pada kandidat NN. Untuk warp yang sensitif posisi (enlargeEye berpusat di titik 74/77), kesalahan sebesar itu = efek kasat salah.
+4. SDK Mars (MNN, `mars-face-kit`) tertutup; tidak ada pemetaan 468→106/111 referensi di tree GPUPixel; demo hanya passthrough output Mars. Verifikasi visual butuh wajah nyata + GPU — tidak tersedia di sandbox/CI.
+
+**Keputusan:** di v1, `FaceReshapeFilter`, `LipstickFilter`, `BlusherFilter` **tidak di-wire**. Efek landmark tetap **nonaktif**; UI menyatakannya jujur (`landmark.inactive` + tooltip "Belum tersedia di v1"). Rencana lanjutan (evaluasi terpisah): renderer custom berbasis MP (mesh bibir dari kontur MP 61…291, big-eye dari sudut mata MP 33/133/263/362, slim dari oval MP) — murni geometri MP, tanpa kanonikal Mars; atau rilis models-v1 + verifikasi di mesin Windows nyata dengan foto wajah terlebih dahulu.
+
+**Dampak pada kontrak `SetFaceLandmarks` (terverifikasi dari source GPUPixel v1.3.1):**
+- `FaceReshapeFilter::SetFaceLandmarks` → uniform `facePoints[106*2]` (212 float); ukuran vektor lain akan mengirim jumlah tak valid ke `glUniform1fv`.
+- `FaceMakeupFilter::SetFaceLandmarks` → nilai input diduga [0,1] (dikalikan 2−1 ke NDC; dipakai sebagai vertex attribute, bukan uniform). Arah y (gl_Position.y tanpa flip) tidak bisa diverifikasi tanpa runtime — satu alasan lagi untuk tidak mem-wire sekarang.
+- `LipstickFilter`/`BlusherFilter` memerlukan aset `res/mouth.png`/`blusher.png` + `SetTextureBounds` — tergantung `Util::GetResourcePath()`.
+
+**Status implementasi M1b:** kg_core (face_anchors/face_detection_decode/roi_align/face_mesh_decode/OneEuro) teruji hijau di Linux; `OrtLandmarkProvider` (Windows, ORT CPU) diimplementasikan — download first-run dari rilis `models-v1` (masih kosong per 2026-11-12) dengan SHA-256 pin; gagal → efek nonaktif + pesan jujur (tidak crash). Wiring UI efek: tidak ada (sengaja). Lihat `STATUS.md`.
