@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — KameraGeulis
 
-**Status:** desain M0 (belum ada kode implementasi selain CI/docs). Tanggal 2026-11-12.
+**Status:** desain M0, diperbarui M1c (§5.1 — detector-skip/ROI tracking) dan M2 (debug overlay via StageTimings). Kode implementasi ada di `src/`. Tanggal 2026-11-12.
 
 ## 1. Gambaran besar
 

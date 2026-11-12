@@ -44,4 +44,5 @@ Untuk CI/dev tanpa internet: arahkan `KAMERAGEULIS_MODELS_DIR` ke folder yang be
 - **Configure gagal di download ONNX Runtime**: cek koneksi; hapus `build\_deps\onnxruntime-win-x64-1.31.1.zip` lalu configure ulang (file yang korup tidak akan lolos SHA-256).
 - **GPUPixel gagal**: hanya didukung Release (bukan Debug) + x64.
 - **Efek landmark "model tidak tersedia"**: lihat `%LOCALAPPDATA%\KameraGeulis\models` (ada `face_detection_short_range.onnx`/`face_mesh.onnx`?); jalankan dari konsol/log untuk melihat alasan gagal (`KAMERAGEULIS_MODELS_DIR` mem-bypass download).
-- **Kamera virtual**: butuh `softcam.dll` (dibangun terpisah, M3/M5) + registrasi admin 1× — belum termasuk artifact M1/M1b.
+- **Kamera virtual**: butuh `softcam.dll` (dibangun terpisah, M3/M5) + registrasi admin 1× — belum termasuk artifact M2.
+- **Artifact M2 terbaru:** lihat STATUS.md §"M2 — detail" untuk run CI `43183762692` + perintah `gh run download`. Berisi `KameraGeulis.exe` + `gpupixel.dll` + `onnxruntime.dll` + CRT app-local (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`); jalankan langsung tanpa installer/admin.

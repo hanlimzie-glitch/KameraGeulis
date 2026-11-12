@@ -1,6 +1,6 @@
 # LANDMARKS.md — Landmark wajah di KameraGeulis (M1b)
 
-**Tanggal:** 2026-11-12 · **Status:** implementasi C++ M1b mendarat (kg_core: anchor/decode/ROI/mesh decode + OneEuro teruji hijau di Linux — 8319 assertions; provider ORT Windows); pemetaan 468→GPUPixel-Mars **ditolak** (§8); efek landmark v1 tidak di-wire; models-v1 belum berisi aset.
+**Tanggal:** 2026-11-12 · **Status:** implementasi C++ M1b mendarat (kg_core hijau di Linux — 8319 assertions; provider ORT Windows); pemetaan 468→GPUPixel-Mars **ditolak** (§8); efek landmark v1 tidak di-wire; **models-v1 SUDAH berisi kedua aset** (upload oleh workflow `Models`, run 43179962364, diverifikasi onnxruntime di CI).
 Bahasa dokumen: Indonesia (konsisten dengan dokumen lain). English key terms dipertahankan.
 
 Dokumen ini **menggantikan** keputusan M0 ("tidak pakai model wajah di v1") di `docs/RESEARCH.md` §1/§2 dan catatan di `STATUS.md`. Riset baru (di bawah) menemukan jalur yang jelas-jelas berlisensi Apache-2.0 **dan** bisa dipin dengan SHA-256.
@@ -182,4 +182,4 @@ Saat implementasi, pertanyaan arsitektural "468 titik MP → 106/111 titik Mars 
 - `FaceMakeupFilter::SetFaceLandmarks` → nilai input diduga [0,1] (dikalikan 2−1 ke NDC; dipakai sebagai vertex attribute, bukan uniform). Arah y (gl_Position.y tanpa flip) tidak bisa diverifikasi tanpa runtime — satu alasan lagi untuk tidak mem-wire sekarang.
 - `LipstickFilter`/`BlusherFilter` memerlukan aset `res/mouth.png`/`blusher.png` + `SetTextureBounds` — tergantung `Util::GetResourcePath()`.
 
-**Status implementasi M1b:** kg_core (face_anchors/face_detection_decode/roi_align/face_mesh_decode/OneEuro) teruji hijau di Linux; `OrtLandmarkProvider` (Windows, ORT CPU) diimplementasikan — download first-run dari rilis `models-v1` (masih kosong per 2026-11-12) dengan SHA-256 pin; gagal → efek nonaktif + pesan jujur (tidak crash). Wiring UI efek: tidak ada (sengaja). Lihat `STATUS.md`.
+**Status implementasi M1b/M1c:** kg_core hijau di Linux; `OrtLandmarkProvider` (Windows, ORT CPU) diimplementasikan; rilis `models-v1` sudah berisi kedua aset (diupload workflow `Models` 2026-11-12, diverifikasi onnxruntime di CI run 43179962364; SHA-256 pin cocok dengan keluaran CI). Download first-run dari mesin bersih belum diverifikasi. Wiring UI efek: tidak ada (sengaja). Lihat `STATUS.md`.

@@ -5,21 +5,21 @@
 
 [![CI](https://github.com/hanlimzie-glitch/KameraGeulis/actions/workflows/build.yml/badge.svg)](https://github.com/hanlimzie-glitch/KameraGeulis/actions/workflows/build.yml)
 
-> **Status:** M1 selesai (CI hijau, artifact `kamerageulis-m1-windows-x64`); M1b mendarat di kode (pipeline landmark 468 titik + ONNX Runtime CPU) — **efek landmark tetap nonaktif** sampai rilis GitHub `models-v1` berisi aset model (hingga 2026-11-12: belum ada). Lihat [STATUS.md](STATUS.md) untuk tabel fitur yang jujur dan [BUILD.md](BUILD.md) untuk langkah build.
+> **Status:** M2 (UI ImGui lengkap: preview besar, panel 6 tab — Kulit/Wajah/Makeup/Preset/Kamera/Info, slider smoothing & whitening terhubung live, preset Natural/Soft/Glam/ClearSkin, picker kamera MF + resolusi/fps, debug overlay F3 (468 titik + bbox + timing per stage), settings JSON otomatis, ID/EN) — **CI hijau** (run 43183762692, artifact `kamerageulis-m2-windows-x64`, ~7,1 MB). Belum diverifikasi di Windows nyata. **Efek landmark tetap nonaktif** (pemetaan 468→Mars tidak kredibel; lihat [docs/LANDMARKS.md](docs/LANDMARKS.md) §8). Lihat [STATUS.md](STATUS.md) untuk tabel fitur yang jujur dan [BUILD.md](BUILD.md) untuk langkah build + cara mengunduh artifact.
 
 ## Bahasa Indonesia
 
 KameraGeulis adalah aplikasi desktop native (C++17/OpenGL) yang mempercantik video webcam secara real-time dengan engine [GPUPixel](https://github.com/pixpark/gpupixel) (Apache-2.0), menampilkannya di jendela preview, dan mengalirkan hasilnya sebagai kamera virtual ("KameraGeulis Camera") yang bisa dipakai di OBS, Discord, Zoom, dll.
 
-- **Efek built-in GPUPixel** (M2 — slider belum di-wire): skin smoothing, whitening, face slimming, big eyes, lipstick, blush.
-- **Efek kustom** (landmark SDF — M4): chin reshape, nose slim, eye brighten, eyebrow tint, eyeshadow, eyeliner, foundation/even skin tone, lip color matte/gloss.
-- **Preset 1-tap** (M2): Natural, Soft, Glam, Clear Skin. **Hold-to-compare** before/after. **Snapshot PNG.** Settings tersimpan ke JSON.
+- **Efek built-in GPUPixel**: skin smoothing & whitening **sudah terhubung** ke slider (0–100); face slimming / big eyes / lipstick / blush **disabled** (`Segera hadir`) — butuh landmark.
+- **Efek kustom** (M4): belum diimplementasikan; semua kontrolnya di UI tampil **disabled** berlabel `Segera hadir` agar alur UI final.
+- **Preset 1-tap**: Natural, Soft, Glam, Clear Skin. **Hold-to-compare** before/after (tahan tombol). Snapshot PNG (belum — tombol disabled). Settings tersimpan ke JSON (`%APPDATA%\KameraGeulis\settings.json`, auto-load).
 - **UI:** Dear ImGui + GLFW + OpenGL, tab Face/Skin/Makeup/Presets, tema gelap, Bahasa Indonesia (default) + English.
 
 ### Catatan penting (kejujuran)
 
 - CMake build GPUPixel **wajib Release x64** di Windows; MSVC 2019+ (2022 direkomendasikan). 
-- **Efek landmark** (face slim, big eyes, lipstick, …): pipeline deteksi+mesh **sudah diimplementasikan** (ONNX Runtime CPU, 468 titik, model Apache-2.0 hasil konversi, download first-run dengan SHA-256 pin — detail di [docs/LANDMARKS.md](docs/LANDMARKS.md)), tetapi: **(a)** rilis GitHub `models-v1` belum berisi aset model (harus di-upload maintainer), dan **(b)** pemetaan 468→filter GPUPixel (106/111 titik Mars) terbukti tidak kredibel dari kedua canonical model — jadi v1 **tidak mem-wiring** efek landmark; UI menyatakannya jujur **tidak tersedia**. Skin smoothing & whitening dirancang tanpa landmark.
+- **Efek landmark** (face slim, big eyes, lipstick, …): pipeline deteksi+mesh **sudah diimplementasikan** (ONNX Runtime CPU, 468 titik, model Apache-2.0 hasil konversi; rilis `models-v1` **sudah berisi kedua aset** sejak 2026-11-12 — diupload workflow `Models`, I/O diverifikasi di CI), tetapi pemetaan 468→filter GPUPixel (106/111 titik Mars) terbukti tidak kredibel — jadi v1 **tidak mem-wiring** efek landmark; UI menyatakannya jujur **Segera hadir / disabled**. Skin smoothing & whitening dirancang tanpa landmark dan **aktif**.
 - **Kamera virtual memerlukan registrasi 1× dengan admin** (softcam, DirectShow) dan hanya terlihat oleh aplikasi berbasis DirectShow. Windows 11 punya API MFCreateVirtualCamera (didokumentasikan sebagai opsi masa depan).
 
 ### Build singkat
@@ -39,7 +39,7 @@ KameraGeulis is a native desktop app (C++17/OpenGL) that beautifies your webcam 
 - One-tap presets, hold-to-compare, PNG snapshot, JSON settings (M2+).
 - Dear ImGui + GLFW + OpenGL dark UI, tabs Face/Skin/Makeup/Presets, Indonesian (default) + English strings.
 
-> **Honesty notes:** Windows x64 **Release only**; MSVC required. Landmark detection pipeline (ONNX Runtime CPU, 468 pts) is implemented but **landmark-driven effects are disabled in v1**: (a) release `models-v1` has no model assets yet, (b) the 468→GPUPixel-Mars mapping proved unreliable — see [docs/LANDMARKS.md](docs/LANDMARKS.md). Virtual camera needs a **one-time admin registration** (softcam/DirectShow). See [STATUS.md](STATUS.md).
+> **Honesty notes:** Windows x64 **Release only**; MSVC required. Landmark detection pipeline (ONNX Runtime CPU, 468 pts) is implemented and `models-v1` ships the ONNX assets (this project's GitHub Actions CI, run 43179962364), but **landmark-driven effects are disabled in v1** — the 468→GPUPixel-Mars mapping proved unreliable; see [docs/LANDMARKS.md](docs/LANDMARKS.md). Preview is untested on real Windows so far; v1 has never been run with a physical GPU/webcam. Virtual camera needs a **one-time admin registration** (softcam/DirectShow). See [STATUS.md](STATUS.md).
 
 ## Struktur repo
 
