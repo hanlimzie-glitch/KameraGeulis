@@ -86,6 +86,15 @@ Baris penting dan maknanya:
 | `dwmapi.dll` / `user32.dll` | Umumnya *korban*, bukan penyebab — lihat exception code di Event Viewer (0xC0000005 = access violation dsb.) |
 | `nvwgf2umx.dll` / `atio6axx.dll` / `igdumdim64.dll` | Driver GPU crash — perbarui driver; coba `--safe` (kalau `--safe` juga crash → bukan GPU) |
 
+## 5a. Crash gpupixel.dll yang sudah diketahui (RVA 0x3968a, M2d)
+
+- **Penyebab:** file resource GPUPixel di `res\` tidak ada di sebelah exe (artifact lama tidak menyertakan `res\`), sehingga lookup texture null dan frame pertama crash di `BeautyFaceUnitFilter::DoRender` (bukan masalah kode aplikasi kamu).
+- **Verifikasi:** log harus memuat `[pipeline] resource res/lookup_gray.png: OK ...`; bila ada `HILANG`, download artifact terbaru (yang memverifikasi isi artifact di CI).
+- **Symbolisasi RVA lain:** artifact menyertakan `gpupixel.map` (+ `gpupixel.pdb`); jalankan:
+  `./scripts/resolve-pdb-rva.ps1 -MapPath gpupixel.map -DllPath gpupixel.dll -Rva 0x3968a`
+  (dijalankan otomatis di CI setiap build; hasilnya sebagai annotation `::notice`).
+- **UI:** bila resource hilang, aplikasi **tidak crash** — efek GPU dimatikan, preview menampilkan frame mentah, dan pesan merah tampil di status bar + log.
+
 ## 6. Memisahkan komponen penyebab crash (gunakan berurutan)
 
 1. `KameraGeulis.exe --selftest` → DLL + ORT + model OK? (exit 0)

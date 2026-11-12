@@ -60,7 +60,7 @@ Artifact M2 dulu force-close di PC kamu. Artifact ini (M2c) menambahkan logging 
 | 5 | Tab **Preset** | Klik **Natural / Soft / Glam / ClearSkin** → slider di tab Kulit ikut berubah; label preset aktif hijau / "Kustom" bila slider digeser manual; tombol **Reset** | |
 | 6 | **Tahan** tombol "Tahan untuk Bandingkan" | Preview berganti ke frame mentah selama ditahan; lepas → kembali ke efek | |
 | 7 | Tab **Preset** → **Simpan** → ubah slider → **Muat** | Nilai kembali ke yang tersimpan; file di `%APPDATA%\KameraGeulis\settings.json` | |
-| 8 | Tab **Kamera** | Daftar device (nama kamera kamu); resolusi & fps dari mode native; tombol **Terapkan** mengganti mode; **Segarkan** memuat ulang; bila kosong → fallback 1280×720/640×480 + peringatan | |
+| 8 | Tab **Kamera** | Daftar device (nama kamera kamu); resolusi & fps dari mode native; tombol **Terapkan** mengganti mode; **Segarkan** memuat ulang; bila kosong → fallback 1280×720/640×480 + peringatan. Di `--safe`, tab Kamera ter-nonaktif (label: kamera dinonaktifkan di mode aman) | |
 | 9 | Tab **Info** | Status landmark: hijau "Aktif" (bila model berhasil diunduh) atau oranye "Tidak aktif" + alasan; checkbox **Overlay debug** | |
 | 10 | Tekan **F3** (atau checkbox di Info) | Titik **468** kuning + **bounding box** cyan + HUD (FPS, cap/det/mesh/trk/render ms, "sejak deteksi N") di atas preview | |
 | 11 | Tutup dengan tombol X | Keluar bersih, tidak ada dialog error | |
@@ -68,7 +68,19 @@ Artifact M2 dulu force-close di PC kamu. Artifact ini (M2c) menambahkan logging 
 | 13 | Toggle bahasa ID ↔ EN (status bar) | Seluruh teks UI berganti bahasa seketika | |
 | 14 | Centang **Mirror** | Preview terflip horizontal | |
 
+## 4a. Artifact M2d — isi folder (untuk verifikasi cepat di PC pengguna)
+
+Folder artifact hasil CI WAJIB berisi (langkah "Verify artifact contents" di CI menggagalkan build bila tidak):
+- `KameraGeulis.exe`, `gpupixel.dll`, `gpupixel.pdb`, `gpupixel.map` (simbol crash; tidak dipakai runtime)
+- `onnxruntime.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll` (app-local CRT, tanpa admin)
+- `res\*.png` — 7 file: `lookup_gray.png`, `lookup_origin.png`, `lookup_skin.png`, `lookup_light.png` (WAJIB — tanpa ini frame pertama crash 0x3968a; lihat docs/GPUPIXEL.md) + `lookup_custom.png`, `blusher.png`, `mouth.png`
+- `models\face_detection_short_range.onnx`, `models\face_mesh.onnx` (hash SHA-256 diverifikasi saat load; urutan pencarian `KAMERAGEULIS_MODELS_DIR` → `<exe>\models` → `%LOCALAPPDATA%\KameraGeulis\models`)
+- `THIRD_PARTY.md`, `README.md`, `STATUS.md`
+
+Setelah unzip ke D:\Project Camera (atau folder pilihanmu), cukup jalankan `KameraGeulis.exe`. First-run **tidak** butuh internet.
+
 ## 5. Yang TIDAK akan bekerja (memang belum)
+
 
 - **Efek landmark apa pun** (face slim, lipstick, …) — disabled `Segera hadir` (v1: pemetaan 468→GPUPixel-Mars tidak kredibel, docs/LANDMARKS.md §8).
 - **Kamera virtual** (toggle disabled) — M3, butuh softcam + registrasi admin 1×.
@@ -87,5 +99,5 @@ Artifact M2 dulu force-close di PC kamu. Artifact ini (M2c) menambahkan logging 
 ## 7. Path yang dipakai aplikasi
 
 - Settings: `%APPDATA%\KameraGeulis\settings.json`
-- Model: `%LOCALAPPDATA%\KameraGeulis\models\` (bisa dioverride via env `KAMERAGEULIS_MODELS_DIR`)
+- Model: `<exe>\models\` (dibundel di artifact) → fallback `%LOCALAPPDATA%\KameraGeulis\models\` → override env `KAMERAGEULIS_MODELS_DIR` (dipakai aplikasi DAN `--selftest` dengan urutan sama)
 - Log: stderr → alihkan ke file seperti §3.

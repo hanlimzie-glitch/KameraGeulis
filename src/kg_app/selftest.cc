@@ -1,7 +1,8 @@
 // KameraGeulis — headless smoke test (--selftest).
 // No window, no GL, no MessageBox. Loads the two runtime DLLs from the app
-// folder, verifies the ORT API, loads both models from KAMERAGEULIS_MODELS_DIR
-// (or <exe_dir>\models), runs one detector + one mesh inference on a
+// folder, verifies the ORT API, loads both models (search order shared with
+// the app: KAMERAGEULIS_MODELS_DIR -> <exe_dir>\models -> LOCALAPPDATA\KameraGeulis\models),
+// runs one detector + one mesh inference on a
 // deterministic synthetic input, checks output shapes/finiteness, and exits:
 //   0  pass
 //   2  DLL preload failed (app-local Dll is missing/broken/shadowed)
@@ -28,6 +29,7 @@
 
 #include "kgcore/log.h"
 #include "startup.h"
+#include "windows_paths.h"
 
 namespace kgcore {
 namespace {
@@ -42,11 +44,33 @@ constexpr char kMeshSha256[] =
 constexpr uint64_t kDetBytes = 418502;
 constexpr uint64_t kMeshBytes = 2429059;
 
-std::wstring ModelDir_(const StartupPaths& paths) {
-  wchar_t override_dir[MAX_PATH]{};
-  const DWORD n = GetEnvironmentVariableW(L"KAMERAGEULIS_MODELS_DIR", override_dir, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) return std::wstring(override_dir);
-  return paths.exe_dir + L"models";
+std::string Sha256HexOfFile(const std::wstring& path, bool* ok);  // defined below
+
+// Same search order as the app (windows_paths.h):
+//   1) KAMERAGEULIS_MODELS_DIR  2) <exe_dir>\models  3) %LOCALAPPDATA%\KameraGeulis\models
+// The selftest never downloads - it reports exactly which directory verified.
+std::wstring FindVerifiedModelDir_(const wchar_t** tried_out, size_t tried_cap, size_t* tried_n) {
+  *tried_n = 0;
+  const std::wstring candidates[] = {KgEnvModelsDirW(), KgExeModelsDirW(), KgLocalModelsDirW()};
+  const wchar_t* labels[] = {L"KAMERAGEULIS_MODELS_DIR", L"<exe>\\models", L"LOCALAPPDATA"};
+  for (size_t i = 0; i < 3; ++i) {
+    if (candidates[i].empty()) continue;
+    if (*tried_n < tried_cap) tried_out[(*tried_n)] = labels[i];
+    (*tried_n)++;
+    const std::wstring det = candidates[i] + L"\\" + kDetFile;
+    const std::wstring mesh = candidates[i] + L"\\" + kMeshFile;
+    bool det_ok = false, mesh_ok = false;
+    const std::string det_sha = Sha256HexOfFile(det, &det_ok);
+    const std::string mesh_sha = Sha256HexOfFile(mesh, &mesh_ok);
+    const bool ok = det_ok && mesh_ok && det_sha == kDetSha256 && mesh_sha == kMeshSha256;
+    kgcore::Log("selftest", "kandidat %ls (%ls): det=%s mesh=%s -> %s",
+                candidates[i].c_str(), labels[i],
+                det_ok ? (det_sha == kDetSha256 ? "OK" : "sha-mismatch") : "missing",
+                mesh_ok ? (mesh_sha == kMeshSha256 ? "OK" : "sha-mismatch") : "missing",
+                ok ? "DIPAKAI" : "dilewati");
+    if (ok) return candidates[i];
+  }
+  return {};
 }
 
 std::string Sha256HexOfFile(const std::wstring& path, bool* ok) {
@@ -160,13 +184,21 @@ int RunSelftest(const StartupPaths& paths) {
     EndFileLog();
     return 3;
   }
-  kgcore::Log("selftest", "OrtGetApiBase OK — version '%s', ORT_API_VERSION %u",
+  kgcore::Log("selftest", "OrtGetApiBase OK - version '%s', ORT_API_VERSION %u",
               base->GetVersionString() ? base->GetVersionString() : "?", ORT_API_VERSION);
 
-  // [3] Models present + verified (CI downloads them into <exe>\models;
-  //     KAMERAGEULIS_MODELS_DIR overrides).
-  const std::wstring dir = ModelDir_(paths);
-  kgcore::Log("selftest", "direktori model: %ls", dir.c_str());
+  // [3] Models present + verified (CI artifact ships <exe>\models).
+  const wchar_t* tried[8]{};
+  size_t tried_n = 0;
+  const std::wstring dir = FindVerifiedModelDir_(tried, 8, &tried_n);
+  if (dir.empty()) {
+    kgcore::Log("selftest", "tidak ada folder model yang lolos verifikasi (dicoba: %zu kandidat)",
+                tried_n);
+    kgcore::Log("selftest", "=== SELFTEST FAIL (4) ===");
+    EndFileLog();
+    return 4;
+  }
+  kgcore::Log("selftest", "direktori model terpilih: %ls", dir.c_str());
   const std::wstring det_path = dir + L"\\" + kDetFile;
   const std::wstring mesh_path = dir + L"\\" + kMeshFile;
   if (!CheckModelFile_(det_path, kDetSha256, kDetBytes, kDetFile) ||
@@ -271,7 +303,7 @@ int RunSelftest(const StartupPaths& paths) {
 
   // [6] GPUPixel cannot be initialised without a GL context — preloaded only.
   kgcore::Log("selftest", "GPUPixel: DLL ter-preload; inisialisasi GL/GPUPixel TIDAK diuji di sini "
-                           "(butuh GPU + konteks OpenGL — belum ada di lingkungan dev/CI)");
+                           "(butuh GPU + konteks OpenGL - belum ada di lingkungan dev/CI)");
   kgcore::Log("selftest", "=== SELFTEST PASS ===");
   EndFileLog();
   return 0;

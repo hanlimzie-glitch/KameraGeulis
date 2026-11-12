@@ -1,4 +1,4 @@
-// KameraGeulis — M2: GLFW window + live Media Foundation camera preview
+// KameraGeulis - M2: GLFW window + live Media Foundation camera preview
 // through the GPUPixel pipeline (BeautyFaceFilter: smoothing/whitening,
 // landmark-gated effects disabled) + full ImGui UI (tabbed panel, presets,
 // camera/resolution/fps picker, settings JSON save/load, debug overlay).
@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -129,7 +130,7 @@ struct PreviewTexture {
                       GL_UNSIGNED_BYTE, src);
       return;
     }
-    // CPU repack: optional horizontal mirror + optional BGRA→RGBA swap.
+    // CPU repack: optional horizontal mirror + optional BGRA->RGBA swap.
     const int row = width * 4;
     flip_.resize(static_cast<size_t>(row) * height);
     for (int y = 0; y < height; ++y) {
@@ -171,7 +172,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   kgcore::Log("app", "glfwInit...");
   if (!glfwInit()) {
     kg::ShowFatalAndExit(L"GLFW init gagal",
-                         L"glfwInit() mengembalikan false — GLFW tidak bisa dimulai sama sekali.\n"
+                         L"glfwInit() mengembalikan false - GLFW tidak bisa dimulai sama sekali.\n"
                          L"Penyebab umum: driver GPU/OpenGL rusak atau diblokir.\n"
                          L"Coba perbarui driver GPU (Intel/AMD/NVIDIA) lalu jalankan lagi.",
                          12);
@@ -201,20 +202,20 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
     window = glfwCreateWindow(1440, 810, "KameraGeulis", nullptr, nullptr);
     if (window) {
-      kgcore::Log("app", "GL context: %s — BERHASIL", a.label);
+      kgcore::Log("app", "GL context: %s - BERHASIL", a.label);
       break;
     }
     // GLFW 3.3 API: int glfwGetError(const char** description)
     const char* desc = nullptr;
     const int code = glfwGetError(&desc);
-    kgcore::Log("app", "GL context: %s — GAGAL (glfw error %d: %s)", a.label, code,
+    kgcore::Log("app", "GL context: %s - GAGAL (glfw error %d: %s)", a.label, code,
                 desc ? desc : "(tidak ada deskripsi)");
   }
   if (!window) {
     kg::ShowFatalAndExit(L"OpenGL context gagal",
                          L"Tidak bisa membuat konteks OpenGL (dicoba: 3.3 core, 3.3 any-profile, "
                          L"4.6 core).\n\n"
-                         L"Penyebab umum: (1) driver GPU usang/corrupt — update ke driver terbaru; "
+                         L"Penyebab umum: (1) driver GPU usang/corrupt - update ke driver terbaru; "
                          L"(2) GPU tidak mendukung OpenGL 3.3 (sangat tua/virtualized/remote desktop); "
                          L"(3) konflik dengan aplikasi overlay (capture/screen-recorder) yang "
                          L"meng-hook OpenGL.\n"
@@ -225,7 +226,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   glfwSwapInterval(1);
   if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
     kg::ShowFatalAndExit(L"glad gagal memuat fungsi OpenGL",
-                         L"Konteks GL dibuat tetapi gladLoadGLLoader gagal — kombinasi driver/"
+                         L"Konteks GL dibuat tetapi gladLoadGLLoader gagal - kombinasi driver/"
                          L"konteks tidak menyediakan fungsi GL yang dibutuhkan.\n"
                          L"Update driver GPU Anda.",
                          14);
@@ -247,15 +248,18 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   const std::string exe_dir = WideToUtf8(paths.exe_dir);
   const std::string settings_path = SettingsPath();
   if (safe) {
-    kgcore::Log("app", "SAFE MODE: onnxruntime & GPUPixel TIDAK dimuat; kamera TIDAK dibuka; "
-                       "menampilkan gradien sintetis. Jika crash tetap terjadi di mode ini, "
-                       "penyebabnya ada di lapisan window/UI, bukan di ORT/GPUPixel/kamera.");
+    kgcore::Log("app", "SAFE MODE: onnxruntime & GPUPixel TIDAK dimuat (objek pipeline tidak "
+                       "dibuat sama sekali); kamera TIDAK dibuka; menampilkan gradien sintetis.");
   }
-  kg::BeautyPipeline pipeline;
+  // The BeautyPipeline constructor already builds FaceTracker+OrtLandmarkProvider,
+  // which loads (and may download) the ONNX models - so in --safe mode we must
+  // NOT construct it at all.
+  std::unique_ptr<kg::BeautyPipeline> pipeline;
   bool pipeline_ok = false;
   if (!safe) {
     try {
-      pipeline_ok = pipeline.Init(exe_dir);
+      pipeline = std::make_unique<kg::BeautyPipeline>();
+      pipeline_ok = pipeline->Init(exe_dir);
     } catch (const std::exception& e) {
       kgcore::Log("app", "pipeline GPUPixel init exception: %s", e.what());
       pipeline_ok = false;
@@ -263,13 +267,14 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       kgcore::Log("app", "pipeline GPUPixel init exception: unknown");
       pipeline_ok = false;
     }
-    kgcore::Log("app", "pipeline GPUPixel init: %s",
-                pipeline_ok ? "OK" : "GAGAL — preview menampilkan frame mentah (tanpa efek)");
+    kgcore::Log("app", "pipeline GPUPixel init: %s", pipeline_ok ? "OK" : "GAGAL");
   } else {
     kgcore::Log("app", "pipeline GPUPixel: dinonaktifkan (mode aman)");
   }
 
   kg::AppUiState ui;
+  ui.safe_mode = safe;
+  ui.vsync = true;
   kg::Settings settings;
   const bool settings_loaded = settings.Load(settings_path);
   if (settings_loaded) {
@@ -286,7 +291,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                    ui.capture_height, ui.capture_fps);
     kgcore::Log("app", "MF capture start: device=%d %dx%d@%dfps -> %s", ui.camera_device,
                 ui.capture_width, ui.capture_height, ui.capture_fps,
-                camera_started ? "OK" : "GAGAL — memakai gradien sintetis");
+                camera_started ? "OK" : "GAGAL - memakai gradien sintetis");
   } else {
     kgcore::Log("app", "MF capture: dinonaktifkan (mode aman)");
   }
@@ -298,7 +303,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-  ui.landmark_available = pipeline_ok && pipeline.Tracker().ProviderAvailable();
+  if (!safe && !pipeline_ok && pipeline) {
+    ui.notice = pipeline->LastResourceError().empty()
+                    ? "Efek GPU dinonaktifkan (lihat log) - preview menampilkan frame mentah"
+                    : pipeline->LastResourceError();
+    ui.notice_is_error = true;
+  }
+  ui.landmark_available = pipeline_ok && pipeline && pipeline->Tracker().ProviderAvailable();
   ui.landmark_status = ui.landmark_available
                            ? kg::Strings::Instance().Get("landmark.active")
                            : kg::Strings::Instance().Get("landmark.inactive");
@@ -312,10 +323,17 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   bool synthetic = !camera_started;
   int synthetic_w = 640, synthetic_h = 480;
   bool f3_prev = false;
+  bool vsync_applied = true;  // glfwSwapInterval(1) right after creation
 
   while (!glfwWindowShouldClose(window) && !ui.quit_requested) {
     glfwPollEvents();
 
+    // VSync checkbox (About tab) - apply on change only.
+    if (ui.vsync != vsync_applied) {
+      glfwSwapInterval(ui.vsync ? 1 : 0);
+      vsync_applied = ui.vsync;
+      kgcore::Log("app", "vsync %s", ui.vsync ? "ON" : "OFF");
+    }
     // F3 toggles the landmark/timings debug overlay.
     const bool f3 = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
     if (f3 && !f3_prev) ui.show_debug = !ui.show_debug;
@@ -361,22 +379,29 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.request_reset_defaults = false;
     }
     if (ui.request_camera_apply) {
-      capture.Stop();
-      camera_started = capture.Start(ui.camera_device, ui.capture_width,
-                                     ui.capture_height, ui.capture_fps);
-      ui.camera_ok = camera_started;
-      synthetic = !camera_started;
-      ui.frames_captured = 0;
-      ui.status_message = camera_started
-                              ? kg::Strings::Instance().Get("camera.applied")
-                              : kg::Strings::Instance().Get("camera.apply_failed");
-      if (!camera_started) {
-        ui.notice = kg::Strings::Instance().Get("camera.apply_failed");
-        ui.notice_is_error = true;
+      if (safe) {
+        // --safe: camera controls are disabled in the UI, but a stale
+        // request (e.g. from "Muat" settings in safe mode) must never open
+        // the camera.
+        ui.request_camera_apply = false;
       } else {
-        ui.notice_is_error = false;
+        capture.Stop();
+        camera_started = capture.Start(ui.camera_device, ui.capture_width,
+                                       ui.capture_height, ui.capture_fps);
+        ui.camera_ok = camera_started;
+        synthetic = !camera_started;
+        ui.frames_captured = 0;
+        ui.status_message = camera_started
+                                ? kg::Strings::Instance().Get("camera.applied")
+                                : kg::Strings::Instance().Get("camera.apply_failed");
+        if (!camera_started) {
+          ui.notice = kg::Strings::Instance().Get("camera.apply_failed");
+          ui.notice_is_error = true;
+        } else {
+          ui.notice_is_error = false;
+        }
+        ui.request_camera_apply = false;
       }
-      ui.request_camera_apply = false;
     }
 
     // Language radio applies immediately.
@@ -408,18 +433,18 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     bool pipeline_frame_ok = false;
     if (have_frame && pipeline_ok) {
       // Live-apply the two global beauty parameters (cheap; idempotent).
-      pipeline.SetBeautyStrength(ui.smoothing, ui.whitening);
-      pipeline.ProcessFrame(frame);
+      pipeline->SetBeautyStrength(ui.smoothing, ui.whitening);
+      pipeline->ProcessFrame(frame);
       kg::StageTimings st;
-      if (pipeline.GetStageTimings(&st)) {
+      if (pipeline->GetStageTimings(&st)) {
         ui.detect_ms = st.detect_ms;
         ui.mesh_ms = st.mesh_ms;
         ui.track_ms = st.track_ms;
         ui.frames_since_detect = st.frames_since_detect;
       }
-      const uint8_t* out = pipeline.OutputRGBA();
-      out_w = pipeline.OutputWidth();
-      out_h = pipeline.OutputHeight();
+      const uint8_t* out = pipeline->OutputRGBA();
+      out_w = pipeline->OutputWidth();
+      out_h = pipeline->OutputHeight();
       if (out && out_w > 0 && out_h > 0) {
         preview.Upload(out, out_w, out_h, ui.mirror, /*src_is_bgra=*/false);
         pipeline_frame_ok = true;
@@ -457,7 +482,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       fps_smooth = fps_smooth == 0.0f ? fps : fps_smooth * 0.95f + fps * 0.05f;
       ui.fps = fps_smooth;
     }
-    ui.landmark_available = pipeline.Tracker().ProviderAvailable();
+    if (pipeline) ui.landmark_available = pipeline->Tracker().ProviderAvailable();
 
     // ---------- Render ----------
     const auto render_start = clock_type::now();
@@ -505,7 +530,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       if (ui.show_debug && image_size.x > 1.0f && image_size.y > 1.0f) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const kg::LandmarkSet lm_default{};
-        const auto& lm = pipeline_ok ? pipeline.Tracker().Current() : lm_default;
+        const auto& lm = pipeline_ok ? pipeline->Tracker().Current() : lm_default;
         auto to_screen = [&](float x, float y) {
           const float sx = ui.mirror ? (image_pos.x + (1.0f - x) * image_size.x)
                                      : (image_pos.x + x * image_size.x);
@@ -570,7 +595,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   }
 
   capture.Stop();
-  if (pipeline_ok) pipeline.Shutdown();  // GL context still current — required
+  if (pipeline) pipeline->Shutdown();  // GL context still current - required
   preview.Destroy();
 
   ImGui_ImplOpenGL3_Shutdown();
@@ -581,10 +606,10 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   return 0;
 }
 
-// Windows GUI subsystem entry point (UNICODE build → wWinMain).
-// Order: paths → file log (flush per line) → crash handlers → (DLL preload)
-// → selftest/safe-mode branch → window. Every failure path ends either in a
-// clear MessageBox + log, or (selftest) a non-zero exit code — never a silent exit.
+// Windows GUI subsystem entry point (UNICODE build -> wWinMain).
+// Order: paths -> file log (flush per line) -> crash handlers -> (DLL preload)
+// -> selftest/safe-mode branch -> window. Every failure path ends either in a
+// clear MessageBox + log, or (selftest) a non-zero exit code - never a silent exit.
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
   const kg::StartupArgs args = kg::ParseStartupArgs(GetCommandLineW());
 
@@ -592,7 +617,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
   std::wstring path_err;
   if (!kg::ComputeStartupPaths(hInstance, &paths, &path_err)) {
     const std::wstring msg = L"KameraGeulis tidak bisa dimulai.\n\n" + path_err;
-    MessageBoxW(nullptr, msg.c_str(), L"KameraGeulis — Gagal Startup",
+    MessageBoxW(nullptr, msg.c_str(), L"KameraGeulis - Gagal Startup",
                 MB_ICONERROR | MB_OK | MB_TOPMOST);
     return 10;
   }

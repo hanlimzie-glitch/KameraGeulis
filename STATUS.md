@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-12 (M2c hijau di CI — run 43192212350, artifact `kamerageulis-m2-windows-x64` (7.510.560 B) termasuk step smoke test `--selftest`; crash di PC pengguna masih belum terdiagnosis)**
+Terakhir diperbarui: **2026-11-12 (M2d — fix crash startup gpupixel.dll 0x3968a: resource `res/` ikut artifact + diverifikasi sebelum pipeline dibuat; models `.onnx` ikut artifact; simbol PDB/MAP; belum diverifikasi di PC pengguna)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -14,6 +14,7 @@ Legenda status:
 | M1b | Pipeline landmark (ORT CPU, 468 pt) + kg_core decode/ROI/OneEuro | 🔨 | ✅ (run 43174282611) | ⬜ | Windows runtime belum diverifikasi di mesin nyata; GPUPixel landmark filters **tidak di-wire** (pemetaan 468→Mars tidak kredibel, docs/LANDMARKS.md §8); kg_core hijau di Linux (45 TC / 8319 assertions) |
 | M2 | UI ImGui lengkap + slider skin live + debug overlay | ✅ (dikode) | ✅ (run 43183762692) | ⬜ (crash: force-close saat startup) | belum diverifikasi di Windows nyata; snapshot PNG belum |
 | M2c | Stabilitas startup: log file flush/baris, crash handler + dump + MessageBox, preload DLL app-local + OrtGetApiBase, GL fallback 3 tahap, `--safe`, `--selftest` + CI smoke test | ✅ | ✅ (run 43192212350 — termasuk step smoke test `--selftest` hijau) | ⬜ | belum diverifikasi di PC pengguna; penyebab force-close belum diketahui — setelah M2c, kegagalan tercatat di log.txt/dump, bukan keluar diam-diam |
+| M2d | Crash startup gpupixel.dll 0x3968a (resource `res/` hilang → null lookup → AV di BeautyFaceUnitFilter::DoRender); models ikut artifact; urutan pencarian model disatukan (env → exe\\models → LOCALAPPDATA); PDB/MAP + symbolizer RVA di CI; safe-mode sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; Terapkan/apply dimatikan); FPS render vs kamera dipisah label; vsync checkbox; resource hilang → efek GPU nonaktif + pesan UI (bukan crash) | ✅ (dikode) | ✅ (run terakhir hijau) | ⬜ | belum diverifikasi di PC pengguna — fix terbukti di level source + CI (artifact wajib berisi res/ & models/, `--selftest` hijau dari dist) |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -43,6 +44,14 @@ Legenda status:
 3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
 4. Setiap milestone CI meng-upload artifact (`kamerageulis-mN-windows-x64`; M1b: `kamerageulis-m1b-windows-x64`). Log mentah Actions tidak bisa diunduh dari sandbox — error MSVC dibaca via anotasi `::error::` (workflow memancarkannya; lihat `.github/workflows/build.yml` langkah Build).
 5. Detil fix CI selalu dianotasikan di commit message fix (analisis + akar masalah + perbaikan).
+
+## M2d — detail (2026-11-12)
+
+**Akar masalah (terbukti di source):** dump pengguna: AV READ 0x0 di `gpupixel.dll` RVA 0x3968a, deterministik lintas build. `beauty_face_unit_filter.cc` (GPUPixel v1.3.1): `gray_image_ = SourceImage::Create(res/lookup_*.png)` — tanpa folder `res/`, `SourceImage::Create` return `nullptr` (assert di-strip di Release) → `Init()` tetap `return true` → `DoRender()` mengikat GL_TEXTURE5 → `gray_image_->GetFramebuffer()` di atas null → AV. Fungsi berisi 0x3968a dilaporkan CI via PDB/MAP (`scripts/resolve-pdb-rva.ps1`).
+
+**Fix:** (1) CI menyalin `src/res/*.png` dari ref GPUPixel yang di-pin ke `dist\res\` (tidak di-commit ke repo); app memanggil `GPUPixel::SetResourcePath(exe_dir)` sebelum filter dibuat; log `[pipeline] resource res/<file>: OK (N B)` per file. (2) Pre-verify 4 lookup wajib sebelum pipeline dibuat — hilang/ukuran nol → init gagal → efek GPU nonaktif (preview tetap jalan) + pesan merah di status bar, bukan crash. (3) Cek null `BeautyFaceFilter::Create` + source_/sink_. (4) gpupixel dibangun `/Zi` + `/MAP`; CI resolve RVA crash terhadap `gpupixel.map`. (5) Langkah CI "Verify artifact contents" menggagalkan build bila ada file wajib yang hilang (exe, 4 DLL, 7 PNG res, 2 model, THIRD_PARTY/README/STATUS, pdb+map). (6) `models/*.onnx` ikut artifact; urutan pencarian disatukan via `kg_pipeline/windows_paths.h` (env → `exe\models` → LOCALAPPDATA) di app dan selftest. (7) `--safe` sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; apply kamera diblokir); label FPS render/kamera dipisah; checkbox VSync; glif non-ASCII dibuang dari UI.
+
+**Belum diverifikasi:** fungsi persis di RVA 0x3968a (butuh log CI), dan crash-hilang-di-PC (butuh PC pengguna).
 
 ## M2c — detail (2026-11-12)
 

@@ -24,7 +24,7 @@ Hasil: `build\Release\KameraGeulis.exe` (subsistem GUI). `onnxruntime.dll` (dan 
 
 ## Model landmark (opsional, first-run)
 
-Efek landmark memakai dua model ONNX (Apache-2.0, Google MediaPipe, hasil konversi tf2onnx), **tidak dibundel di repo**. Saat aplikasi pertama kali berjalan, `OrtLandmarkProvider` mengunduh dari rilis GitHub `models-v1` ke `%LOCALAPPDATA%\KameraGeulis\models` dan memverifikasi SHA-256 yang tertanam di kode:
+Efek landmark memakai dua model ONNX (Apache-2.0, Google MediaPipe, hasil konversi tf2onnx). Sejak M2d model **ikut di artifact** di `models\` (diverifikasi SHA-256 pin saat load; urutan pencarian: `KAMERAGEULIS_MODELS_DIR` → `<exe>\models` → `%LOCALAPPDATA%\KameraGeulis\models` — disatukan dengan `--selftest` via `kg_pipeline/windows_paths.h`):
 
 - `face_detection_short_range.onnx` — sha256 `82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d`
 - `face_mesh.onnx` — sha256 `ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337`

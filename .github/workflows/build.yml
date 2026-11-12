@@ -66,6 +66,8 @@ jobs:
 
       - name: Package artifact
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -110,41 +112,87 @@ jobs:
             Write-Host "::error ::redistributable packaging failed: $($_.Exception.Message)"
             throw
           }
+          # GPUPixel runtime resources (lookup textures loaded by filters at
+          # creation/render time — e.g. BeautyFaceUnitFilter loads src/res/*.png
+          # via Util::GetResourcePath()+"res"). Missing files => null SourceImage
+          # => virtual call on null == the gpupixel.dll 0x3968a crash. Ship them.
+          $resCandidates = Get-ChildItem -Recurse -Path build -Directory -Filter res |
+                             Where-Object { $_.FullName -match 'gpupixel' } |
+                             Sort-Object FullName -Descending
+          $res = $null
+          foreach ($c in $resCandidates) {
+            if ((Test-Path (Join-Path $c.FullName 'lookup_gray.png')) -and
+                (Test-Path (Join-Path $c.FullName 'lookup_skin.png'))) { $res = $c; break }
+          }
+          if (-not $res) {
+            $fallback = Join-Path 'build' '_deps\gpupixel-src\src\res'
+            if (Test-Path $fallback) { $res = Get-Item $fallback }
+          }
+          if (-not $res) { throw 'GPUPixel src/res folder not found under build\_deps (expected gpupixel-src\src\res)' }
+          New-Item -ItemType Directory -Force -Path dist\res | Out-Null
+          Copy-Item (Join-Path $res.FullName '*.png') -Destination dist\res -Force
+          Write-Host "res copied from: $($res.FullName) ($((Get-ChildItem dist\res).Count) files)"
+          # Models ship in the artifact (M2b): CI-verified models-v1 assets.
+          New-Item -ItemType Directory -Force -Path dist\models | Out-Null
+          gh release download models-v1 --repo hanlimzie-glitch/KameraGeulis `
+            --pattern "face_detection_short_range.onnx" --pattern "face_mesh.onnx" `
+            --dir dist\models --clobber
+          if ($LASTEXITCODE -ne 0) { throw "models-v1 download failed (exit $LASTEXITCODE)" }
+          Write-Host "models copied into dist\models"
+          # Debug symbols (for symbolizing crash dumps; not needed at runtime)
+          $lnk = Get-ChildItem -Recurse -Path build -Filter gpupixel.pdb -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lnk) { Copy-Item $lnk.FullName dist -Force; Write-Host "pdb: $($lnk.FullName)" } else { Write-Host '::warning ::gpupixel.pdb not found (crash symbolization limited)' }
+          $lnk2 = Get-ChildItem -Recurse -Path build -Filter gpupixel.map -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lnk2) { Copy-Item $lnk2.FullName dist -Force; Write-Host "map: $($lnk2.FullName)" } else { Write-Host '::warning ::gpupixel.map not found' }
           Copy-Item THIRD_PARTY.md, README.md, STATUS.md -Destination dist
           Get-ChildItem dist | ForEach-Object { Write-Host "dist: $($_.Name) ($($_.Length) B)" }
 
+      - name: Verify artifact contents (fail build if incomplete)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'dist\KameraGeulis.exe','dist\gpupixel.dll','dist\onnxruntime.dll',
+            'dist\vcruntime140.dll','dist\vcruntime140_1.dll','dist\msvcp140.dll',
+            'dist\THIRD_PARTY.md','dist\README.md','dist\STATUS.md',
+            'dist\res\lookup_gray.png','dist\res\lookup_origin.png','dist\res\lookup_skin.png',
+            'dist\res\lookup_light.png','dist\res\lookup_custom.png','dist\res\mouth.png','dist\res\blusher.png',
+            'dist\models\face_detection_short_range.onnx','dist\models\face_mesh.onnx',
+            'dist\gpupixel.pdb','dist\gpupixel.map')
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            $missing | ForEach-Object { Write-Host "::error ::missing from artifact: $_" }
+            throw "artifact incomplete ($($missing.Count) required files missing)"
+          }
+          Get-ChildItem -Recurse dist | Sort-Object FullName |
+            ForEach-Object { Write-Host ("{0,-64} {1,10} B" -f $_.FullName.Substring($PWD.Path.Length + 1), $_.Length) }
+          Write-Host "artifact contents OK ($($required.Count) required files present)"
+
       - name: Smoke test (selftest from packaged artifact)
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           try {
             $ErrorActionPreference = 'Stop'
-            Write-Host "== dist contents (what ships to the tester's PC) =="
-            Get-ChildItem dist | ForEach-Object { Write-Host ("{0,-40} {1,10} B" -f $_.Name, $_.Length) }
-            # Models are NOT packaged in the artifact (first-run download design).
-            # For the smoke test we fetch the CI-verified models-v1 assets into dist\models,
-            # run the headless --selftest, then REMOVE them again before packaging.
-            gh release download models-v1 --repo hanlimzie-glitch/KameraGeulis `
-              --pattern "face_detection_short_range.onnx" --pattern "face_mesh.onnx" `
-              --dir dist\models --clobber
             $log = Join-Path $env:APPDATA 'KameraGeulis\log.txt'
             if (Test-Path $log) { Remove-Item $log -Force }
-            Write-Host "== running dist\KameraGeulis.exe --selftest =="
+            Write-Host "== running dist\KameraGeulis.exe --selftest (models ship in dist\models) =="
             $proc = Start-Process -FilePath 'dist\KameraGeulis.exe' -ArgumentList '--selftest' `
                                   -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
             Write-Host "selftest exit code: $code"
             Write-Host "== $log (tail) =="
             if (Test-Path $log) { Get-Content $log | Select-Object -Last 80 } else { Write-Host "(log.txt tidak ditemukan)" }
-            Remove-Item 'dist\models' -Recurse -Force
-            if ($code -ne 0) { throw "selftest FAILED (exit $code) — lihat ekor log di atas" }
+            if ($code -ne 0) { throw "selftest FAILED (exit $code) - lihat ekor log di atas" }
             Write-Host "SELFTEST PASS"
           } catch {
             Write-Host "::error ::smoke test failed: $($_.Exception.Message)"
-            Remove-Item 'dist\models' -Recurse -Force -ErrorAction SilentlyContinue
             throw
           }
+
+      - name: Resolve crash RVA 0x3968a against gpupixel.map
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/resolve-pdb-rva.ps1 -MapPath dist\gpupixel.map -DllPath dist\gpupixel.dll -Rva 0x3968a
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -25,7 +25,9 @@ Konsekuensi: paket `kamerageulis-*-windows-x64` (artifact CI) bersifat mandiri �
 | `msvcp140.dll` | idem | idem | idem |
 | `THIRD_PARTY.md`, `README.md`, `STATUS.md` | repo | — | atribusi |
 
-**Tidak** dibundel (sengaja): `softcam.dll` (M3, butuh registrasi admin + build softcam terpisah), model `.onnx` (diunduh first-run dari release `models-v1` atau dipakai dari `KAMERAGEULIS_MODELS_DIR`), `mars-face*` (tidak ada di Windows).
+**Dibundel sejak M2d (artifact):** `models\face_detection_short_range.onnx` + `models\face_mesh.onnx` (~2,8 MB, Apache-2.0, dari release `models-v1` yang diverifikasi CI; SHA-256 pin di kode; diunduh `gh release download` saat packaging) dan `res\*.png` (7 file, Apache-2.0, dari source GPUPixel ref yang di-pin) — tanpa keduanya app crash (lihat `docs/GPUPIXEL.md`). First-run TIDAK butuh internet.
+
+**Tidak** dibundel (sengaja): `softcam.dll` (M3, butuh registrasi admin + build softcam terpisah), `mars-face*` (tidak ada di Windows). `gpupixel.pdb` + `gpupixel.map` **ikut artifact** untuk symbolisasi dump (bukan untuk runtime).
 
 ## Yang belum diverifikasi
 

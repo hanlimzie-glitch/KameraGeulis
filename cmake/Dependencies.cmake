@@ -30,6 +30,12 @@ if(WIN32)
     GIT_REPOSITORY https://github.com/pixpark/gpupixel.git
     GIT_TAG        f33abfa5a802e0dfb04b98f9240a4f24b9d0eb96)  # v1.3.1
   FetchContent_MakeAvailable(gpupixel)
+  # Debug symbols for crash symbolization (map file lets CI resolve RVAs like
+  # the gpupixel.dll 0x3968a crash site against functions). Keeps /MD Release.
+  if(MSVC)
+    target_compile_options(gpupixel PRIVATE /Zi)
+    target_link_options(gpupixel PRIVATE /DEBUG /MAP)
+  endif()
 
   # Dear ImGui (MIT) — pinned v1.91.9, same version GPUPixel vendors
   FetchContent_Declare(imgui

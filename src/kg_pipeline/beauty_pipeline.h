@@ -36,6 +36,10 @@ class BeautyPipeline {
   // Live-apply the two global beauty parameters ([0,1] each); idempotent.
   void SetBeautyStrength(float smoothing, float whitening);
 
+  // Human-readable reason when Init() returns false ("resource res/…" /
+  // "BeautyFaceFilter::Create gagal …"). Empty on success.
+  const std::string& LastResourceError() const { return last_resource_error_; }
+
   const uint8_t* OutputRGBA() const;
   int OutputWidth() const;
   int OutputHeight() const;
@@ -49,6 +53,7 @@ class BeautyPipeline {
   FaceTracker& Tracker() { return *tracker_; }
 
  private:
+  std::string last_resource_error_;
   std::unique_ptr<FaceTracker> tracker_;
   std::shared_ptr<gpupixel::SourceRawData> source_;
   std::shared_ptr<gpupixel::BeautyFaceFilter> beauty_filter_;

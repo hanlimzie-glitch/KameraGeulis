@@ -7,12 +7,12 @@ namespace kgcore {
 // camera fields mirror Settings; runtime-only fields are transient.
 struct AppUiState {
   // ---- persisted (mirror of Settings) ----
-  float smoothing = 0.35f;    // [0,1] — Haluskan Kulit
-  float whitening = 0.25f;    // [0,1] — Cerahkan Kulit
-  float face_slim = 0.0f;     // [0,1] — disabled ("Segera hadir")
-  float big_eyes = 0.0f;      // [0,1] — disabled
-  float lipstick = 0.0f;      // [0,1] — disabled
-  float blusher = 0.0f;       // [0,1] — disabled
+  float smoothing = 0.35f;    // [0,1] - Haluskan Kulit
+  float whitening = 0.25f;    // [0,1] - Cerahkan Kulit
+  float face_slim = 0.0f;     // [0,1] - disabled ("Segera hadir")
+  float big_eyes = 0.0f;      // [0,1] - disabled
+  float lipstick = 0.0f;      // [0,1] - disabled
+  float blusher = 0.0f;       // [0,1] - disabled
   std::string preset = "Natural";      // Natural|Soft|Glam|ClearSkin|Custom
   bool mirror = true;
   bool landmark_enabled = true;
@@ -26,6 +26,8 @@ struct AppUiState {
   bool quit_requested = false;
   bool compare_held = false;   // UI-compares against the raw frame
   bool show_debug = false;     // F3 / Info tab: landmark overlay + timings
+  bool safe_mode = false;      // --safe: camera/ORT/GPUPixel disabled
+  bool vsync = true;           // About tab checkbox (runtime-only)
   bool camera_ok = false;
   int cam_width = 0, cam_height = 0;
   uint64_t frames_captured = 0;

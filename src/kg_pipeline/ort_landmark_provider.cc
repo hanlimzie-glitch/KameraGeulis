@@ -23,6 +23,7 @@
 #include "kgcore/face_mesh_decode.h"
 #include "kgcore/log.h"
 #include "kgcore/roi_align.h"
+#include "windows_paths.h"
 
 namespace kgcore {
 namespace {
@@ -115,16 +116,40 @@ OrtLandmarkProvider::~OrtLandmarkProvider() = default;
 
 bool OrtLandmarkProvider::Available() const { return available_; }
 
+// Model search order (shared with the app --selftest via windows_paths.h):
+//   1) KAMERAGEULIS_MODELS_DIR — authoritative (download target if writable)
+//   2) <exe_dir>\models — shipped in the CI artifact (read-only)
+//   3) %LOCALAPPDATA%\KameraGeulis\models — download cache / download target
+// Returns the first directory where BOTH models exist and verify. If none
+// does, returns the directory the app should DOWNLOAD into (env dir if set,
+// else LOCALAPPDATA).
 std::wstring OrtLandmarkProvider::ModelDir_() const {
-  wchar_t override_dir[MAX_PATH]{};
-  const DWORD n = GetEnvironmentVariableW(L"KAMERAGEULIS_MODELS_DIR", override_dir, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) return std::wstring(override_dir);
-  wchar_t local[MAX_PATH]{};
-  const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-  if (m == 0 || m >= MAX_PATH) return {};
-  std::wstring dir(local);
-  dir += L"\\KameraGeulis\\models";
-  return dir;
+  const std::wstring env = KgEnvModelsDirW();
+  const std::wstring exe = KgExeModelsDirW();
+  const std::wstring local = KgLocalModelsDirW();
+  auto verified = [&](const std::wstring& dir) {
+    if (dir.empty()) return false;
+    return FilesEqualHash(dir + L"\\" + kDetFile, kDetSha256) &&
+           FilesEqualHash(dir + L"\\" + kMeshFile, kMeshSha256);
+  };
+  if (!env.empty() && verified(env)) {
+    Log(kTag, "model dir: %ls (KAMERAGEULIS_MODELS_DIR, verified)", env.c_str());
+    return env;
+  }
+  if (verified(exe)) {
+    Log(kTag, "model dir: %ls (shipped next to exe, verified)", exe.c_str());
+    return exe;
+  }
+  if (!local.empty() && verified(local)) {
+    Log(kTag, "model dir: %ls (LOCALAPPDATA cache, verified)", local.c_str());
+    return local;
+  }
+  if (!env.empty()) {
+    Log(kTag, "model dir: %ls (KAMERAGEULIS_MODELS_DIR; download target)", env.c_str());
+    return env;  // env authoritative: download into it
+  }
+  Log(kTag, "model dir: %ls (tidak ada model terverifikasi - download)", local.c_str());
+  return local;
 }
 
 bool OrtLandmarkProvider::DownloadFile_(const wchar_t* host_path, const std::wstring& dest) {

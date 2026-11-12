@@ -91,7 +91,12 @@ void DrawPresetsTab(AppUiState& ui) {
 void DrawCameraTab(AppUiState& ui) {
   auto& s = Strings::Instance();
   auto& cache = CamCache();
-  if (!cache.loaded) {
+  const bool cam_disabled = ui.safe_mode;
+  if (cam_disabled) {
+    ImGui::TextWrapped("Kamera dinonaktifkan (mode aman). Jalankan tanpa --safe untuk memakai kamera.");
+    ImGui::Separator();
+    ImGui::BeginDisabled();
+  } else if (!cache.loaded) {
     cache.RefreshDevices();
     cache.RefreshModes(ui.camera_device);
     cache.loaded = true;
@@ -117,7 +122,7 @@ void DrawCameraTab(AppUiState& ui) {
     }
   }
 
-  // Resolution list from native modes (unique w×h), or a safe fallback.
+  // Resolution list from native modes (unique wxh), or a safe fallback.
   struct Res { int w, h; };
   std::vector<Res> resolutions;
   for (const auto& m : cache.modes) {
@@ -190,10 +195,13 @@ void DrawCameraTab(AppUiState& ui) {
   }
   ImGui::Separator();
   ImGui::Text("%s: %dx%d", s.Get("camera.current").c_str(), ui.cam_width, ui.cam_height);
-  ImGui::Text("FPS: %.1f", ui.fps);
+  ImGui::Text("FPS render: %.1f", ui.fps);
   ImGui::Separator();
 
-  // Virtual camera — disabled until M3 (softcam + registrasi admin).
+  if (cam_disabled) {
+    ImGui::EndDisabled();
+  }
+  // Virtual camera - disabled until M3 (softcam + registrasi admin).
   ImGui::BeginDisabled();
   bool vcam = false;
   ImGui::Checkbox(s.Get("vcam.toggle").c_str(), &vcam);
@@ -219,6 +227,7 @@ void DrawAboutTab(AppUiState& ui) {
   }
   ImGui::Separator();
 
+  ImGui::Checkbox("VSync", &ui.vsync);
   ImGui::Checkbox(s.Get("debug.overlay").c_str(), &ui.show_debug);
   ImGui::TextWrapped("%s", s.Get("debug.note").c_str());
   ImGui::Spacing();
@@ -252,9 +261,9 @@ void RenderPanel(AppUiState& ui) {
 
   // --- Status line ---
   ImGui::Text("%s: %s (%dx%d, %llu frame)", s.Get("status.camera").c_str(),
-              ui.camera_ok ? "OK" : "—", ui.cam_width, ui.cam_height,
+              ui.camera_ok ? "OK" : "-", ui.cam_width, ui.cam_height,
               static_cast<unsigned long long>(ui.frames_captured));
-  ImGui::Text("FPS: %.1f", ui.fps);
+  ImGui::Text("FPS (render): %.1f", ui.fps);
   ImGui::Text("Status: %s", ui.status_message.c_str());
   ImGui::Separator();
 

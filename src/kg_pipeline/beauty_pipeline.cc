@@ -1,5 +1,6 @@
 #include "beauty_pipeline.h"
 #include <gpupixel/gpupixel.h>
+#include <fstream>
 #include "kgcore/log.h"
 #include "ort_landmark_provider.h"
 
@@ -15,9 +16,38 @@ bool BeautyPipeline::Init(const std::string& resource_path) {
   if (initialized_) return true;
   gpupixel::GPUPixel::SetResourcePath(resource_path);
 
+  // Pre-verify every lookup texture the GPUPixel filters load (see
+  // beauty_face_unit_filter.cc in the pinned gpupixel ref). GPUPixel's
+  // SourceImage::Create returns nullptr for a missing file (asserts are
+  // compiled out in Release) and its Init() still reports success — the
+  // first frame then crashes on a virtual call with a null source image.
+  // Missing resources must disable the pipeline with a clear log/UI
+  // message, never crash.
+  const char* required[] = {"lookup_gray.png", "lookup_origin.png", "lookup_skin.png",
+                            "lookup_light.png"};
+  bool all_present = true;
+  for (const char* name : required) {
+    const std::string path = resource_path + "res/" + name;
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) {
+      Log(kTag, "resource HILANG: res/%s (dicari di %s)", name, path.c_str());
+      all_present = false;
+      continue;
+    }
+    const long long size = static_cast<long long>(f.tellg());
+    Log(kTag, "resource res/%s: OK (%lld B)", name, size);
+  }
+  if (!all_present) {
+    last_resource_error_ =
+        "resource gpupixel di 'res/' tidak lengkap - efek GPU dinonaktifkan (lihat log)";
+    Log(kTag, "%s", last_resource_error_.c_str());
+    return false;
+  }
+
   beauty_filter_ = gpupixel::BeautyFaceFilter::Create();
   if (!beauty_filter_) {
-    Log(kTag, "BeautyFaceFilter::Create failed");
+    Log(kTag, "BeautyFaceFilter::Create failed (filter/shader init) - efek GPU dinonaktifkan");
+    last_resource_error_ = "BeautyFaceFilter::Create gagal - lihat log (shader/GLib?)";
     return false;
   }
   sink_ = gpupixel::SinkRawData::Create();
@@ -29,6 +59,10 @@ bool BeautyPipeline::Init(const std::string& resource_path) {
   beauty_filter_->SetBlurAlpha(0.35f);
   beauty_filter_->SetWhite(0.125f);
   source_->AddSink(beauty_filter_)->AddSink(sink_);
+  if (!source_ || !sink_) {  // belt-and-braces (checked above too)
+    last_resource_error_ = "SourceRawData/SinkRawData null setelah Create";
+    return false;
+  }
   initialized_ = true;
   Log(kTag, "pipeline initialized (landmark provider: %s)", tracker_->ProviderName());
   return true;
