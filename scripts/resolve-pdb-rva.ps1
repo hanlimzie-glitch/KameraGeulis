@@ -109,33 +109,27 @@ $probeNote = ''
 if ($probe.Count -gt 0) {
   $probeNote = '; probes: ' + (($probe | ForEach-Object { '{0} @0x{1:X}' -f $_.Sym, $_.Rva }) -join ', ')
 }
-Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]{4}" -f $Rva, $best.Sym, $best.Section, $best.Rva, $probeNote)
-# Raw evidence via annotations (sandbox cannot read step logs):
+# ---- annotations (GitHub caps ~10 notices per step - keep it tight) ----
+# 1) containing function (best non-metadata symbol at/below the RVA)
+Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]" -f $Rva, $best.Sym, $best.Section, $best.Rva)
+if ($above) { Write-Host ("next symbol above: {0} @0x{1:X}" -f $above.Sym, $above.Rva) }
 if ($preferred) { Write-Host ("::notice::map preferred=0x{0:X}" -f $preferred) }
 Write-Host ("::notice::map raw best: {0}" -f $best.Raw)
-$rawSeen = 0
-foreach ($p in $probe) {
-  if ($rawSeen -ge 3) { break }
-  if ($p.Rva -eq $best.Rva -and $p.Sym -eq $best.Sym) { continue }
-  Write-Host ("::notice::map raw probe: {0}" -f $p.Raw)
-  $rawSeen++
+# 2) the crash-candidate functions of BeautyFaceUnitFilter (parsed entries)
+$key = @($entries | Where-Object { $_.Sym -match '^\?(DoRender|Init|Create)@BeautyFaceUnitFilter' } | Sort-Object Rva | Select-Object -First 3)
+Write-Host ("::notice::parsed key fns (DoRender/Init/Create@BeautyFaceUnitFilter): {0}" -f $key.Count)
+foreach ($k in $key) {
+  Write-Host ("::notice::key fn: {0} @0x{1:X} [{2}]" -f $k.Sym, $k.Rva, $k.Section)
 }
-# the actual DoRender function entry (regex: symbol starts with ?DoRender@)
-$fn = @($entries | Where-Object { $_.Sym -match '^\?DoRender@' })
-foreach ($f in $fn) {
-  Write-Host ("::notice::map raw DoRender-fn: {0}" -f $f.Raw)
-}
-# Direct (unparsed) line search: does BeautyFaceUnitFilter::DoRender exist
-# in the map at all? (It was missing from parsed entries - ICF fold?)
-$direct = @($lines | Where-Object { $_ -match 'DoRender@BeautyFaceUnitFilter' } | Select-Object -First 4)
-Write-Host ("::notice::map direct lines DoRender@BeautyFaceUnitFilter: {0}" -f $direct.Count)
+# 3) direct unparsed line search (catches lines the parser skips)
+$direct = @($lines | Where-Object { $_ -match 'DoRender@BeautyFaceUnitFilter' } | Select-Object -First 2)
+Write-Host ("::notice::map lines containing DoRender@BeautyFaceUnitFilter: {0}" -f $direct.Count)
 foreach ($d in $direct) {
   $dd = $d.Trim()
-  if ($dd.Length -gt 700) { $dd = $dd.Substring(0, 700) + ' ...[truncated]' }
+  if ($dd.Length -gt 600) { $dd = $dd.Substring(0, 600) + ' ...[truncated]' }
   Write-Host ("::notice::map direct: {0}" -f $dd)
 }
-
-# window around the RVA for manual cross-check
+# 4) window around the target (log only)
 $entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x400) -and $_.Rva -le ($target + 0x400) } |
   ForEach-Object { Write-Host ("  RVA 0x{0:X}  [{1}]  {2}" -f $_.Rva, $_.Section, $_.Sym) }
 exit 0
