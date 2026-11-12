@@ -101,7 +101,7 @@ struct PreviewTexture {
 };
 }  // namespace
 
-int main(int, char**) {
+int RunApp() {
   glfwSetErrorCallback([](int code, const char* desc) {
     kg::Log("glfw", "error %d: %s", code, desc);
   });
@@ -270,4 +270,9 @@ int main(int, char**) {
   glfwDestroyWindow(window);
   glfwTerminate();
   return 0;
+}
+
+// Windows GUI subsystem entry point (UNICODE build → wWinMain).
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  return RunApp();
 }

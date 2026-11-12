@@ -65,7 +65,7 @@ if(WIN32)
   # Capture (Media Foundation)
   add_library(kg_capture STATIC src/kg_capture/camera_capture.cc)
   target_include_directories(kg_capture PUBLIC src/kg_capture)
-  target_link_libraries(kg_capture PUBLIC kg_core mfplat mfreadwrite mfuuid ole32 propsys)
+  target_link_libraries(kg_capture PUBLIC kg_core mfplat mf mfreadwrite mfuuid ole32 propsys)
 
   # Virtual camera sender (softcam via dynamic LoadLibrary — no link-time dep;
   # if softcam.dll/registration is missing at runtime, vcam reports unavailable)
