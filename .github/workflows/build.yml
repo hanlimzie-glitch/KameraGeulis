@@ -35,7 +35,15 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release -j
+        run: |
+          cmake --build build --config Release -j 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "=== errors (first 25) ==="
+            Select-String -Path build.log -Pattern 'error [A-Za-z]+[0-9]+|fatal error C|FAILED:' |
+              Select-Object -First 25 |
+              ForEach-Object { Write-Host "::error ::$($_.Line.Trim())" }
+            exit 1
+          }
 
       - name: Test
         shell: pwsh
