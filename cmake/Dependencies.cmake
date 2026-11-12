@@ -32,9 +32,13 @@ if(WIN32)
   FetchContent_MakeAvailable(gpupixel)
   # Debug symbols for crash symbolization (map file lets CI resolve RVAs like
   # the gpupixel.dll 0x3968a crash site against functions). Keeps /MD Release.
+  # /DEBUG can change the linker's /OPT defaults (REF/ICF), which would MOVE
+  # every function and make the map useless for symbolizing the crash RVA from
+  # the user's pre-M2d dll - so /OPT:REF /OPT:ICF are re-stated explicitly to
+  # keep .text layout identical to the build that crashed at 0x3968a.
   if(MSVC)
     target_compile_options(gpupixel PRIVATE /Zi)
-    target_link_options(gpupixel PRIVATE /DEBUG /MAP)
+    target_link_options(gpupixel PRIVATE /DEBUG /MAP /OPT:REF /OPT:ICF)
   endif()
 
   # Dear ImGui (MIT) — pinned v1.91.9, same version GPUPixel vendors
