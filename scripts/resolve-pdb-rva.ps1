@@ -112,16 +112,18 @@ if ($probe.Count -gt 0) {
 # ---- annotations (GitHub caps ~10 notices per step - keep it tight) ----
 # 1) containing function (best non-metadata symbol at/below the RVA)
 Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]" -f $Rva, $best.Sym, $best.Section, $best.Rva)
-if ($above) { Write-Host ("next symbol above: {0} @0x{1:X}" -f $above.Sym, $above.Rva) }
 if ($preferred) { Write-Host ("::notice::map preferred=0x{0:X}" -f $preferred) }
 Write-Host ("::notice::map raw best: {0}" -f $best.Raw)
-# 2) the crash-candidate functions of BeautyFaceUnitFilter (parsed entries)
-$key = @($entries | Where-Object { $_.Sym -match '^\?(DoRender|Init|Create)@BeautyFaceUnitFilter' } | Sort-Object Rva | Select-Object -First 3)
-Write-Host ("::notice::parsed key fns (DoRender/Init/Create@BeautyFaceUnitFilter): {0}" -f $key.Count)
-foreach ($k in $key) {
-  Write-Host ("::notice::key fn: {0} @0x{1:X} [{2}]" -f $k.Sym, $k.Rva, $k.Section)
-}
-# 3) direct unparsed line search (catches lines the parser skips)
+# 2) NEIGHBORHOOD: every parsed symbol in [target-0x200, target+0x200] plus the
+#    next symbol above - decisive for "is there a missing/folded fn in between?"
+$win = @($entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x200) -and $_.Rva -le ($target + 0x200) })
+$winNote = ($win | ForEach-Object { '{0} @0x{1:X} [{2}]' -f $_.Sym, $_.Rva, $_.Section }) -join ' || '
+Write-Host ("::notice::window around 0x{0:X} ({1} syms): {2}" -f $Rva, $win.Count, $winNote)
+if ($above) { Write-Host ("::notice::next symbol above: {0} @0x{1:X} [{2}]" -f $above.Sym, $above.Rva, $above.Section) }
+# 3) key fns of BeautyFaceUnitFilter + direct unparsed line search
+$key = @($entries | Where-Object { $_.Sym -match '^\?(DoRender|Init|Create)@BeautyFaceUnitFilter' } | Sort-Object Rva)
+$keyNote = ($key | ForEach-Object { '{0} @0x{1:X}' -f $_.Sym, $_.Rva }) -join ' || '
+Write-Host ("::notice::key fns BeautyFaceUnitFilter ({0}): {1}" -f $key.Count, $keyNote)
 $direct = @($lines | Where-Object { $_ -match 'DoRender@BeautyFaceUnitFilter' } | Select-Object -First 2)
 Write-Host ("::notice::map lines containing DoRender@BeautyFaceUnitFilter: {0}" -f $direct.Count)
 foreach ($d in $direct) {
@@ -129,7 +131,5 @@ foreach ($d in $direct) {
   if ($dd.Length -gt 600) { $dd = $dd.Substring(0, 600) + ' ...[truncated]' }
   Write-Host ("::notice::map direct: {0}" -f $dd)
 }
-# 4) window around the target (log only)
-$entries | Sort-Object Rva | Where-Object { $_.Rva -ge ($target - 0x400) -and $_.Rva -le ($target + 0x400) } |
-  ForEach-Object { Write-Host ("  RVA 0x{0:X}  [{1}]  {2}" -f $_.Rva, $_.Section, $_.Sym) }
+Write-Host ("symbols parsed: {0}; best=0x{1:X}; above={2}" -f $entries.Count, $best.Rva, $(if ($above) { '0x{0:X}' -f $above.Rva } else { 'none' }))
 exit 0
