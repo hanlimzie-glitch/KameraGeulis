@@ -11,7 +11,9 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
-          cmake --version
-          git --version
-          cl 2>&1 | Select-Object -First 1
+          cmake --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+          git --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -latest -property displayName }
+          else { Write-Host "vswhere not found"; exit 1 }
           Write-Host "Capability check OK"
