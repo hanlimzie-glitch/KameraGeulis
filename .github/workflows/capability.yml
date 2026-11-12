@@ -1,0 +1,17 @@
+name: Capability Check
+on:
+  push:
+    paths: ['.github/workflows/capability.yml']
+  workflow_dispatch:
+jobs:
+  hello-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Basic toolchain info
+        shell: pwsh
+        run: |
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          cmake --version
+          git --version
+          cl 2>&1 | Select-Object -First 1
+          Write-Host "Capability check OK"
