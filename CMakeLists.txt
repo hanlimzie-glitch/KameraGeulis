@@ -138,11 +138,13 @@ if(WIN32)
   if(KG_BUILD_APP)
     add_executable(KameraGeulis WIN32
       src/kg_app/main.cc
-      src/kg_app/panel.cc)
+      src/kg_app/panel.cc
+      src/kg_app/startup.cc
+      src/kg_app/selftest.cc)
     target_include_directories(KameraGeulis PRIVATE src/kg_app)
     target_link_libraries(KameraGeulis PRIVATE
       kg_core kg_capture kg_vcam kg_pipeline
-      imgui_kg glad glfw opengl32 gdi32)
+      imgui_kg glad glfw opengl32 gdi32 dbghelp)
     # Ship onnxruntime.dll next to the exe (CPU landmark provider).
     add_custom_command(TARGET KameraGeulis POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DLL} $<TARGET_FILE_DIR:KameraGeulis>/onnxruntime.dll)

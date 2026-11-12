@@ -113,6 +113,39 @@ jobs:
           Copy-Item THIRD_PARTY.md, README.md, STATUS.md -Destination dist
           Get-ChildItem dist | ForEach-Object { Write-Host "dist: $($_.Name) ($($_.Length) B)" }
 
+      - name: Smoke test (selftest from packaged artifact)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          try {
+            $ErrorActionPreference = 'Stop'
+            Write-Host "== dist contents (what ships to the tester's PC) =="
+            Get-ChildItem dist | ForEach-Object { Write-Host ("{0,-40} {1,10} B" -f $_.Name, $_.Length) }
+            # Models are NOT packaged in the artifact (first-run download design).
+            # For the smoke test we fetch the CI-verified models-v1 assets into dist\models,
+            # run the headless --selftest, then REMOVE them again before packaging.
+            gh release download models-v1 --repo hanlimzie-glitch/KameraGeulis `
+              --pattern "face_detection_short_range.onnx" --pattern "face_mesh.onnx" `
+              --dir dist\models --clobber
+            $log = Join-Path $env:APPDATA 'KameraGeulis\log.txt'
+            if (Test-Path $log) { Remove-Item $log -Force }
+            Write-Host "== running dist\KameraGeulis.exe --selftest =="
+            $proc = Start-Process -FilePath 'dist\KameraGeulis.exe' -ArgumentList '--selftest' `
+                                  -Wait -PassThru -NoNewWindow
+            $code = $proc.ExitCode
+            Write-Host "selftest exit code: $code"
+            Write-Host "== $log (tail) =="
+            if (Test-Path $log) { Get-Content $log | Select-Object -Last 80 } else { Write-Host "(log.txt tidak ditemukan)" }
+            Remove-Item 'dist\models' -Recurse -Force
+            if ($code -ne 0) { throw "selftest FAILED (exit $code) — lihat ekor log di atas" }
+            Write-Host "SELFTEST PASS"
+          } catch {
+            Write-Host "::error ::smoke test failed: $($_.Exception.Message)"
+            Remove-Item 'dist\models' -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
