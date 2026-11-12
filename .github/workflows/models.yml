@@ -75,7 +75,7 @@ jobs:
           python -m tf2onnx.convert --tflite "$out/face_landmark.tflite" \
             --output "$out/face_mesh.onnx" --opset "$TF2ONNX_OPSET"
 
-      - name: Verify ONNX (onnxruntime: names, shapes, inference)
+      - name: "Verify ONNX (onnxruntime: names, shapes, inference)"
         run: |
           set -euo pipefail
           python scripts/models/verify_onnx.py "$RUNNER_TEMP/models-out" | tee "$RUNNER_TEMP/models-out/verify.txt"
