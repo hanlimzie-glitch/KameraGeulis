@@ -47,7 +47,7 @@
 | `kg_app` | `main.cc`, GLFW window, Dear ImGui panel (tabs Face/Skin/Makeup/Presets), hold-to-compare, theming | Windows |
 | `kg_tests` | ctest — pure logic (landmark math, smoothing, queue, settings round-trip, string table, preset math) | Semua |
 
-Dependensi (FetchContent, pinned): GPUPixel `v1.3.1` (Apache-2.0), Dear ImGui `v1.91.9` (MIT), nlohmann/json `v3.11.3` (MIT), Catch2 `v3.7.1` (BSL-1.0, test-only), softcam `d1acde4` (MIT, ExternalProject msbuild). Dependensi count sengaja kecil — libyuv/glad/glfw berasal dari tree GPUPixel (reusing target `glfw`, `glad`), bukan FetchContent terpisah.
+Dependensi (FetchContent, pinned): GPUPixel `v1.3.1` (Apache-2.0, `GPUPIXEL_ENABLE_FACE_DETECTOR=OFF` di Windows), Dear ImGui `v1.91.9` (MIT), nlohmann/json `v3.11.3` (MIT), Catch2 `v3.7.1` (BSL-1.0, test-only). **softcam TIDAK di-link** — `kg_vcam` memuat `softcam.dll` saat runtime via `LoadLibrary` (app tetap jalan bila DLL/registrasi tidak ada); build DLL softcam (dengan patch `FILTER_NAME` → `"KameraGeulis Camera"`) dilakukan di milestone packaging (M3/M5), bukan dependensi build-time. libyuv/glad/glfw berasal dari tree GPUPixel (reuse target `glfw`, `glad`).
 
 ## 4. Data flow per frame (hot path)
 

@@ -1,0 +1,53 @@
+# Pinned third-party deps (FetchContent). Nothing is vendored in-tree.
+include(FetchContent)
+set(FETCHCONTENT_QUIET OFF)
+
+# nlohmann/json (MIT) — settings persistence
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_Declare(nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+  GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# Catch2 (BSL-1.0) — tests only
+if(KG_BUILD_TESTS)
+  FetchContent_Declare(Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.7.1
+    GIT_SHALLOW    TRUE)
+  FetchContent_MakeAvailable(Catch2)
+endif()
+
+if(WIN32)
+  # GPUPixel (Apache-2.0) — engine. Windows: face detector OFF (no public
+  # Windows Mars-Face binary; upstream builds Windows the same way).
+  set(GPUPIXEL_ENABLE_FACE_DETECTOR OFF CACHE BOOL "" FORCE)
+  set(GPUPIXEL_BUILD_DESKTOP_DEMO OFF CACHE BOOL "" FORCE)
+  set(GPUPIXEL_INSTALL OFF CACHE BOOL "" FORCE)
+  set(GPUPIXEL_BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+  FetchContent_Declare(gpupixel
+    GIT_REPOSITORY https://github.com/pixpark/gpupixel.git
+    GIT_TAG        f33abfa5a802e0dfb04b98f9240a4f24b9d0eb96)  # v1.3.1
+  FetchContent_MakeAvailable(gpupixel)
+
+  # Dear ImGui (MIT) — pinned v1.91.9, same version GPUPixel vendors
+  FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.91.9
+    GIT_SHALLOW    TRUE)
+  FetchContent_GetProperties(imgui)
+  if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+    add_library(imgui_kg STATIC
+      ${imgui_SOURCE_DIR}/imgui.cpp
+      ${imgui_SOURCE_DIR}/imgui_draw.cpp
+      ${imgui_SOURCE_DIR}/imgui_tables.cpp
+      ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(imgui_kg PUBLIC
+      ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+    target_link_libraries(imgui_kg PUBLIC glfw)
+  endif()
+endif()

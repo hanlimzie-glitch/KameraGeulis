@@ -1,0 +1,65 @@
+name: Build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  linux-tests:
+    name: Linux unit tests (kg_core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DKG_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-build:
+    name: Windows x64 Release (build + tests + artifact)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: windows-deps-${{ hashFiles('cmake/Dependencies.cmake', 'CMakeLists.txt') }}
+          restore-keys: windows-deps-
+
+      - name: Configure (Release, x64)
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DKG_BUILD_TESTS=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # App exe (wherever CMake put it)
+          Get-ChildItem -Recurse -Path build -Filter KameraGeulis.exe |
+            Where-Object { $_.FullName -notmatch '_deps' } |
+            Select-Object -First 1 | Copy-Item -Destination dist
+          # All runtime DLLs produced by the build (gpupixel.dll etc.)
+          Get-ChildItem -Recurse -Path build -Filter *.dll |
+            Where-Object { $_.FullName -notmatch '_deps.*(glfw|imgui)' } |
+            ForEach-Object { Copy-Item $_.FullName -Destination dist -Force }
+          Copy-Item THIRD_PARTY.md, README.md, STATUS.md -Destination dist
+          Get-ChildItem dist | ForEach-Object { Write-Host "dist: $($_.Name) ($($_.Length) B)" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kamerageulis-m1-windows-x64
+          path: dist
+          retention-days: 14

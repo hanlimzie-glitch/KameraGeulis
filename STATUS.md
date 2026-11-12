@@ -10,7 +10,7 @@ Legenda status:
 | # | Fitur | Implemented | Compiled in CI (Windows) | Tested on real Windows | Known issues |
 |---|---|---|---|---|---|
 | M0 | Riset + capability check + arsitektur | ✅ | ✅ capability workflow hijau (vswhere/cmake/git) | n/a | Log Actions tidak bisa dibaca dari sandbox (lihat di bawah) |
-| M1 | CMake + CI build window + GPUPixel + camera preview | ⬜ | ⬜ | ⬜ | — |
+| M1 | CMake + CI build window + GPUPixel + camera preview | 🔨 | 🔨 (CI pending push) | ⬜ | Runtime GL/MF belum diverifikasi di Windows nyata |
 | M2 | Built-in beauty sliders + UI | ⬜ | ⬜ | ⬜ | — |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
