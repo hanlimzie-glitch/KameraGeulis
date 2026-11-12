@@ -51,7 +51,9 @@ Legenda status:
 
 **Fix:** (1) CI menyalin `src/res/*.png` dari ref GPUPixel yang di-pin ke `dist\res\` (tidak di-commit ke repo); app memanggil `GPUPixel::SetResourcePath(exe_dir)` sebelum filter dibuat; log `[pipeline] resource res/<file>: OK (N B)` per file. (2) Pre-verify 4 lookup wajib sebelum pipeline dibuat — hilang/ukuran nol → init gagal → efek GPU nonaktif (preview tetap jalan) + pesan merah di status bar, bukan crash. (3) Cek null `BeautyFaceFilter::Create` + source_/sink_. (4) gpupixel dibangun `/Zi` + `/MAP`; CI resolve RVA crash terhadap `gpupixel.map`. (5) Langkah CI "Verify artifact contents" menggagalkan build bila ada file wajib yang hilang (exe, 4 DLL, 7 PNG res, 2 model, THIRD_PARTY/README/STATUS, pdb+map). (6) `models/*.onnx` ikut artifact; urutan pencarian disatukan via `kg_pipeline/windows_paths.h` (env → `exe\models` → LOCALAPPDATA) di app dan selftest. (7) `--safe` sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; apply kamera diblokir); label FPS render/kamera dipisah; checkbox VSync; glif non-ASCII dibuang dari UI.
 
-**Belum diverifikasi:** fungsi persis di RVA 0x3968a (butuh log CI), dan crash-hilang-di-PC (butuh PC pengguna).
+**Fungsi di RVA 0x3968a (CI, terverifikasi):** `?DoRender@BeautyFaceUnitFilter@gpupixel@@UEAA_N_N@Z` — mulai 0x39030 (Init 0x39CD0); crash di tengah badan DoRender. Bukti level fungsi untuk hipotesis resource-hilang. Catatan: `/DEBUG` mengubah default `/OPT` linker (REF/ICF) dan menggeser layout — dipaksa eksplisit `/OPT:REF /OPT:ICF` agar peta cocok dengan dll yang crash.
+
+**Belum diverifikasi:** crash-hilang-di-PC (butuh PC pengguna menjalankan artifact M2d).
 
 ## M2c — detail (2026-11-12)
 

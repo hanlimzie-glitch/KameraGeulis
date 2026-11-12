@@ -53,6 +53,25 @@ Semua dari **repository GPUPixel** (`src/res/`), Apache-2.0 — lihat THIRD_PART
 - CI: `gpupixel.dll` dibangun `/Zi /DEBUG /MAP` (PDB + MAP ikut artifact); step **Verify artifact contents** menggagalkan build bila `res/*.png`, `models/*.onnx`, DLL runtime, atau simbol tidak lengkap; step **Resolve crash RVA** menjalankan `scripts/resolve-pdb-rva.ps1` untuk memetakan RVA 0x3968a → simbol fungsi (bukti, bukan dugaan).
 - Models ikut artifact (`dist\models\`, diverifikasi SHA-256 pin saat load) → first-run tidak butuh internet; urutan pencarian model disatukan antara aplikasi dan `--selftest` lewat `kg_pipeline/windows_paths.h` (env → `<exe>\models` → LOCALAPPDATA).
 
+## Hasil symbolisasi (CI, terverifikasi)
+
+Step **Resolve crash RVA 0x3968a** (`scripts/resolve-pdb-rva.ps1` terhadap `gpupixel.map`) melaporkan:
+
+```
+gpupixel.dll RVA 0x3968A -> ?DoRender@BeautyFaceUnitFilter@gpupixel@@UEAA_N_N@Z [publics, starts 0x39030]
+  (Create @0x38F50, DoRender @0x39030, Init @0x39CD0 - crash di tengah badan DoRender)
+```
+
+**Bukti fungsi:** 0x3968a berada di dalam `BeautyFaceUnitFilter::DoRender` — render filter
+yang mengikat tekstur lookup (GL_TEXTURE5) dan menderef `gray_image_` — sesuai RCA di atas.
+Hipotesis "resource hilang → null lookup → crash di render filter" **TERKONFIRMASI di level fungsi**.
+
+**Pelajaran build (penting):** percobaan pertama menjawab `stbi__gif_parse_colortable`
+(keliru) karena `/DEBUG` **mengubah default `/OPT` linker** (REF/ICF mati) → seluruh fungsi
+bergeser sehingga peta simbol tidak cocok dengan dll yang crash. Diperbaiki dengan
+`target_link_options(gpupixel PRIVATE /DEBUG /MAP /OPT:REF /OPT:ICF)` — REF/ICF dipaksa
+seperti build asli → layout .text identik dengan dll pengguna → jawaban benar.
+
 ## Catatan jujur
 
 - Perbaikan ini **belum** diverifikasi di PC pengguna — M2c/M2d artifact menampilkan preview hanya bila `res/` lengkap DAN driver GL menjawab. Laporan dari PC pengguna menentukan.
