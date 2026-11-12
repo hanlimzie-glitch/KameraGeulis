@@ -79,29 +79,33 @@ if ($entries.Count -eq 0) {
 }
 
 $target = [uint64]$Rva
+# Prefer real function symbols: skip compiler/ABI metadata ($LN labels,
+# $unwind$, $ip2state$, $cppxdata$, $chain$) - those are not function starts,
+# so "last symbol <= target" over them would name a label inside a function.
+$funcs = @($entries | Where-Object { $_.Sym -notmatch '^\$' } | Sort-Object Rva)
 $best = $null
 $above = $null
-foreach ($e in ($entries | Sort-Object Rva)) {
+foreach ($e in $funcs) {
   if ($e.Rva -le $target) { $best = $e }
   elseif ($above -eq $null) { $above = $e }
 }
 if (-not $best) {
-  Write-Host ("::error::no symbol at or below RVA 0x{0:X} - cannot resolve" -f $Rva)
+  Write-Host ("::error::no function symbol at or below RVA 0x{0:X} - cannot resolve" -f $Rva)
   exit 2
 }
 
 # Extra evidence: where do the known crash-candidate functions start?
-$probe = @($entries | Where-Object { $_.Sym -match 'DoRender|BeautyFaceUnitFilter' } |
-           Sort-Object Rva | Select-Object -First 6)
+$probe = @($entries | Where-Object { $_.Sym -notmatch '^\$' -and $_.Sym -match 'DoRender|BeautyFaceUnitFilter' } |
+           Sort-Object Rva | Select-Object -First 8)
 foreach ($p in $probe) {
   Write-Host ("probe: {0}  RVA 0x{1:X}  [{2}]" -f $p.Sym, $p.Rva, $p.Section)
 }
 
-Write-Host ("CONTAINING FUNCTION (last symbol at/below RVA): {0}  (starts RVA 0x{1:X} [{2}])" -f $best.Sym, $best.Rva, $best.Section)
-if ($above) { Write-Host ("next symbol above: {0}  (RVA 0x{1:X})" -f $above.Sym, $above.Rva) }
+Write-Host ("CONTAINING FUNCTION (last function at/below RVA): {0}  (starts RVA 0x{1:X} [{2}])" -f $best.Sym, $best.Rva, $best.Section)
+if ($above) { Write-Host ("next function above: {0}  (RVA 0x{1:X})" -f $above.Sym, $above.Rva) }
 $probeNote = ''
 if ($probe.Count -gt 0) {
-  $probeNote = '; probes: ' + (($probe | ForEach-Object { '{0}@0x{1:X}' -f ($_.Sym -replace '^.*::', ''), $_.Rva }) -join ', ')
+  $probeNote = '; probes: ' + (($probe | ForEach-Object { '{0} @0x{1:X}' -f $_.Sym, $_.Rva }) -join ', ')
 }
 Write-Host ("::notice::gpupixel.dll RVA 0x{0:X} -> {1} [{2}, starts 0x{3:X}]{4}" -f $Rva, $best.Sym, $best.Section, $best.Rva, $probeNote)
 
