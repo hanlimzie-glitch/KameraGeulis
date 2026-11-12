@@ -56,18 +56,18 @@ foreach ($l in $lines) {
   # t[1] = symbol (decorated C++ names contain ?/@ so never pure hex)
   $sym = $t[1]
   if ($sym -notmatch '[?@A-Za-z_]') { continue }
-  # t[2] = Rva+Base (abs16) in both formats; fall back to t[0] when it is abs16
+  # t[2] = Rva+Base (abs16); fall back to t[0] when it is abs16.
+  # REAL map line (verified via annotation dump):
+  #   0001:00059fc0  ?DoRender@BrightnessFilter@... 0000000180057530 f  brightness_filter.obj
+  # Tokens after abs16 are FLAGS ('f', 'i') + .obj name - NOT an RVA column.
+  # ('f' matches a naive /^[0-9A-Fa-f]{1,8}$/ test and would parse as 0xF!)
+  # RVA = abs16 - preferred load address.
   $abs = $null
   if ($t[2] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[2], 16) }
   elseif ($t[0] -match '^[0-9A-Fa-f]{16}$') { $abs = [Convert]::ToUInt64($t[0], 16) }
-  # t[3] = explicit Rva column (optional, small hex)
-  $entryRva = $null
-  if ($t.Count -ge 4 -and $t[3] -match '^[0-9A-Fa-f]{1,8}$') {
-    $entryRva = [Convert]::ToUInt64($t[3], 16)
-  } elseif ($abs -ne $null -and $preferred -ne $null) {
-    if ($abs -ge $preferred) { $entryRva = $abs - $preferred }
-  }
-  if ($entryRva -eq $null) { continue }
+  if ($abs -eq $null -or $preferred -eq $null) { continue }
+  if ($abs -lt $preferred) { continue }
+  $entryRva = $abs - $preferred
   $raw = $l.Trim()
   if ($raw.Length -gt 700) { $raw = $raw.Substring(0, 700) + ' ...[truncated]' }
   $entries.Add([pscustomobject]@{ Sym = $sym; Rva = $entryRva; Section = $mode; Raw = $raw })
@@ -124,6 +124,15 @@ foreach ($p in $probe) {
 $fn = @($entries | Where-Object { $_.Sym -match '^\?DoRender@' })
 foreach ($f in $fn) {
   Write-Host ("::notice::map raw DoRender-fn: {0}" -f $f.Raw)
+}
+# Direct (unparsed) line search: does BeautyFaceUnitFilter::DoRender exist
+# in the map at all? (It was missing from parsed entries - ICF fold?)
+$direct = @($lines | Where-Object { $_ -match 'DoRender@BeautyFaceUnitFilter' } | Select-Object -First 4)
+Write-Host ("::notice::map direct lines DoRender@BeautyFaceUnitFilter: {0}" -f $direct.Count)
+foreach ($d in $direct) {
+  $dd = $d.Trim()
+  if ($dd.Length -gt 700) { $dd = $dd.Substring(0, 700) + ' ...[truncated]' }
+  Write-Host ("::notice::map direct: {0}" -f $dd)
 }
 
 # window around the RVA for manual cross-check
