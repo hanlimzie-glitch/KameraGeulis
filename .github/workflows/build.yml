@@ -14,7 +14,15 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(nproc)"
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure 2>&1 | tee ctest.log || true
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            grep -E 'Failed|Failure|FAILED|assertion|No tests|Segmentation|Abort' ctest.log | head -30 | sed 's/^/::error ::/'
+            tail -15 ctest.log | sed 's/^/::error ::/'
+            exit $code
+          fi
 
   windows-build:
     name: Windows x64 Release (build + tests + artifact)
@@ -47,7 +55,14 @@ jobs:
 
       - name: Test
         shell: pwsh
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: |
+          ctest --test-dir build -C Release --output-on-failure 2>&1 | Tee-Object -FilePath ctest.log
+          if ($LASTEXITCODE -ne 0) {
+            Select-String -Path ctest.log -Pattern 'Failed|Failure|FAILED:|assertion|No tests|Segmentation|Abort' |
+              Select-Object -First 25 | ForEach-Object { Write-Host "::error ::$($_.Line.Trim())" }
+            Get-Content ctest.log -Tail 15 | ForEach-Object { Write-Host "::error ::$($_.Trim())" }
+            exit $LASTEXITCODE
+          }
 
       - name: Package artifact
         shell: pwsh

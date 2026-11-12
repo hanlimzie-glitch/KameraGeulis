@@ -72,9 +72,9 @@ std::string Sha256HexOfFile(const std::wstring& path, bool* ok) {
   }
   DWORD objLen = 0, cb = 0;
   BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objLen), sizeof(objLen), &cb, 0);
-  std::vector<PUCHAR> obj(objLen);
+  std::vector<UCHAR> hash_object(objLen);
   BCRYPT_HASH_HANDLE hHash = nullptr;
-  if (BCryptCreateHash(hAlg, &hHash, obj.data(), objLen, nullptr, 0, 0) != 0) {
+  if (BCryptCreateHash(hAlg, &hHash, hash_object.data(), objLen, nullptr, 0, 0) != 0) {
     BCryptCloseAlgorithmProvider(hAlg, 0);
     return {};
   }
