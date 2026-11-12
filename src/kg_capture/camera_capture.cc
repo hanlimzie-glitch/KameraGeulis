@@ -4,6 +4,7 @@
 #include <mfreadwrite.h>
 #include <mfobjects.h>
 #include <propvarutil.h>
+#include <ks.h>
 #include <ksmedia.h>
 #include <chrono>
 #include <cstdarg>
