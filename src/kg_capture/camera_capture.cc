@@ -195,7 +195,7 @@ void CameraCapture::CaptureThread(int device_index) {
       }
     }
     if (width <= 0 || height <= 0) {
-      DWORD stride_dword = 0;
+      UINT32 stride_dword = 0;
       if (SUCCEEDED(MFCalculateImageSize(MFVideoFormat_RGB32,
                                          static_cast<UINT32>(width > 0 ? width : 640),
                                          static_cast<UINT32>(height > 0 ? height : 480),
