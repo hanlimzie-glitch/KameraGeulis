@@ -231,6 +231,28 @@ void DrawAboutTab(AppUiState& ui) {
   ImGui::Checkbox(s.Get("debug.overlay").c_str(), &ui.show_debug);
   ImGui::TextWrapped("%s", s.Get("debug.note").c_str());
   ImGui::Spacing();
+
+  // ---- M2e diagnosis (F4/F5 hotkeys mirror these controls) ----
+  ImGui::Separator();
+  ImGui::Text("Diagnosis (M2e):");
+  ImGui::Checkbox("Tampilkan kamera mentah (tanpa GPUPixel) (F4)",
+                  &ui.raw_preview);
+  if (ui.raw_preview) {
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                       "RAW: frame capture diupload langsung (tanpa efek)");
+  }
+  if (ImGui::Button("Simpan frame debug PNG (F5)")) {
+    ++ui.debug_frame_requests;
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Simpan 1 frame mentah + 1 frame keluaran pipeline sebagai PNG\n"
+        "ke folder %APPDATA%\\KameraGeulis\\debug\\ (path dicatat di log)");
+  }
+  if (!ui.camera_mode_line.empty()) {
+    ImGui::Text("Kamera: %s", ui.camera_mode_line.c_str());
+  }
+  ImGui::Spacing();
   ImGui::Text("capture  %.2f ms", ui.capture_ms);
   ImGui::Text("detect   %.2f ms (%s: %d)", ui.detect_ms,
               s.Get("debug.since_detect").c_str(), ui.frames_since_detect);

@@ -1,6 +1,7 @@
 #include "beauty_pipeline.h"
 #include <gpupixel/gpupixel.h>
 #include <fstream>
+#include "kgcore/frame_convert.h"
 #include "kgcore/log.h"
 #include "ort_landmark_provider.h"
 
@@ -84,16 +85,53 @@ void BeautyPipeline::SetBeautyStrength(float smoothing, float whitening) {
 
 void BeautyPipeline::ProcessFrame(const Frame& frame) {
   if (!initialized_) return;
-  tracker_->Track(frame);
-  const auto type = frame.format == kFormatRGBA
-                        ? gpupixel::GPUPIXEL_FRAME_TYPE_RGBA
-                        : gpupixel::GPUPIXEL_FRAME_TYPE_BGRA;
-  source_->ProcessData(frame.pixels.data(), frame.width, frame.height,
-                       frame.stride_bytes, type);
+  tracker_->Track(frame);  // ORT provider consumes the original frame format
+  const int w = frame.width;
+  const int h = frame.height;
+  if (w <= 0 || h <= 0 || frame.pixels.empty()) return;
+  const size_t row_bytes = static_cast<size_t>(w) * 4;
+  const size_t src_stride =
+      frame.stride_bytes >= static_cast<int>(row_bytes)
+          ? static_cast<size_t>(frame.stride_bytes)
+          : row_bytes;
+  if (frame.pixels.size() < src_stride * static_cast<size_t>(h)) {
+    Log(kTag, "ProcessFrame: buffer terlalu kecil (%zu < %zu) - frame dilewati",
+        frame.pixels.size(), src_stride * static_cast<size_t>(h));
+    return;
+  }
+  // M2e: always hand gpupixel a TOP-DOWN RGBA buffer with alpha=255.
+  // Pinned gpupixel (SourceRawData::GenerateTextureWithPixels) wraps its
+  // BGRA glTexImage2D in #if GPUPIXEL_IOS||GPUPIXEL_MAC -> on Windows the
+  // BGRA upload is a NO-OP and the whole chain renders an empty texture
+  // (black preview). The RGBA branch is unguarded and works everywhere.
+  convert_buf_.resize(row_bytes * static_cast<size_t>(h));
+  ConvertToRgbaTopDown(frame.pixels.data(), w, h, src_stride,
+                       /*flip_vertical=*/false,
+                       /*src_is_bgra=*/frame.format != kFormatRGBA,
+                       convert_buf_.data());
+  source_->ProcessData(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
+                       gpupixel::GPUPIXEL_FRAME_TYPE_RGBA);
 }
 
-const uint8_t* BeautyPipeline::OutputRGBA() const {
-  return sink_ ? sink_->GetRgbaBuffer() : nullptr;
+const uint8_t* BeautyPipeline::OutputRGBA() {
+  if (!sink_) return nullptr;
+  // GetRgbaBuffer() runs glReadPixels on gpupixel's own GL context and
+  // returns CPU memory - the app never touches gpupixel texture ids (M2e
+  // requirement 4: official readback path, plain readback; PBO later).
+  const uint8_t* src = sink_->GetRgbaBuffer();
+  const int w = sink_->GetWidth();
+  const int h = sink_->GetHeight();
+  if (!src || w <= 0 || h <= 0) return nullptr;
+  out_buf_.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+  // Copy + force alpha 255 in one place. Sink buffer is treated as top-down
+  // (gpupixel quads map t=0 -> framebuffer bottom, glReadPixels starts at the
+  // bottom, so the CPU buffer comes back in input order). Orientation is
+  // UNVERIFIED on real hardware - flip_vertical=true here is the one-line
+  // fix if the user reports an upside-down output (see STATUS.md).
+  ConvertToRgbaTopDown(src, w, h, static_cast<size_t>(w) * 4,
+                       /*flip_vertical=*/false, /*src_is_bgra=*/false,
+                       out_buf_.data());
+  return out_buf_.data();
 }
 int BeautyPipeline::OutputWidth() const { return sink_ ? sink_->GetWidth() : 0; }
 int BeautyPipeline::OutputHeight() const { return sink_ ? sink_->GetHeight() : 0; }

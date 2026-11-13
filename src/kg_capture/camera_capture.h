@@ -17,6 +17,19 @@ struct VideoMode {
   int width = 0, height = 0, fps = 0;
 };
 
+// Per-second diagnosis snapshot (M2e). Filled by the capture thread,
+// copied out under stats_mutex_ by the render loop for log/UI.
+struct CameraStats {
+  uint64_t received = 0;        // frames copied from MF samples
+  int width = 0, height = 0;    // last frame dims
+  int stride = 0;               // last negotiated stride, SIGNED (negative = bottom-up)
+  int subtype = 0;              // MF_MT_SUBTYPE fourcc (e.g. 'RGB32')
+  int fps_num = 0, fps_den = 0; // negotiated MF_MT_FRAME_RATE
+  double mean_luma = 0.0;       // sampled mean luma of last frame (0..255)
+  int center_alpha = 0;         // alpha byte at frame center of last frame
+  bool mode_from_device = false;// true once GetCurrentMediaType read-back succeeded
+};
+
 // Media Foundation camera capture (Windows only). Captures on a dedicated
 // thread into a bounded queue (drop-oldest, capacity 2) so the render loop
 // never waits on the camera.
@@ -47,6 +60,11 @@ class CameraCapture {
   bool LatestFrame(Frame& out);
 
   uint64_t FramesCaptured() const { return frames_captured_.load(); }
+  // Snapshot of the M2e diagnosis counters (thread-safe copy).
+  CameraStats GetStats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return stats_;
+  }
   std::string LastError() const {
     std::lock_guard<std::mutex> lock(error_mutex_);
     return last_error_;
@@ -60,6 +78,9 @@ class CameraCapture {
   std::atomic<uint64_t> frames_captured_{0};
   std::thread thread_;
   std::unique_ptr<BoundedQueue<Frame>> queue_;
+
+  mutable std::mutex stats_mutex_;
+  CameraStats stats_;
 
   mutable std::mutex error_mutex_;
   std::string last_error_;

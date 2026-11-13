@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-12 (M2d — fix crash startup gpupixel.dll 0x3968a: resource `res/` ikut artifact + diverifikasi sebelum pipeline dibuat; models `.onnx` ikut artifact; simbol PDB/MAP; belum diverifikasi di PC pengguna)**
+Terakhir diperbarui: **2026-11-12 (M2e — diagnosis preview hitam + mode mentah F4 + dump PNG F5 + negosiasi mode kamera; akar masalah BGRA-upload gpupixel di Windows ditemukan di source; logika konversi/PNG teruji di Linux; preview BELUM diverifikasi di PC pengguna)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -15,6 +15,7 @@ Legenda status:
 | M2 | UI ImGui lengkap + slider skin live + debug overlay | ✅ (dikode) | ✅ (run 43183762692) | ⬜ (crash: force-close saat startup) | belum diverifikasi di Windows nyata; snapshot PNG belum |
 | M2c | Stabilitas startup: log file flush/baris, crash handler + dump + MessageBox, preload DLL app-local + OrtGetApiBase, GL fallback 3 tahap, `--safe`, `--selftest` + CI smoke test | ✅ | ✅ (run 43192212350 — termasuk step smoke test `--selftest` hijau) | ⬜ | belum diverifikasi di PC pengguna; penyebab force-close belum diketahui — setelah M2c, kegagalan tercatat di log.txt/dump, bukan keluar diam-diam |
 | M2d | Crash startup gpupixel.dll 0x3968a (resource `res/` hilang → null lookup → AV di BeautyFaceUnitFilter::DoRender); models ikut artifact; urutan pencarian model disatukan (env → exe\\models → LOCALAPPDATA); PDB/MAP + symbolizer RVA di CI; safe-mode sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; Terapkan/apply dimatikan); FPS render vs kamera dipisah label; vsync checkbox; resource hilang → efek GPU nonaktif + pesan UI (bukan crash) | ✅ (dikode) | ✅ (run terakhir hijau) | ⬜ | belum diverifikasi di PC pengguna — fix terbukti di level source + CI (artifact wajib berisi res/ & models/, `--selftest` hijau dari dist) |
+| M2e | Diagnosis preview hitam: konversi BGRA→RGBA (alpha 255) sebelum GPUPixel (akar masalah: upload BGRA gpupixel no-op di Windows), F4 frame mentah, F5 dump PNG, log diagnosis 1 detik, negosiasi mode kamera (advanced processing + read-back + reinit saat ukuran berubah), teks status frame | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika konversi/stride/flip/PNG **teruji di Linux**; preview hitam/putih, orientasi UV, F4/F5, dan scaling kamera **belum bisa diverifikasi tanpa GPU + webcam** (lihat "Batasan" + bagian M2e) |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -27,7 +28,7 @@ Legenda status:
 | — | Preset Natural/Soft/Glam/ClearSkin | ✅ | ✅ | ⬜ | nilai preset teruji di kg_tests (Natural 0.25/0.10, Soft 0.45/0.20, Glam 0.65/0.32, ClearSkin 0.55/0.26); slider manual → preset "Kustom" |
 | — | Recording (MP4) | ⬜ stretch | ⬜ | ⬜ | kemungkinan dibatalkan; akan dilaporkan jujur |
 | — | FPS/GPU stats overlay | ✅ (F3) | ✅ | ⬜ | debug overlay: 468 titik + bbox + HUD (FPS, capture/detect/mesh/track/render ms, frame sejak deteksi) |
-| — | Hotkeys | 🟡 sebagian | ✅ | ⬜ | F3 = toggle debug overlay; hotkey lain belum |
+| — | Hotkeys | 🟡 sebagian | ⬜ (M2e menyusul) | ⬜ | F3 = overlay debug; F4 = toggle kamera mentah (M2e); F5 = dump PNG debug (M2e) |
 | — | MFCreateVirtualCamera (Win11 only) | ⬜ stretch | ⬜ | ⬜ | didokumentasikan sbg opsi masa depan |
 
 ## Batasan lingkungan (aktual, per 2026-11-12)
@@ -44,6 +45,16 @@ Legenda status:
 3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
 4. Setiap milestone CI meng-upload artifact (`kamerageulis-mN-windows-x64`; M1b: `kamerageulis-m1b-windows-x64`). Log mentah Actions tidak bisa diunduh dari sandbox — error MSVC dibaca via anotasi `::error::` (workflow memancarkannya; lihat `.github/workflows/build.yml` langkah Build).
 5. Detil fix CI selalu dianotasikan di commit message fix (analisis + akar masalah + perbaikan).
+
+## M2e — detail (2026-11-12)
+
+**Akar masalah preview hitam (terbukti di source, bukan tebakan):** `SourceRawData::GenerateTextureWithPixels` (gpupixel pin `f33abfa`): cabang `GPUPIXEL_FRAME_TYPE_BGRA` membungkus satu-satunya `glTexImage2D` dengan `#if defined(GPUPIXEL_IOS) || defined(GPUPIXEL_MAC)` → **di Windows upload BGRA = NO-OP**, tekstur tidak pernah terisi → seluruh rantai memproses tekstur kosong → readback hitam. Kamera MF memberi `kFormatBGRA` (RGB32) → selalu kena jalur ini. Cabang RGBA tidak dijaga platform → bekerja di semua OS. Masalah sekunder: byte alpha frame RGB32 sering 0 → preview terlihat "hilang" di panel gelap.
+
+**Fix (tanpa menambal gpupixel):** (1) `BeautyPipeline::ProcessFrame` mengonversi BGRA→RGBA + memaksa alpha=255 ke buffer sendiri (`kgcore::ConvertToRgbaTopDown`) sebelum `ProcessData` dengan tipe RGBA. (2) `OutputRGBA()` menyalin readback sink + memaksa alpha 255. (3) upload preview memaksa alpha 255. (4) UV preview diseragamkan `(0,0)-(1,1)` (semua sumber kita top-down). (5) Teks "Menunggu frame kamera..." hanya sampai frame tampil pertama; sesudahnya baris status "N frame kamera diterima, M diproses" (overlay pada gambar / teks inline bila belum ada gambar). (6) F4 = upload frame capture langsung (tanpa GPUPixel) — memisahkan masalah capture/upload dari pipeline; kotak centang di tab Info. (7) F5 = simpan `raw_*.png` + `out_*.png` ke `%APPDATA%\KameraGeulis\debug\` (penulis PNG minimal tanpa dependensi, CRC/adler teruji). (8) Log `diag` tiap 1 detik: MF recv/ukuran/stride/subtype/fps/luma/alpha-tengah, frame masuk/keluar/err pipeline, upload out/raw, `glGetError` terakhir+total setelah tiap upload, id+ukuran tekstur, pointer konteks GL aplikasi; catatan konteks startup menjelaskan gpupixel membaca frame ke CPU lewat konteks kerjanya sendiri (`GetRgbaBuffer` = jalur resmi, id tekstur gpupixel tidak dipakai di konteks aplikasi; PBO menyusul/M3-diblokir). (9) Kamera: flag `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` (scaling agar 1280x720@30 bisa diterima), baca-balik tipe aktual (ukuran/stride-bertanda/subtype/fps) dicatat di log + tab Info; stride negatif (bottom-up) di-flip saat copy, tidak lagi di-clamp; ukuran frame berubah di tengah jalan → pipeline di-Shutdown + di-Init ulang dengan ukuran baru.
+
+**Teruji di Linux (kg_tests, hijau):** konversi BGRA/RGB32→RGBA alpha=255, stride berpady, flip bottom-up→top-down, statistik luma/alpha (termasuk baris center pada sumber bottom-up), penulis PNG (signature, IHDR w/h, CRC IHDR/IEND, keberadaan IDAT) + vektor CRC32/Adler32 standar.
+
+**TIDAK bisa diverifikasi tanpa GPU + webcam di PC pengguna (jujur):** apakah preview kamera tampil (hitam→terang), orientasi gambar (tegak/terbalik — konvensi UV baru berdasarkan analisis source gpupixel, bukan pengamatan), F4 menampilkan frame mentah dengan warna/benar, F5 menghasilkan PNG yang bisa dibuka, scaling 1280x720@30 diterima kamera (atau jatuh ke mode native), perilaku stride negatif di perangkat nyata, jumlah `glGetError`=0 di GPU nyata, dan reinit pipeline saat ukuran berubah. **Jangan mengklaim preview berfungsi sebelum pengguna menguji.**
 
 ## M2d — detail (2026-11-12)
 

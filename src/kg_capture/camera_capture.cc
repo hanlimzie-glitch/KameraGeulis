@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include "kgcore/frame_convert.h"
 #include "kgcore/log.h"
 
 namespace kgcore {
@@ -90,6 +91,32 @@ HRESULT SelectRgb32OutputAt(IMFSourceReader* reader, int width, int height,
                                    nullptr, type);
   type->Release();
   return hr;
+}
+
+// Human-readable subtype: GUID Data1 is either a fourcc (NV12, MJPG...) or a
+// D3D format number (RGB32 = 22) - print fourcc chars when printable.
+std::string SubtypeToString(int data1) {
+  char c[4];
+  bool printable = true;
+  for (int i = 0; i < 4; ++i) {
+    c[i] = static_cast<char>((data1 >> (8 * i)) & 0xFF);
+    if (c[i] < 32 || c[i] > 126) printable = false;
+  }
+  char buf[32];
+  if (printable) {
+    std::snprintf(buf, sizeof(buf), "%.4s", c);
+  } else {
+    // Known D3D format numbers used by MF RGB GUIDs.
+    switch (data1) {
+      case 22: return "RGB32";
+      case 21: return "ARGB32";
+      case 20: return "RGB24";
+      default:
+        std::snprintf(buf, sizeof(buf), "fmt%u", static_cast<unsigned>(data1 & 0xFFFF));
+        return buf;
+    }
+  }
+  return buf;
 }
 
 std::string FriendlyName(IMFActivate* activate) {
@@ -234,6 +261,10 @@ bool CameraCapture::Start(int device_index, int width, int height, int fps) {
   CoTaskMemFree(devices);
 
   queue_ = std::make_unique<BoundedQueue<Frame>>(2);
+  {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_ = CameraStats{};  // fresh diagnosis counters for this session
+  }
   running_.store(true);
   thread_ = std::thread(&CameraCapture::CaptureThread, this, device_index, width,
                         height, fps);
@@ -290,11 +321,17 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
       goto cleanup_devices;
     }
 
-    // Enable the video processor so MF can transcode NV12 -> RGB32.
+    // Enable the video processor so MF can transcode NV12/MJPG -> RGB32.
+    // M2e: also enable ADVANCED processing - it adds scaling/frame-rate
+    // conversion, without which a requested 1280x720@30 is rejected when the
+    // sensor natively delivers another size (e.g. 2560x1440) and the reader
+    // silently falls back to the native mode.
     IMFAttributes* reader_attrs = nullptr;
-    MFCreateAttributes(&reader_attrs, 1);
+    MFCreateAttributes(&reader_attrs, 2);
     if (reader_attrs) {
       reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+      reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+                              TRUE);
     }
     IMFSourceReader* reader = nullptr;
     hr = MFCreateSourceReaderFromMediaSource(source, reader_attrs, &reader);
@@ -327,33 +364,69 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
       goto cleanup_devices;
     }
 
-    // Discover negotiated frame size + stride.
-    int width = 0, height = 0, stride = 0;
+    // Read back the media type ACTUALLY negotiated (M2e requirement 5):
+    // size, signed stride (negative = bottom-up rows), subtype, frame rate.
+    int width = 0, height = 0;
+    int raw_stride = 0;  // SIGNED - sign is diagnosis data, never clamp it away
+    int subtype_data1 = 0, fps_num = 0, fps_den = 0;
     {
       IMFMediaType* current = nullptr;
-      if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &current))) {
+      if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                &current))) {
         UINT32 w = 0, h = 0;
         MFGetAttributeSize(current, MF_MT_FRAME_SIZE, &w, &h);
         width = static_cast<int>(w);
         height = static_cast<int>(h);
         UINT32 s = 0;
         if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &s))) {
-          stride = static_cast<int>(s);
+          raw_stride = static_cast<int>(s);  // bit pattern = signed value
+        }
+        GUID sub{};
+        if (SUCCEEDED(current->GetGUID(MF_MT_SUBTYPE, &sub))) {
+          subtype_data1 = static_cast<int>(sub.Data1);
+        }
+        UINT64 fr = 0;
+        if (SUCCEEDED(current->GetUINT64(MF_MT_FRAME_RATE, &fr))) {
+          fps_num = static_cast<int>(fr >> 32);
+          fps_den = static_cast<int>(fr & 0xFFFFFFFFu);
         }
         current->Release();
       }
     }
     if (width <= 0 || height <= 0) {
-      UINT32 stride_dword = 0;
-      if (SUCCEEDED(MFCalculateImageSize(MFVideoFormat_RGB32,
-                                         static_cast<UINT32>(width > 0 ? width : 640),
-                                         static_cast<UINT32>(height > 0 ? height : 480),
-                                         &stride_dword))) {
-        stride = static_cast<int>(stride_dword);
-      }
+      SetError("negotiated media type unreadable (GetCurrentMediaType gave %dx%d)",
+               width, height);
+      SafeRelease(reader);
+      source->Shutdown();
+      SafeRelease(source);
+      goto cleanup_devices;
     }
-    if (stride < width * 4) stride = width * 4;
-    Log(kTag, "capture started: %dx%d stride=%d (RGB32/BGRA)", width, height, stride);
+    if (raw_stride == 0) raw_stride = width * 4;  // RGB32 default: top-down
+    const int abs_stride = raw_stride < 0 ? -raw_stride : raw_stride;
+    const std::string sub_str = SubtypeToString(subtype_data1);
+    Log(kTag,
+        "capture started (aktual): %dx%d stride=%d (abs=%d,%s) subtype=%s "
+        "(0x%08X) fps=%d/%d RGB32/BGRA | diminta: %dx%d@%d",
+        width, height, raw_stride, abs_stride,
+        raw_stride < 0 ? "bottom-up" : "top-down", sub_str.c_str(),
+        static_cast<unsigned>(subtype_data1), fps_num, fps_den, req_width,
+        req_height, req_fps);
+    if (req_width > 0 && (width != req_width || height != req_height)) {
+      Log(kTag,
+          "catatan: permintaan %dx%d tidak dipenuhi - memakai %dx%d (kamera/"
+          "driver menolak scaling; lihat flag advanced processing)",
+          req_width, req_height, width, height);
+    }
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      stats_.width = width;
+      stats_.height = height;
+      stats_.stride = raw_stride;
+      stats_.subtype = subtype_data1;
+      stats_.fps_num = fps_num;
+      stats_.fps_den = fps_den;
+      stats_.mode_from_device = true;
+    }
 
     while (running_.load()) {
       DWORD stream_index = 0, flags = 0;
@@ -378,24 +451,46 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
         DWORD max_len = 0, current_len = 0;
         hr = buffer->Lock(&data, &max_len, &current_len);
         if (SUCCEEDED(hr) && data) {
+          // Normalise every frame to TOP-DOWN rows with a positive stride:
+          // MF negative stride (bottom-up) is flipped during this copy, so
+          // everything downstream (pipeline, F4 raw preview, F5 dump) sees a
+          // single layout. Padded stride (> row_bytes) is preserved.
+          const bool flip = raw_stride < 0;
+          const size_t stride_bytes = static_cast<size_t>(abs_stride);
+          const size_t row_bytes = static_cast<size_t>(width) * 4;
           Frame frame;
           frame.width = width;
           frame.height = height;
-          frame.stride_bytes = stride;
+          frame.stride_bytes = static_cast<int>(stride_bytes);
           frame.format = kFormatBGRA;
           frame.timestamp_ms = NowMs();
-          const size_t row_bytes = static_cast<size_t>(width) * 4;
-          frame.pixels.resize(static_cast<size_t>(stride) * height);
-          const size_t copy_rows =
-              std::min<size_t>(current_len / row_bytes, static_cast<size_t>(height));
-          if (stride == static_cast<int>(row_bytes)) {
-            if (current_len >= frame.pixels.size()) {
-              std::memcpy(frame.pixels.data(), data, frame.pixels.size());
-            }
+          frame.pixels.resize(stride_bytes * static_cast<size_t>(height));
+          const size_t mem_rows =
+              std::min<size_t>(current_len / stride_bytes,
+                               static_cast<size_t>(height));
+          if (!flip && stride_bytes == row_bytes &&
+              current_len >= frame.pixels.size()) {
+            std::memcpy(frame.pixels.data(), data, frame.pixels.size());
           } else {
-            for (size_t y = 0; y < copy_rows; ++y) {
-              std::memcpy(frame.pixels.data() + y * stride, data + y * stride, row_bytes);
+            for (size_t mi = 0; mi < mem_rows; ++mi) {
+              const size_t visual_row = flip ? (height - 1 - mi) : mi;
+              std::memcpy(frame.pixels.data() + visual_row * stride_bytes,
+                          data + mi * stride_bytes, row_bytes);
             }
+          }
+          // M2e per-frame stats (luma + center alpha) for the 1 s diag log.
+          {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.received++;
+            stats_.width = width;
+            stats_.height = height;
+            stats_.stride = raw_stride;
+            stats_.subtype = subtype_data1;
+            const FrameStats fst = ComputeFrameStats(
+                frame.pixels.data(), width, height, stride_bytes,
+                /*flip_vertical=*/false, /*src_is_bgra=*/true);
+            stats_.mean_luma = fst.mean_luma;
+            stats_.center_alpha = fst.center_alpha;
           }
           frames_captured_.fetch_add(1);
           if (queue_) queue_->Push(std::move(frame));

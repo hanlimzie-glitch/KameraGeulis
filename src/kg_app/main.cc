@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <memory>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,8 @@
 #include "kgcore/settings.h"
 #include "kgcore/strings.h"
 #include "kgcore/frame.h"
+#include "kgcore/frame_convert.h"
+#include "kgcore/png_write.h"
 #include "panel.h"
 #include "startup.h"
 
@@ -114,6 +117,76 @@ kg::Frame MakeSyntheticFrame(int width, int height, int64_t ts_ms) {
   return f;
 }
 
+// M2e requirement 3 (F5): %APPDATA%\KameraGeulis\debug\ (created on demand).
+std::string DebugDumpDir() {
+  char dir[MAX_PATH] = {};
+  const DWORD n = GetEnvironmentVariableA("APPDATA", dir, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+  std::string base(dir, n);
+  base += "\\KameraGeulis";
+  CreateDirectoryA(base.c_str(), nullptr);  // ok bila sudah ada
+  base += "\\debug";
+  CreateDirectoryA(base.c_str(), nullptr);
+  return base;
+}
+
+// Saves one RAW capture frame + one PIPELINE output frame as PNG and logs
+// the exact paths. Any missing part is logged, never silently skipped.
+void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
+                     bool pipeline_ok) {
+  const std::string dir = DebugDumpDir();
+  if (dir.empty()) {
+    kgcore::Log("app", "F5: APPDATA tidak tersedia - PNG TIDAK disimpan");
+    return;
+  }
+  char stamp[32];
+  {
+    const std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+#ifdef _MSC_VER
+    localtime_s(&tmv, &t);
+#else
+    tmv = *std::localtime(&t);
+#endif
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tmv);
+  }
+  if (raw && raw->IsValid()) {
+    const size_t row = static_cast<size_t>(raw->width) * 4;
+    std::vector<uint8_t> rgba(row * static_cast<size_t>(raw->height));
+    kgcore::ConvertToRgbaTopDown(raw->pixels.data(), raw->width, raw->height,
+                                 static_cast<size_t>(raw->stride_bytes),
+                                 /*flip_vertical=*/false,
+                                 /*src_is_bgra=*/raw->format != kg::kFormatRGBA,
+                                 rgba.data());
+    const std::string path = dir + "\\raw_" + stamp + ".png";
+    if (kgcore::WritePngRgba(path.c_str(), rgba.data(), raw->width, raw->height)) {
+      kgcore::Log("app", "F5: frame mentah -> %s (%dx%d, BGRA->RGBA, alpha=255)",
+                  path.c_str(), raw->width, raw->height);
+    } else {
+      kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
+    }
+  } else {
+    kgcore::Log("app", "F5: tidak ada frame mentah tersedia untuk disimpan");
+  }
+  if (pipeline_ok && pipeline) {
+    const uint8_t* out = pipeline->OutputRGBA();
+    const int w = pipeline->OutputWidth();
+    const int h = pipeline->OutputHeight();
+    if (out && w > 0 && h > 0) {
+      const std::string path = dir + "\\out_" + stamp + ".png";
+      if (kgcore::WritePngRgba(path.c_str(), out, w, h)) {
+        kgcore::Log("app", "F5: frame keluaran pipeline -> %s (%dx%d)", path.c_str(), w, h);
+      } else {
+        kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
+      }
+    } else {
+      kgcore::Log("app", "F5: pipeline aktif tetapi belum menghasilkan keluaran");
+    }
+  } else {
+    kgcore::Log("app", "F5: pipeline nonaktif - frame keluaran tidak ada");
+  }
+}
+
 struct PreviewTexture {
   GLuint tex = 0;
   int w = 0, h = 0;
@@ -131,6 +204,8 @@ struct PreviewTexture {
       return;
     }
     // CPU repack: optional horizontal mirror + optional BGRA->RGBA swap.
+    // M2e: alpha is FORCED to 255 here - camera RGB32 padding bytes and
+    // sink buffers can carry alpha 0, which ImGui would blend to black.
     const int row = width * 4;
     flip_.resize(static_cast<size_t>(row) * height);
     for (int y = 0; y < height; ++y) {
@@ -142,7 +217,7 @@ struct PreviewTexture {
         uint8_t* dst = out_row + x * 4;
         if (src_is_bgra) { dst[0] = px[2]; dst[1] = px[1]; dst[2] = px[0]; }
         else             { dst[0] = px[0]; dst[1] = px[1]; dst[2] = px[2]; }
-        dst[3] = px[3];
+        dst[3] = 255;
       }
     }
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
@@ -268,6 +343,12 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       pipeline_ok = false;
     }
     kgcore::Log("app", "pipeline GPUPixel init: %s", pipeline_ok ? "OK" : "GAGAL");
+    // M2e requirement 4: konteks GL pemilik texture keluaran.
+    kgcore::Log("app",
+                "GL konteks aplikasi (preview texture) = %p; gpupixel SinkRawData "
+                "membaca frame ke buffer CPU lewat konteks kerjanya sendiri "
+                "(GetRgbaBuffer) - id tekstur gpupixel TIDAK dipakai di konteks aplikasi",
+                static_cast<void*>(glfwGetCurrentContext()));
   } else {
     kgcore::Log("app", "pipeline GPUPixel: dinonaktifkan (mode aman)");
   }
@@ -323,7 +404,33 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   bool synthetic = !camera_started;
   int synthetic_w = 640, synthetic_h = 480;
   bool f3_prev = false;
+  bool f4_prev = false;  // M2e: raw preview toggle
+  bool f5_prev = false;  // M2e: debug PNG dump
   bool vsync_applied = true;  // glfwSwapInterval(1) right after creation
+
+  // ---- M2e diagnosis state (requirement 1: per-second log) ----
+  int shown_w = 0, shown_h = 0;   // dims of the LAST uploaded preview frame
+  int cam_stream_w = 0, cam_stream_h = 0;  // stream dims for size-change detect
+  int64_t diag_last_ms = 0;
+  uint64_t sent_to_pipeline = 0;  // frames handed to GPUPixel
+  uint64_t pipe_out = 0;          // frames GPUPixel returned (OutputRGBA ok)
+  uint64_t pipe_err_count = 0;    // ProcessFrame ran but produced no output
+  uint64_t uploaded_out = 0;      // pipeline frames uploaded to preview tex
+  uint64_t uploaded_raw = 0;      // raw frames uploaded (F4 / fallback)
+  uint64_t last_gl_err = 0;       // last glGetError after an upload
+  uint64_t gl_err_count = 0;      // total GL errors seen after uploads
+  uint64_t debug_req_seen = 0;    // last consumed ui.debug_frame_requests
+
+  // glGetError must run on the context that owns preview.tex (= this thread).
+  auto drain_gl_errors = [&] {
+    GLenum e;
+    while ((e = glGetError()) != GL_NO_ERROR) {
+      last_gl_err = e;
+      ++gl_err_count;
+      kgcore::Log("gl", "glGetError=0x%04X setelah upload (tex=%u %dx%d)",
+                  static_cast<unsigned>(e), preview.tex, preview.w, preview.h);
+    }
+  };
 
   while (!glfwWindowShouldClose(window) && !ui.quit_requested) {
     glfwPollEvents();
@@ -338,6 +445,20 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     const bool f3 = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
     if (f3 && !f3_prev) ui.show_debug = !ui.show_debug;
     f3_prev = f3;
+    // M2e: F4 toggles raw camera preview (bypass GPUPixel), F5 dumps PNGs.
+    const bool f4 = glfwGetKey(window, GLFW_KEY_F4) == GLFW_PRESS;
+    if (f4 && !f4_prev) {
+      ui.raw_preview = !ui.raw_preview;
+      kgcore::Log("app", "F4: tampilkan kamera mentah = %s",
+                  ui.raw_preview ? "ON (tanpa GPUPixel)" : "OFF");
+    }
+    f4_prev = f4;
+    const bool f5 = glfwGetKey(window, GLFW_KEY_F5) == GLFW_PRESS;
+    if (f5 && !f5_prev) {
+      ++ui.debug_frame_requests;
+      kgcore::Log("app", "F5: permintaan dump PNG diterima");
+    }
+    f5_prev = f5;
 
     // ---- settings action requests (from the panel, previous frame) ----
     if (ui.request_save_settings) {
@@ -429,12 +550,40 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       have_frame = true;
     }
 
-    int out_w = 0, out_h = 0;
+    // ---- M2e requirement 5: ukuran frame berubah di tengah jalan ----
+    // Rebuild the gpupixel chain with the new size (per spec) instead of
+    // letting filters keep stale framebuffers.
+    if (have_frame && pipeline &&
+        (frame.width != cam_stream_w || frame.height != cam_stream_h)) {
+      if (cam_stream_w > 0) {
+        kgcore::Log("app",
+                    "ukuran frame kamera berubah %dx%d -> %dx%d; membuat ulang pipeline",
+                    cam_stream_w, cam_stream_h, frame.width, frame.height);
+        pipeline->Shutdown();
+        pipeline_ok = pipeline->Init(exe_dir);
+        kgcore::Log("app", "pipeline setelah perubahan ukuran: %s",
+                    pipeline_ok ? "OK" : "GAGAL - preview pakai frame mentah");
+        if (!pipeline_ok) {
+          ui.notice = pipeline->LastResourceError().empty()
+                          ? "Efek GPU dinonaktifkan setelah perubahan ukuran kamera"
+                          : pipeline->LastResourceError();
+          ui.notice_is_error = true;
+        }
+      } else {
+        kgcore::Log("app", "frame kamera pertama: %dx%d", frame.width, frame.height);
+      }
+      cam_stream_w = frame.width;
+      cam_stream_h = frame.height;
+    }
+
+    int out_w = 0, out_h = 0;  // dims of THIS iteration's pipeline output
+    const bool want_raw = ui.raw_preview;  // F4: tampilkan kamera mentah
     bool pipeline_frame_ok = false;
-    if (have_frame && pipeline_ok) {
+    if (have_frame && pipeline_ok && !want_raw) {
       // Live-apply the two global beauty parameters (cheap; idempotent).
       pipeline->SetBeautyStrength(ui.smoothing, ui.whitening);
       pipeline->ProcessFrame(frame);
+      ++sent_to_pipeline;
       kg::StageTimings st;
       if (pipeline->GetStageTimings(&st)) {
         ui.detect_ms = st.detect_ms;
@@ -448,17 +597,26 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       if (out && out_w > 0 && out_h > 0) {
         preview.Upload(out, out_w, out_h, ui.mirror, /*src_is_bgra=*/false);
         pipeline_frame_ok = true;
+        shown_w = out_w;
+        shown_h = out_h;
+        ++pipe_out;
+        ++uploaded_out;
+      } else {
+        ++pipe_err_count;
       }
       ui.cam_width = frame.width;
       ui.cam_height = frame.height;
       ui.frames_captured = capture.FramesCaptured();
     }
-    if (have_frame && !pipeline_frame_ok) {
-      // GPUPixel off (safe mode or init failed): show the frame as-is.
+    if (have_frame && (want_raw || !pipeline_frame_ok)) {
+      // Raw path: F4 toggle, OR GPUPixel off/init failed, OR pipeline
+      // produced no output this frame. Upload the capture frame as-is
+      // (BGRA handled, stride tight, rows top-down, alpha forced 255).
       preview.Upload(frame.pixels.data(), frame.width, frame.height, ui.mirror,
                      /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
-      out_w = frame.width;
-      out_h = frame.height;
+      shown_w = frame.width;
+      shown_h = frame.height;
+      ++uploaded_raw;
       ui.cam_width = frame.width;
       ui.cam_height = frame.height;
       ui.frames_captured = safe ? ui.frames_captured + 1 : capture.FramesCaptured();
@@ -470,8 +628,65 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     if (ui.compare_held && raw) {
       preview.Upload(raw, frame.width, frame.height, ui.mirror,
                      /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
-      out_w = frame.width;
-      out_h = frame.height;
+      shown_w = frame.width;
+      shown_h = frame.height;
+      ++uploaded_raw;
+    }
+    // M2e requirement 1: glGetError after every preview upload operation.
+    drain_gl_errors();
+
+    // M2e requirement 3 (F5): dump raw + pipeline frames as PNG.
+    if (ui.debug_frame_requests != debug_req_seen) {
+      debug_req_seen = ui.debug_frame_requests;
+      DumpDebugFrames(have_frame ? &frame : nullptr, pipeline.get(), pipeline_ok);
+    }
+
+    // Mode kamera aktual (read-back) untuk tab Info (requirement 5).
+    if (!safe) {
+      const kg::CameraStats cst = capture.GetStats();
+      if (cst.width > 0 && cst.height > 0) {
+        char mline[192];
+        std::snprintf(mline, sizeof(mline),
+                      "%dx%d @ %d/%d fps, stride %d%s, subtype 0x%08X, luma %.1f, alpha %d",
+                      cst.width, cst.height, cst.fps_num, cst.fps_den, cst.stride,
+                      cst.stride < 0 ? " (bottom-up)" : "", static_cast<unsigned>(cst.subtype),
+                      cst.mean_luma, cst.center_alpha);
+        ui.camera_mode_line = mline;
+      }
+    }
+
+    // M2e requirement 1: diagnosis ringkas tiap detik (semua tahap).
+    const int64_t diag_now_ms = duration_cast<std::chrono::milliseconds>(
+                                    clock_type::now().time_since_epoch())
+                                    .count();
+    if (diag_now_ms - diag_last_ms >= 1000) {
+      diag_last_ms = diag_now_ms;
+      if (!safe) {
+        const kg::CameraStats cst = capture.GetStats();
+        kgcore::Log(
+            "diag",
+            "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
+            "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
+            "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d",
+            static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
+            static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
+            cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
+            static_cast<unsigned long long>(pipe_out),
+            static_cast<unsigned long long>(pipe_err_count),
+            static_cast<unsigned long long>(uploaded_out),
+            static_cast<unsigned long long>(uploaded_raw), static_cast<unsigned>(last_gl_err),
+            static_cast<unsigned>(gl_err_count), preview.tex, preview.w, preview.h,
+            static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
+            pipeline_ok ? 1 : 0);
+      } else {
+        kgcore::Log("diag",
+                    "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
+                    "glErr(last=0x%X) tex=%u %dx%d | ctx=%p",
+                    static_cast<unsigned long long>(uploaded_out),
+                    static_cast<unsigned long long>(uploaded_raw),
+                    static_cast<unsigned>(last_gl_err), preview.tex, preview.w, preview.h,
+                    static_cast<void*>(glfwGetCurrentContext()));
+      }
     }
 
     auto now = clock_type::now();
@@ -513,17 +728,47 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       const ImVec2 avail = ImGui::GetContentRegionAvail();
       const float hud_h = 40.0f;  // compare button + compare hint
       const ImVec2 image_area(avail.x, std::max(64.0f, avail.y - hud_h - 8.0f));
-      if (out_w > 0 && out_h > 0) {
-        float scale = std::min(image_area.x / out_w, image_area.y / out_h);
-        image_size = ImVec2(out_w * scale, out_h * scale);
+      // M2e requirement 6: status frame. "Menunggu frame kamera..." hanya
+      // sampai frame pertama tampil; sesudah itu selalu "N ... M diproses".
+      const uint64_t cam_recv = safe ? 0 : capture.GetStats().received;
+      char fstatus[160];
+      std::snprintf(fstatus, sizeof(fstatus), "%llu frame kamera diterima, %llu diproses",
+                    static_cast<unsigned long long>(cam_recv),
+                    static_cast<unsigned long long>(pipe_out));
+      if (shown_w > 0 && shown_h > 0) {
+        float scale = std::min(image_area.x / shown_w, image_area.y / shown_h);
+        image_size = ImVec2(shown_w * scale, shown_h * scale);
         // Center the image horizontally in the preview window.
         const float offset_x = (avail.x - image_size.x) * 0.5f;
         if (offset_x > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
         image_pos = ImGui::GetCursorScreenPos();
+        // UV (0,0)-(1,1): semua sumber yang kita upload (capture, readback
+        // pipeline, sintetis) sudah baris atas-dibawah - tanpa flip (M2e).
         ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(preview.tex)),
-                     image_size, ImVec2(0, 1), ImVec2(1, 0));
-      } else {
+                     image_size, ImVec2(0, 0), ImVec2(1, 1));
+        // Status overlay di sudut bawah kiri gambar.
+        if (cam_recv > 0 || pipe_out > 0 || ui.raw_preview) {
+          char line[192];
+          if (cam_recv > 0 || pipe_out > 0) {
+            std::snprintf(line, sizeof(line), "%s%s", ui.raw_preview ? "RAW (F4) | " : "",
+                          fstatus);
+          } else {
+            std::snprintf(line, sizeof(line), "RAW (F4)");
+          }
+          ImDrawList* dl = ImGui::GetWindowDrawList();
+          const ImVec2 ts = ImGui::CalcTextSize(line);
+          const ImVec2 sp(image_pos.x + 8.0f,
+                          image_pos.y + image_size.y - ts.y - 12.0f);
+          dl->AddRectFilled(sp, ImVec2(sp.x + ts.x + 12.0f, sp.y + ts.y + 8.0f),
+                            IM_COL32(0, 0, 0, 160));
+          dl->AddText(ImVec2(sp.x + 6.0f, sp.y + 4.0f), IM_COL32_WHITE, line);
+        }
+      } else if (cam_recv == 0) {
         ImGui::TextUnformatted("Menunggu frame kamera...");
+      } else {
+        // Frame kamera sudah masuk tetapi belum ada yang tampil: laporkan
+        // hitungan (termasuk "0 diproses" bila pipeline belum menghasilkan).
+        ImGui::Text("%s", fstatus);
       }
 
       // Debug overlay: 468 landmark points + bbox + HUD on the preview.

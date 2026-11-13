@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <vector>
 #include "kgcore/frame.h"
 #include "kgcore/landmark.h"
 #include "face_tracker.h"
@@ -31,6 +32,9 @@ class BeautyPipeline {
 
   // Pushes one captured frame through the chain; result readable via
   // OutputRGBA() (valid until the next ProcessFrame call).
+  // M2e: BGRA frames are converted to RGBA (alpha forced 255) BEFORE the
+  // gpupixel upload - gpupixel's BGRA glTexImage2D path is a no-op on
+  // Windows (guarded to iOS/macOS), which produced a black preview.
   void ProcessFrame(const Frame& frame);
 
   // Live-apply the two global beauty parameters ([0,1] each); idempotent.
@@ -40,7 +44,10 @@ class BeautyPipeline {
   // "BeautyFaceFilter::Create gagal …"). Empty on success.
   const std::string& LastResourceError() const { return last_resource_error_; }
 
-  const uint8_t* OutputRGBA() const;
+  // M2e: returns a TOP-DOWN RGBA copy of the sink readback with alpha
+  // forced to 255 (owned by the pipeline; valid until the next call).
+  // Was: direct pointer into gpupixel's glReadPixels buffer.
+  const uint8_t* OutputRGBA();
   int OutputWidth() const;
   int OutputHeight() const;
 
@@ -59,5 +66,9 @@ class BeautyPipeline {
   std::shared_ptr<gpupixel::BeautyFaceFilter> beauty_filter_;
   std::shared_ptr<gpupixel::SinkRawData> sink_;
   bool initialized_ = false;
+  // M2e conversion/output buffers (owned here so OutputRGBA stays valid
+  // until the next ProcessFrame/OutputRGBA call).
+  std::vector<uint8_t> convert_buf_;  // pre-upload BGRA->RGBA staging
+  std::vector<uint8_t> out_buf_;      // post-readback RGBA (alpha forced)
 };
 }  // namespace kgcore

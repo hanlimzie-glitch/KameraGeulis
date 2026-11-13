@@ -28,6 +28,9 @@ struct AppUiState {
   bool show_debug = false;     // F3 / Info tab: landmark overlay + timings
   bool safe_mode = false;      // --safe: camera/ORT/GPUPixel disabled
   bool vsync = true;           // About tab checkbox (runtime-only)
+  bool raw_preview = false;    // M2e F4 / Info tab: tampilkan kamera mentah
+  uint64_t debug_frame_requests = 0;  // M2e F5 / Info tab: simpan PNG debug
+  std::string camera_mode_line;       // mode MF aktual (read-back) untuk UI
   bool camera_ok = false;
   int cam_width = 0, cam_height = 0;
   uint64_t frames_captured = 0;
