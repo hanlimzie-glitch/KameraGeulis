@@ -1,6 +1,6 @@
 # TESTING-WINDOWS.md — Menguji KameraGeulis (artifact CI) di Windows nyata
 
-**Tanggal:** 2026-11-12 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2c, dengan smoke test):** [43192212350](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350) · **Kedaluwarsa:** 2026-11-26
+**Tanggal:** 2026-11-12 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2e — F4/F5/diagnosis + fix preview hitam):** [43431139047](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43431139047) · **Kedaluwarsa:** 2026-11-26
 
 > Dokumen ini jujur: artifact **belum pernah dijalankan di Windows mana pun** sebelum kamu mengujinya.
 > Semua yang di bawah "Checklist" adalah hal yang **perlu kamu verifikasi**, bukan jaminan yang sudah hijau.
@@ -16,13 +16,13 @@
 ## 2. Unduh & ekstrak
 
 **Cara A — via browser (paling mudah):**
-1. Buka <https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350>
+1. Buka <https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43431139047>
 2. Scroll ke bagian **Artifacts** di bawah → klik `kamerageulis-m2-windows-x64` → unduh zip.
 3. Ekstrak zip ke folder mana pun (mis. `C:\KameraGeulis\`).
 
 **Cara B — via gh CLI:**
 ```bat
-gh run download 43192212350 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D C:\KameraGeulis
+gh run download 43431139047 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D C:\KameraGeulis
 ```
 
 **Isi folder hasil ekstrak:**
@@ -84,7 +84,7 @@ Setelah unzip ke D:\Project Camera (atau folder pilihanmu), cukup jalankan `Kame
 
 - **Efek landmark apa pun** (face slim, lipstick, …) — disabled `Segera hadir` (v1: pemetaan 468→GPUPixel-Mars tidak kredibel, docs/LANDMARKS.md §8).
 - **Kamera virtual** (toggle disabled) — M3, butuh softcam + registrasi admin 1×.
-- **Snapshot PNG** — tombol disabled.
+- **Snapshot PNG (tombol "Snapshot" di Info)** — masih disabled; yang ada sekarang adalah **F5 dump debug** (lihat §8), bukan fitur snapshot pengguna.
 - **Recording MP4** — belum diimplementasikan.
 
 ## 6. Bila sesuatu gagal — apa yang perlu dicatat/dikirim
@@ -101,3 +101,36 @@ Setelah unzip ke D:\Project Camera (atau folder pilihanmu), cukup jalankan `Kame
 - Settings: `%APPDATA%\KameraGeulis\settings.json`
 - Model: `<exe>\models\` (dibundel di artifact) → fallback `%LOCALAPPDATA%\KameraGeulis\models\` → override env `KAMERAGEULIS_MODELS_DIR` (dipakai aplikasi DAN `--selftest` dengan urutan sama)
 - Log: stderr → alihkan ke file seperti §3.
+- Dump debug F5: `%APPDATA%\KameraGeulis\debug\raw_*.png` + `out_*.png` (M2e).
+
+## 8. Artifact M2e — uji singkat F4/F5 + apa yang dikirim balik
+
+> **Jujur:** preview kamera (hitam/terang), orientasi gambar, F4, F5, dan
+> penerimaan mode 1280×720@30 **belum pernah diverifikasi di Windows nyata** —
+> logika konversi/PNG sudah teruji di Linux, tetapi GPU/webcam hanya ada di
+> PC kamu. Hasil ujianmu di bawah adalah kebenaran final.
+
+**Langkah uji singkat (urut, ~2 menit):**
+
+1. Jalankan `KameraGeulis.exe` (kamera aktif, bukan `--safe`).
+   - **UJI UTAMA:** apakah preview menampilkan gambar kamera (wajah/ruangan),
+     bukan hitam kosong? Baris overlay bawah harus berubah dari
+     "Menunggu frame kamera..." menjadi "N frame kamera diterima, M diproses".
+2. Tekan **F4** (atau centang **"Tampilkan kamera mentah (tanpa GPUPixel)"**
+   di tab Info): preview = frame mentah tanpa efek, warna normal, tegak.
+   Tekan **F4** lagi untuk kembali ke jalur GPUPixel (bandingkan keduanya —
+   keduanya harus menampilkan gambar; bila salah satu terbalik/aneh, catat).
+3. Tekan **F5** (atau tombol **"Simpan frame debug PNG (F5)"** di tab Info):
+   cek folder `%APPDATA%\KameraGeulis\debug\` → ada `raw_*.png` + `out_*.png`.
+   Buka keduanya: `raw_` = frame kamera mentah, `out_` = keluaran pipeline.
+4. Lihat tab **Info**: baris **"Kamera: WxH @ fps, stride, subtype, luma, alpha"**
+   (mode aktual hasil baca-balik MF) + log `diag` tiap detik.
+
+**File yang dikirim balik:**
+
+1. `log.txt` (lengkap — harus memuat baris `capture started (aktual)`,
+   `diag: MF: ...`, `F4:`, `F5: ... -> path`, dan `glGetError` bila ada).
+2. Kedua PNG dari `%APPDATA%\KameraGeulis\debug\` (`raw_*.png` + `out_*.png`).
+3. Screenshot jendela aplikasi (preview + tab Info) dan, bila ada yang aneh,
+   screenshot khusus mode F4.
+4. Bila crash: `crash-*.dmp` + pesan Event Viewer ID 1000 (§4).
