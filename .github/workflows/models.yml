@@ -44,6 +44,16 @@ env:
   SEG_TFLITE_SHA256: c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
   SEG_TFLITE_SIZE: "16371837"
   SEG_ONNX_OPSET: "17"
+  # Pin SHA-256 ONNX hasil konversi (assert di langkah "Assert conversion
+  # pins"). M2j 2026-11-14: pin det/mesh DIPERBARUI (runner image berubah
+  # sejak run pertama 43179962364 → byte berbeda; I/O verify tetap lulus) —
+  # drift berikutnya harus GAGAL di sini dengan hash aktual tercetak, lalu
+  # pin diperbarui secara sadar (bukan diam-diam).
+  DET_ONNX_SHA256: 5ff2cd91827ab8a9fff56ed7f95854069d9d66cf5ec32ff4cdf6cd17ef48ef8e
+  MESH_ONNX_SHA256: a17115cbad5fdcc7647cc0e4f5cf9178721cc2557bf8feda047f2d8b3832975a
+  SEG_ONNX_SHA256: cdaf12e7d2681517c2619968ff573c258e4b772eb760b479147c3fed867df661
+  # Determinisme serialisasi graf (anti drift antar run).
+  PYTHONHASHSEED: "0"
 
 jobs:
   build-models:
@@ -100,6 +110,23 @@ jobs:
           cp "$RUNNER_TEMP/models-src/selfie_multiclass_256x256.tflite" "$out/"
           python -m tf2onnx.convert --tflite "$out/selfie_multiclass_256x256.tflite" \
             --output "$out/selfie_multiclass_256x256.onnx" --opset "$SEG_ONNX_OPSET"
+
+      - name: Assert conversion pins (drift = gagal, hash aktual dicetak)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/models-out"
+          check() {
+            f="$1"; pin="$2"
+            actual=$(sha256sum "$out/$f" | cut -d' ' -f1)
+            if [ "$actual" != "$pin" ]; then
+              echo "::error title=ONNX SHA drift::$f actual=$actual pin=$pin — perbarui pin di workflow + ort_landmark_provider.cc/seg_provider.cc + docs secara sadar"
+              exit 1
+            fi
+            echo "$f OK $actual"
+          }
+          check face_detection_short_range.onnx "$DET_ONNX_SHA256"
+          check face_mesh.onnx "$MESH_ONNX_SHA256"
+          check selfie_multiclass_256x256.onnx "$SEG_ONNX_SHA256"
 
       - name: "Verify ONNX (onnxruntime: names, shapes, inference)"
         run: |

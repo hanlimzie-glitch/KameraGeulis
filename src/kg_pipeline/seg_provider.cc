@@ -32,10 +32,11 @@ constexpr char kTag[] = "seg";
 //   selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite
 // SHA-256 TFLITE (diverifikasi di CI terhadap 4 sumber independen):
 //   c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
-// SHA-256 ONNX diisi SETELAH konversi pertama CI (lihat STATUS.md M2j) —
-// selama placeholder, file diterima dengan PERINGATAN jujur di log.
+// SHA-256 ONNX = keluaran CI Models 43590566734 (opset 17); workflow kini
+// menassert pin ini setiap konversi (drift = langkah CI gagal + hash aktual
+// dicetak) sehingga perubahan runner terlihat & disengaja.
 constexpr wchar_t kSegFile[] = L"selfie_multiclass_256x256.onnx";
-constexpr char kSegOnnxSha256[] = "TODO_ONNX_SHA256_SET_AFTER_CI";
+constexpr char kSegOnnxSha256[] = "cdaf12e7d2681517c2619968ff573c258e4b772eb760b479147c3fed867df661";
 constexpr wchar_t kDownloadBase[] = L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =
     L"/hanlimzie-glitch/KameraGeulis/releases/download/models-v1/";

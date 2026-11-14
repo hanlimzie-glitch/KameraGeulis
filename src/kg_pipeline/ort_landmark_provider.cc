@@ -34,8 +34,11 @@ constexpr char kTag[] = "landmark";
 // project GitHub Release `models-v1` (or taken from KAMERAGEULIS_MODELS_DIR).
 constexpr wchar_t kDetFile[] = L"face_detection_short_range.onnx";
 constexpr wchar_t kMeshFile[] = L"face_mesh.onnx";
-constexpr char kDetSha256[] = "82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d";
-constexpr char kMeshSha256[] = "ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337";
+// M2j (2026-11-14): pin DIPERBARUI dari keluaran CI Models 43590566734
+// (runner image berubah sejak 43179962364 → byte ONNX berbeda, verifikasi
+// I/O tetap lulus; workflow kini menassert pin agar drift terlihat di CI).
+constexpr char kDetSha256[] = "5ff2cd91827ab8a9fff56ed7f95854069d9d66cf5ec32ff4cdf6cd17ef48ef8e";
+constexpr char kMeshSha256[] = "a17115cbad5fdcc7647cc0e4f5cf9178721cc2557bf8feda047f2d8b3832975a";
 constexpr wchar_t kDownloadBase[] =
     L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =

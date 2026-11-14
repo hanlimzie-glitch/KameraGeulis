@@ -295,6 +295,19 @@ di komposit (identik GPU & CPU) →22% ≈ +6.6 luma inti, 100% ≈ +30; chroma
 retensi mentah dipertahankan (anti-cast). Target **rasio ≤0.85 pada default
 diukur di log F5** — angka final menunggu pengukuran PC (log tag `app` "F5 metrik").
 
+**Re-pin det/mesh (peristiwa jujur M2j):** run Models 43590566734 (2026-11-14)
+menghasilkan byte ONNX det/mesh **berbeda** dari run pertama 43179962364
+(versi paket terpin sama; kemungkinan besar perubahan image runner) — verifikasi
+I/O onnxruntime tetap lulus, tetapi rilis `models-v1` ikut ter-`--clobber`.
+Konsekuensi: pin lama (`82ac962b…`/`ac72f85b…`) tidak lagi cocok → smoke CI
+(selftest) gagal (exit 4) → **pin diperbarui** ke `5ff2cd91…`/`a17115cb…`
+(+ seg `cdaf12e7…`) di `ort_landmark_provider.cc`, `seg_provider.cc`,
+`docs/LANDMARKS.md`, dan workflow; workflow kini **menassert** ketiga pin
+(`PYTHONHASHSEED=0`) sehingga drift berikutnya = gagal CI dengan hash aktual
+tercetak (update pin = keputusan sadar, bukan diam-diam). PC pengguna yang
+sudah punya model lama akan mengunduh ulang sekali saat pin berubah (verifikasi
+ulang → cocok → lanjut; landmark tidak mati).
+
 **Uji Linux (data sintetis):** letterbox/unletterbox roundtrip + pad edge-replicate,
 normalisasi [-1,1], deteksi logit vs probabilitas + P_kulit=p2+p3 (clamp),
 argmax/statistik per kelas/warna seg_, guided upsampling mempertahankan tepi
