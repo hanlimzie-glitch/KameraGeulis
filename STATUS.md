@@ -1,0 +1,373 @@
+# STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
+
+Terakhir diperbarui: **2026-11-14 (M2j — segmentasi semua-kulit MediaPipe selfie_multiclass (thread sendiri 10-15 Hz, ORT CPU, unduh+SHA-verified dari models-v1, opset 17), fusi mask (seg ∪ oval landmark − fitur), coverage UI "Semua kulit/Wajah saja", motion-compensated adaptive EMA anti-lag, kalibrasi kualitas F5 (guided boost + lift proporsional, target rasio ≤0.85 /22%→+6..8), F5 + seg_ PNG & statistik kelas, F6 = mask akhir, uji Linux 90 TC); M2i — perbaikan uji-PC M2h: preview hitam (MIN_FILTER tekstur output), settings.json rename-Windows, komposit chroma-preserving + guided smoothing terukur, feather per-region, log F5 metrik inti, flag --no-mask-gl, swa-uji otomatis); M2h — mask kulit wajah dari landmark 468: efek Haluskan/Cerahkan hanya di kulit (fade tanpa wajah), checkbox + F6 overlay mask, F5 simpan raw/out/mask + statistik luar/dalam mask; audit source: BeautyFaceUnitFilter gpupixel memang TANPA mask; M2g TERBUKTI di PC nyata - kamera hidup 1920x1080, mesh 4.9ms, render 9.3ms)**
+Legenda status:
+- ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
+- 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
+- ⛔ diblokir fakta/lisensi/aksi di luar sandbox kami
+- ⬜ belum dimulai
+
+| # | Fitur | Implemented | Compiled in CI (Windows) | Tested on real Windows | Known issues |
+|---|---|---|---|---|---|
+| M0 | Riset + capability check + arsitektur | ✅ | ✅ capability workflow hijau (vswhere/cmake/git) | n/a | Log Actions tidak bisa dibaca dari sandbox (lihat di bawah) |
+| M1 | CMake + CI build window + GPUPixel + camera preview | 🔨 | ✅ (run 43166017897) | ⬜ | Runtime GL/MF BELUM diverifikasi (tidak ada GPU/webcam di CI/sandbox); artifact M1: `kamerageulis-m1-windows-x64` (581 KB) |
+| M1b | Pipeline landmark (ORT CPU, 468 pt) + kg_core decode/ROI/OneEuro | 🔨 | ✅ (run 43174282611) | ⬜ | Windows runtime belum diverifikasi di mesin nyata; GPUPixel landmark filters **tidak di-wire** (pemetaan 468→Mars tidak kredibel, docs/LANDMARKS.md §8); kg_core hijau di Linux (45 TC / 8319 assertions) |
+| M2 | UI ImGui lengkap + slider skin live + debug overlay | ✅ (dikode) | ✅ (run 43183762692) | ⬜ (crash: force-close saat startup) | belum diverifikasi di Windows nyata; snapshot PNG belum |
+| M2c | Stabilitas startup: log file flush/baris, crash handler + dump + MessageBox, preload DLL app-local + OrtGetApiBase, GL fallback 3 tahap, `--safe`, `--selftest` + CI smoke test | ✅ | ✅ (run 43192212350 — termasuk step smoke test `--selftest` hijau) | ⬜ | belum diverifikasi di PC pengguna; penyebab force-close belum diketahui — setelah M2c, kegagalan tercatat di log.txt/dump, bukan keluar diam-diam |
+| M2d | Crash startup gpupixel.dll 0x3968a (resource `res/` hilang → null lookup → AV di BeautyFaceUnitFilter::DoRender); models ikut artifact; urutan pencarian model disatukan (env → exe\\models → LOCALAPPDATA); PDB/MAP + symbolizer RVA di CI; safe-mode sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; Terapkan/apply dimatikan); FPS render vs kamera dipisah label; vsync checkbox; resource hilang → efek GPU nonaktif + pesan UI (bukan crash) | ✅ (dikode) | ✅ (run terakhir hijau) | ⬜ | belum diverifikasi di PC pengguna — fix terbukti di level source + CI (artifact wajib berisi res/ & models/, `--selftest` hijau dari dist) |
+| M2e | Diagnosis preview hitam: konversi BGRA→RGBA (alpha 255) sebelum GPUPixel (akar masalah: upload BGRA gpupixel no-op di Windows), F4 frame mentah, F5 dump PNG, log diagnosis 1 detik, negosiasi mode kamera (advanced processing + read-back + reinit saat ukuran berubah), teks status frame | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika konversi/stride/flip/PNG **teruji di Linux**; preview hitam/putih, orientasi UV, F4/F5, dan scaling kamera **belum bisa diverifikasi tanpa GPU + webcam** (lihat "Batasan" + bagian M2e) |
+| M2f | Regresi M2e: tangga fallback atribut source reader (penuh→basic→polos, HRESULT per percobaan, --capture-plain), status kamera jujur ("OK" hanya setelah frame pertama), retry backoff 1-8 dtk + tombol "Coba lagi" + petunjuk, guard readback GPUPixel (crash F5 0xC0000005 sebelum frame pertama), overlay F4 "Tidak ada frame kamera" | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika tangga+guard teruji di Linux (7 TC baru); E_INVALIDARG 0x80070057 pengguna TIDAK terdokumentasi di docs MS (diperiksa: kedua atribut sah secara terpisah; kombinasi ditolak runtime di PC-nya) → tangga turun ke tingkat yang terbukti; regresi BGRA tetap teratasi (belum terbukti karena frame belum pernah masuk) |
+| M2g | Bug log-4: kegagalan membunuh IMFMediaSource lalu tingkat berikut = MF_E_SHUTDOWN → **objek source BARU per tingkat** (ActivateObject ulang), urutan tangga baru **basic→polos→penuh (paling akhir)**, log jumlah/nama device + hr ActivateObject per tingkat + tingkat dipakai, UI **kode awal+akhir** dengan nama simbolis, petunjuk "dipakai aplikasi lain" **hanya** E_ACCESSDENIED/ERROR_SHARING_VIOLATION, audit situs reuse MF lain | ✅ (dikode) | ✅ [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) sukses | ⬜ | tiruan objek mati meniru log-4 persis (E_INVALIDARG lalu SHUTDOWN×2); test pola baru gagal di kode lama & lulus di kode baru; docs MS: default-nya reader me-Shutdown sumber saat di-release → mekanisme bug terkonfirmasi dokumentasi |
+| M2h | Mask kulit per frame (oval FACEMESH_FACE_OVAL dikurangi mata/alis/bibir/lubang hidung + probabilitas warna YCbCr adaptif dari pipi/dahi via landmark, feather + temporal EMA, resolusi 1/4); komposit `mix(raw,beauty,mask*gain)` lewat shader GL aplikasi (tanpa menambal gpupixel); fade ke 0 saat wajah hilang; checkbox "Terapkan hanya pada kulit wajah" (default ON) di tab Kulit; F6 overlay merah mask; F5 selalu raw+out+mask PNG + log selisih luar/dalam mask; simpan perangkat kamera terakhir + petunjuk frame hampir hitam + penghitung sent≤recv; kerusakan lama (tangga/guard F5/BGRA/F4) dipertahankan | ✅ (dikode) | ✅ [43572859909](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43572859909) sukses | ⬜ | uji Linux 79 TC/9604 asersi (rasterisasi, pengurangan fitur, feather, blending piksel LUAR mask identik, builder E2E wajah sintetis); visual GPU/webcam BELUM terverifikasi - menunggu uji PC pengguna |
+| M2i | Perbaikan hasil uji PC M2h: (1) **preview hitam mode skin-only** - `TEXTURE_MIN/MAG_FILTER` tekstur output blender dieksplisitkan (default `NEAREST_MIPMAP_LINEAR` tanpa mipmap = tekstur INCOMPLETE = hitam tanpa glGetError), log init blender (kompilasi/link/FBO/id tekstur) + `glGetError` per tahap + **swa-uji luma keluaran vs mentah setelah ~30 frame** (keluaran gelap -> otomatis jalur lama + notice + log) + flag `--no-mask-gl`; (2) **settings.json** - `std::filesystem::rename` (menimpa tujuan; rename C89 gagal di Windows = 'GAGAL menyimpan perangkat' + default DroidCam), `create_directories`, `Save/Load(path, err)` log penyebab pasti; notifikasi 'nyaris hitam' dicabut saat ganti perangkat/luma pulih; (3) **kualitas**: komposit baru - guided smoothing luma sendiri (box blur H/V statistik Y,Y^2, radius 8, eps 0.0015) + **retensi chroma MENTAH** `chroma_retain` (default 0.8; Y dari beauty, CbCr diarahkan ke raw -> tanpa cast dingin/pink), preset default diturunkan (Natural 0.18/0.06 dst), feather **per-region** (tepi luar r=1, lubang fitur r=3 + inti keras 0 -> cincin merah muka hilang); (4) **log F5 metrik M2i**: delta luma/chroma mask inti (eroded), rasio energi detail halus, diff pita tepi, diff luar; (5) **uji Linux**: transfer chroma (retain 0/1 + mask byte-identik), rasio detail ≤0.85 pada kekuatan default, feather per-region + save timpa-ulang + err penyebab | ✅ (dikode) | ✅ [43577479405](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43577479405) sukses | ⬜ | uji Linux **83 TC/9629 asersi**; **klaim visual/preview BELUM - menunggu uji PC pengguna (log tag `blend`, screenshot, F5 metrik)** |
+| M2j | Segmentasi **semua kulit** (telinga/leher/dada/lengan/tangan) dari MediaPipe `selfie_multiclass_256x256` (Apache-2.0): (1) **model** — unduh GCS resmi + SHA-256 & ukuran **diverifikasi CI** (pin `c6748b12…`, silang 4 OID LFS + model card), tf2onnx **opset 17**, verifikasi ORT `[1,256,256,6]` + softmax-di-luar, upload `models-v1` + artifact `dist\models\`, atribusi THIRD_PARTY; (2) **runtime** — thread terpisah 10-15 Hz (submit letterbox non-blocking, hasil terbaru, lag dicatat dalam frame), ORT CPU, gagal → fallback wajah + notifikasi (tanpa crash); (3) **mask akhir** — P_kulit=p2+p3, guided refine (luma penuh), gerbang warna adaptif di luar oval, ×body_strength, **union** oval landmark (presisi sampai garis rambut) + kecualian absolut (rambut/pakaian/aksesori/mata/alis/bibir/lubang hidung) di-apply SETELAH temporal; (4) **lag** — EMA **motion-compensated** (centroid shift + α adaptif 0.5→1 saat gerak) + hard re-assert fitur; (5) **UI** — combo Cakupan "Semua kulit (default)/Wajah saja" + HUD `seg ms (lag N fr)` + log `lag frame serial=…`; (6) **kualitas F5** — mode kulit: sharpen/white gpupixel DIMATIKAN (penguat HF +19.5 luma), guided `smooth_amount=0.45+0.55×slider`, lift `0.9×whitening` (22%→+6..8, 100%→~+30) identik shader GPU & komposit CPU; (7) **F5/F6** — `seg_*.png` peta kelas + log % per kelas + ms + lag; F6 = mask akhir (kini termasuk seg); (8) **uji Linux** — 7 TC baru (letterbox/unletterbox, softmax argmax, statistik kelas, guided tepi, union/eksklusi, unletterbox peta) → **90 TC** | ✅ (dikode) | ✅ [Build 43592274973](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43592274973) + [Models 43592158188](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43592158188) sukses | ⬜ | uji Linux **90 TC/12286 asersi** (CI Linux hijau). **jujur**: ms inferensi seg, perilaku thread, parity GPU, lag webcam nyata, dan hasil visual BELUM terverifikasi tanpa PC pengguna; ring topology wajah = **resmi MediaPipe** (diverifikasi via `face_mesh_connections.py`) sehingga garis datar di dahi = oval memang di bawah hairline → ditutup oleh union seg; GCS/media.githubusercontent tidak terjangkau dari sandbox → verifikasi SHA dilakukan CI (bukan asumsi) |
+| M2k | **Performance + kebocoran + mask presisi**: ORT 3 thread/full opt, rate adaptif 3–5 Hz, peta seg motion-shift dari anchor inferensi; mask GPU half/low-res dari 852 segitiga MediaPipe + exclusion mata/alis/bibir/lubang hidung (GL_MAX + feather), p3 face-skin trim, union→exclusion, satu `tex_mask` dipakai blend/F5; blend passthrough keras jika mask×gain<8/255; F5 diff per kelas/rentang + `diff_*.png`; substage CPU + GL timer query opsional (GPU timing unavailable bila extension tidak ada); PerfGuard FSM; settings cause + `.bad` no-clobber + device default | ✅ dikode, lokal | ⬜ | ⬜ | Linux: 107 TC / 17,210 assertion hijau; microbench sintetis CPU seg-only 1080p (mask 1/5) ~1.4 ms (CPU upsample + calibration prep; gate di shader), bukan total GPU/pipeline. GPU, CI Windows, 60 FPS, 30 fps webcam 1080p, parity, DML, settings real-file belum diverifikasi. DML runtime yang dikirim CPU-only; symbol probe saja. |
+| M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
+| M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
+| M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
+| — | Skin smoothing / whitening (global) | ✅ | ✅ | ⬜ | terhubung live (per-frame SetBlurAlpha/SetWhite); dirancang tanpa landmark |
+| — | Face slim / big eyes / lipstick / blush (built-in) | ⬜ | ⬜ | ⬜ | butuh Mars-Face; Windows: disabled (pesan jujur di UI) |
+| — | Chin, nose, eye brighten, brow tint, eyeshadow, eyeliner, foundation, lip finish | ⬜ | ⬜ | ⬜ | idem |
+| — | Settings JSON persist | ✅ | ✅ | ⬜ | auto-load `%APPDATA%\KameraGeulis\settings.json`; tombol Simpan/Muat; round-trip+clamp diuji di kg_tests |
+| — | Snapshot PNG | ⬜ | ⬜ | ⬜ | — |
+| — | Mirror toggle | ✅ | ✅ | ⬜ | CPU-mirror di preview (flip horizontal); round-trip buffer mirror diuji di kg_core standar |
+| — | Preset Natural/Soft/Glam/ClearSkin | ✅ | ✅ | ⬜ | nilai preset teruji di kg_tests (Natural 0.25/0.10, Soft 0.45/0.20, Glam 0.65/0.32, ClearSkin 0.55/0.26); slider manual → preset "Kustom" |
+| — | Recording (MP4) | ⬜ stretch | ⬜ | ⬜ | kemungkinan dibatalkan; akan dilaporkan jujur |
+| — | FPS/GPU stats overlay | ✅ (F3) | ✅ | ⬜ | debug overlay: 468 titik + bbox + HUD (FPS, capture/detect/mesh/track/render ms, frame sejak deteksi) |
+| — | Hotkeys | 🟡 sebagian | ⬜ (M2e menyusul) | ⬜ | F3 = overlay debug; F4 = toggle kamera mentah (M2e); F5 = dump PNG debug (M2e) |
+| — | MFCreateVirtualCamera (Win11 only) | ⬜ stretch | ⬜ | ⬜ | didokumentasikan sbg opsi masa depan |
+
+## Batasan lingkungan (aktual, per 2026-11-12)
+
+- **GPU di CI Windows tidak ada.** "Compiled in CI" ≠ "berjalan mulus". Verifikasi runtime GL tidak mungkin di workflow ini.
+- **Log Actions tidak bisa diunduh dari sandbox ini** (`results-receiver.actions.githubusercontent.com` diblokir proxy). Yang bisa dibaca: status job/step (via `gh api .../jobs`) dan anotasi `::error::` yang sengaja diemit workflow sebagai pengganti log mentah.
+- **Tidak bisa apt-install paket X11/GL** di sandbox (deb.debian.org diblokir) → verifikasi GPU lokal di Linux **tidak mungkin**; hanya kompilasi unit test logika murni yang jalan lokal.
+- **Tidak ada webcam** di sandbox → capture tidak pernah di-test di sandbox; hanya di `windows-latest` (dan itupun headless, tanpa kamera).
+
+## Keputusan jujur yang sudah diambil
+
+1. Windows default: **tanpa Mars-Face** (sesuai upstream GPUPixel). Efek landmark dijadwalkan aktif via **ONNX Runtime + model hasil konversi Apache-2.0 (468 titik)** — rencana, provenance & checksum di `docs/LANDMARKS.md`; sampai M1b mendarat, efek landmark tetap **disabled** dengan pesan jujur di UI. Alasan historis: `docs/RESEARCH.md` §1 & §6.
+2. Tidak ada model wajah di-bundling di Windows; model Mars-Face hanya ada di build Linux/macOS via GPUPixel dan lisensinya belum dikonfirmasi upstream (issue #253) → tidak untuk rilis komersial sebelum klarifikasi.
+3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
+4. Setiap milestone CI meng-upload artifact (`kamerageulis-mN-windows-x64`; M1b: `kamerageulis-m1b-windows-x64`). Log mentah Actions tidak bisa diunduh dari sandbox — error MSVC dibaca via anotasi `::error::` (workflow memancarkannya; lihat `.github/workflows/build.yml` langkah Build).
+5. Detil fix CI selalu dianotasikan di commit message fix (analisis + akar masalah + perbaikan).
+
+## M2h — detail (2026-11-14)
+
+**Bukti pengguna (screenshot_4.png, log-5.txt):** M2g BERHASIL di PC nyata -
+kamera hidup (1920x1080@30, `MF capture start: OK`, mesh ~4.9 ms, render
+~9.3 ms, pipeline `sent=out, err=0, glErr=0`), landmark F3 menempel. Masalah
+baru: slider Haluskan/Cerahkan memengaruhi SELURUH frame (dinding/baju ikut).
+
+**Verifikasi sumber (diminta, dilakukan):** `beauty_face_unit_filter.cc`
+(gpupixel f33abfa, v1.3.1) - shader fragment memproses SEMUA piksel
+(`gl_FragColor = vec4(color, 1.0)`) tanpa mask spasial/landmark sama sekali;
+`lookup_skin.png` hanya LUT warna, bukan mask. Hipotesis user BENAR.
+
+**Perubahan (M2h, 7 butir):**
+1. **Mask per frame** (`kgcore/skin_mask.h/cc`, murni/Linux-testable):
+   poligon oval resmi MediaPipe (`face_mesh_connections.py`, di-embed) -
+   dikurangi poligon mata + bibir luar, 4 goresan alis (capsule), disc lubang
+   hidung (titik 48/278 dari FACEMESH_NOSE) -> probabilitas YCbCr adaptif
+   (pusat elips = rata-rata sampel dahi + 2 pipi yang diambil lewat geometri
+   oval/mata pada frame asli; band lebar klasik sebagai gate) -> feather
+   (box blur terpisah 2 pass) -> EMA temporal. Resolusi 1/4 frame (~1-3 ms
+   CPU, terlihat di HUD `msk`); GAGAL -> mask lama tetap (gain yang fade).
+2. **Komposit lewat mask** (`mask_blender.h` - GL 3.3 aplikasi, tanpa patch
+   gpupixel): `out = mix(raw, beauty, mask*gain)`; gain = `FaceTracker`
+   (LandmarkFade) -> tanpa wajah efek memudar ke nol. Haluskan+Cerahkan satu
+   mask; mata/alis/bibir tidak tersentuh (terbuang dari mask). Gagal init
+   shader -> pesan jujur + kembali ke jalur lama.
+3. **Checkbox** "Terapkan hanya pada kulit wajah" (default AKTIF) di tab
+   Kulit + tooltip F6 + catatan saat mati (perilaku lama tersedia).
+4. **F6** = mask sebagai lapisan merah transparan (uniform debug di shader).
+   **F5** selalu menulis `raw_*.png` (salinan frame mentah terakhir, walau F4
+   mati), `out_*.png` (komposit CPU dengan rumus identik shader), `mask_*.png`
+   (gray), + log `selisih rata-rata LUAR mask = ... (harus mendekati 0),
+   DALAM mask = ... | gain | mode`.
+5. **Uji Linux 79 TC / 9604 asersi:** rasterisasi poligon, goresan alis,
+   feather, EMA, disc, komposit (piksel LUAR mask byte-identik dengan raw),
+   gain-0 = efek mati total, statistik (luar nol mutlak), builder E2E wajah
+   sintetis (kulit masuk; mata/bibir/alis/hidung + patch abu-abu keluar;
+   wajah hilang -> mask tak berubah).
+6. **Prioritas rendah:** (a) perangkat kamera terakhir disimpan otomatis ke
+   `settings.json` saat kamera berhasil dibuka (default sesi berikutnya);
+   (b) petunjuk "gambar nyaris hitam" bila luma < 8 selama ~3 detik (bukti:
+   DroidCam index 0 luma=0.3); (c) penghitung sinkron: reset `sent/out/err/
+   upload` saat ganti perangkat (akar selisih +30 di log-5: Start() reset
+   `stats_` tapi counter app tidak) + frame sintetis tidak dihitung -> sent
+   tidak pernah > recv.
+7. **Dipertahankan:** tangga reader M2g, guard readback F5, BGRA->RGBA,
+   overlay F4.
+
+**Belum terverifikasi (jujur):** kualitas mask & visual efek pada webcam
+nyata, shader GL blend (hanya dikompilasi CI - tidak ada GPU sandbox),
+performa mask ~1-3 ms di 1080p, perilaku F6/F5 di Windows - SEMUA menunggu
+uji pengguna; jangan klaim berfungsi sebelum screenshot/log PC.
+
+## M2g — detail (2026-11-14)
+
+**Masalah (log-4.txt pengguna):** tiap siklus retry: tingkat 2 (penuh)
+`hr=0x80070057` (E_INVALIDARG) → tingkat 1 (basic) `hr=0xC00D3E85` → tingkat 0
+(polos) `hr=0xC00D3E85` = **MF_E_SHUTDOWN**. Dugaan user: percobaan pertama yang
+gagal mematikan IMFMediaSource, lalu tingkat berikutnya memakai objek yang sama
+yang sudah mati → konfigurasi M2d yang terbukti tak pernah jalan.
+
+**Verifikasi di kode:** benar - tangga M2f memakai SATU `source` untuk ketiga
+tingkat tanpa Shutdown di antaranya; `MFCreateSourceReaderFromMediaSource` yang
+gagal melepas reader internalnya, dan menurut dokumentasi Microsoft
+(`MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN`): *"By default, when the
+application releases the source reader, the source reader shuts down the media
+source"* → sumber ikut mati (MF_E_SHUTDOWN pada pemakaian ulang).
+
+**Perubahan (M2g):**
+1. **Objek source baru per tingkat** (`camera_capture.cc`): `activate` disimpan
+   lintas tingkat; tiap tingkat: Shutdown+release sisa objek gagal →
+   `ActivateObject` baru (hr dicetak per tingkat) → baru coba reader. Tidak ada
+   objek MF yang dipakai ulang setelah kegagalan.
+2. **Urutan tangga baru** (`DefaultReaderLadder`): **basic (M2d) → polos →
+   penuh (usaha terakhir)** - konfigurasi terbukti dicoba pertama pada objek
+   segar. `--capture-plain` tetap hanya polos.
+3. **Log perangkat vs reader terpisah:** `device: N ditemukan, memakai index I
+   "NAMA"`, `ActivateObject (objek baru, tingkat X): hr=...`,
+   `reader percobaan tingkat X ...`, `MF capture: tingkat dipakai = X (...)`.
+4. **UI:** baris merah `Kamera gagal: 0xTERAKHIR (NAMA), awal 0xAWAL (NAMA)
+   (mencoba lagi...)`; nama simbolis via `MfErrorName()` (E_INVALIDARG, E_FAIL,
+   E_ACCESSDENIED, ERROR_SHARING_VIOLATION, ERROR_NOT_FOUND, MF_E_SHUTDOWN);
+   petunjuk "dipakai aplikasi lain atau akses diblokir" **hanya** untuk
+   E_ACCESSDENIED (izin diblokir) dan ERROR_SHARING_VIOLATION (dipakai proses
+   lain) - MF tidak mendokumentasikan HRESULT khusus "kamera dipakai aplikasi
+   lain". Untuk E_INVALIDARG/MF_E_SHUTDOWN tampil baris netral "Lihat log…".
+5. **Uji Linux (68 TC / 8666 asersi):** pabrik tiruan objek yang MATI setelah
+   kegagalan - pola lama (urutan lama + reuse) mereproduksi log-4 persis
+   (E_INVALIDARG, SHUTDOWN, SHUTDOWN → -1); pola baru (urutan M2g + objek
+   segar) → basic sukses 1 percobaan (test ini GAGAL bila dijalankan terhadap
+   kode lama); + tes `MfErrorName`/`WantsCameraBusyHint`.
+6. **Audit reuse MF lain:** Coba lagi/apply = `Stop()`+`Start()` (siklus segar
+   penuh) OK; `EnumerateModes` = source+reader sendiri, gagal → Shutdown OK;
+   reinit perubahan ukuran = hanya pipeline GPUPixel, MF tak disentuh OK.
+   Satu-satunya situs reuse = tangga (diperbaiki).
+
+**Belum terverifikasi (jujur):** perilaku Windows asli (aktivasi ulang per
+tingkat) belum diuji di PC pengguna - hanya tiruan Linux; E_INVALIDARG penuh
+masih bisa muncul di tingkat TERAKHIR (memang usaha terakhir).
+
+## M2f — detail (2026-11-14)
+
+**Bukti PC pengguna (log-3.txt):** (1) `MFCreateSourceReaderFromMediaSource failed (0x80070057)` — M2e menambahkan `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` bersama `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` → regresi (M2d dengan flag basic saja menghasilkan 329/512 frame). (2) F5 tanpa frame pernah masuk → `SinkRawData::GetRgbaBuffer()` me-run `glReadPixels` pada framebuffer yang belum pernah dibuat → AV 0xC0000005 di gpupixel.dll (RVA 0x153a6, `mov edx,[rcx+0x2c]` rcx=0). (3) F4 tanpa frame = diam.
+
+**Dokumentasi Microsoft yang diperiksa (repo MicrosoftDocs/win32, bukan tebakan):** `mf-source-reader-enable-video-processing.md` (UINT32; bila TRUE: D3D_MANAGER & DISABLE_CONVERTERS harus FALSE), `mf-source-reader-enable-advanced-video-processing.md` (BOOL/UINT32; bila TRUE: DISABLE_CONVERTERS harus FALSE; "similar to ... ENABLE_VIDEO_PROCESSING, but offers ... advantages"), `source-reader-attributes.md` (kedua atribut sah untuk `MFCreateSourceReaderFromMediaSource`). Kedua syarat selalu terpenuhi (kita tidak pernah set DISABLE_CONVERTERS/D3D_MANAGER). **Docs TIDAK melarang kombinasi keduanya** — penolakan 0x80070057 adalah perilaku runtime yang tidak terdokumentasi di PC pengguna → solusinya tangga fallback dengan HRESULT dicatat per percobaan.
+
+**Fix:** (1) `kgcore/reader_fallback.h` — logika tangga (a) penuh → (b) basic → (c) polos, diuji Linux dengan pabrik palsu yang gagal di tingkat tertentu; camera_capture memakainya + mencoba ulang dengan backoff 1→2→4→8 dtk; `--capture-plain` = langsung tingkat (c). (2) Log jujur: baris awal hanya "thread dijalankan (menunggu reader + frame pertama)"; `MF capture start: OK - frame pertama diterima ...` dicetak worker SETELAH reader jadi + frame pertama; kegagalan mencetak `MF capture start: GAGAL (<tahap>) hr=0x... - percobaan N, mencoba lagi dalam X ms`. (3) UI: baris merah "Kamera gagal: 0x... (mencoba lagi...)" (tab Kamera + status bar), petunjuk "Kamera mungkin dipakai aplikasi lain atau akses kamera diblokir", tombol "Coba lagi" (Stop+Start segar). (4) Guard readback: `BeautyPipeline::OutputRGBA` menolak (log "tidak ada frame keluaran") selama `SinkReadbackAllowed(sink_w, sink_h, frames_produced_)` false — gpupixel tidak disentuh sama sekali sebelum frame pertama; F5 mencatat "tidak ada frame keluaran" dan lanjut. (5) F4 tanpa frame: overlay/teks "Tidak ada frame kamera".
+
+**Teruji di Linux:** 7 test case baru (tangga: gagal penuh→basic; gagal penuh+basic→polos; semua gagal→-1+hr terakhir; sukses tingkat pertama; --capture-plain; urutan default; guard readback 7 kasus) — kg_tests 64 TC / 8642 assertions hijau.
+
+**TIDAK bisa diverifikasi tanpa webcam + GPU (jujur):** apakah tingkat (b)/(c) benar-benar membuka kamera di PC pengguna (harusnya ya — itu konfigurasi M2d yang terbukti), apakah 0x80070057 memang hilang di kombinasi lain, perilaku backoff + tombol Coba lagi di UI nyata, apakah F5 aman (guard diuji logika, bukan terhadap gpupixel.dll), apakah "OK menyusul frame pertama" muncul di log PC, dan status BGRA→RGBA M2e (tetap dipertahankan, TETAP belum terbukti karena frame belum pernah masuk).
+
+## M2e — detail (2026-11-12)
+
+**Akar masalah preview hitam (terbukti di source, bukan tebakan):** `SourceRawData::GenerateTextureWithPixels` (gpupixel pin `f33abfa`): cabang `GPUPIXEL_FRAME_TYPE_BGRA` membungkus satu-satunya `glTexImage2D` dengan `#if defined(GPUPIXEL_IOS) || defined(GPUPIXEL_MAC)` → **di Windows upload BGRA = NO-OP**, tekstur tidak pernah terisi → seluruh rantai memproses tekstur kosong → readback hitam. Kamera MF memberi `kFormatBGRA` (RGB32) → selalu kena jalur ini. Cabang RGBA tidak dijaga platform → bekerja di semua OS. Masalah sekunder: byte alpha frame RGB32 sering 0 → preview terlihat "hilang" di panel gelap.
+
+**Fix (tanpa menambal gpupixel):** (1) `BeautyPipeline::ProcessFrame` mengonversi BGRA→RGBA + memaksa alpha=255 ke buffer sendiri (`kgcore::ConvertToRgbaTopDown`) sebelum `ProcessData` dengan tipe RGBA. (2) `OutputRGBA()` menyalin readback sink + memaksa alpha 255. (3) upload preview memaksa alpha 255. (4) UV preview diseragamkan `(0,0)-(1,1)` (semua sumber kita top-down). (5) Teks "Menunggu frame kamera..." hanya sampai frame tampil pertama; sesudahnya baris status "N frame kamera diterima, M diproses" (overlay pada gambar / teks inline bila belum ada gambar). (6) F4 = upload frame capture langsung (tanpa GPUPixel) — memisahkan masalah capture/upload dari pipeline; kotak centang di tab Info. (7) F5 = simpan `raw_*.png` + `out_*.png` ke `%APPDATA%\KameraGeulis\debug\` (penulis PNG minimal tanpa dependensi, CRC/adler teruji). (8) Log `diag` tiap 1 detik: MF recv/ukuran/stride/subtype/fps/luma/alpha-tengah, frame masuk/keluar/err pipeline, upload out/raw, `glGetError` terakhir+total setelah tiap upload, id+ukuran tekstur, pointer konteks GL aplikasi; catatan konteks startup menjelaskan gpupixel membaca frame ke CPU lewat konteks kerjanya sendiri (`GetRgbaBuffer` = jalur resmi, id tekstur gpupixel tidak dipakai di konteks aplikasi; PBO menyusul/M3-diblokir). (9) Kamera: flag `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` (scaling agar 1280x720@30 bisa diterima), baca-balik tipe aktual (ukuran/stride-bertanda/subtype/fps) dicatat di log + tab Info; stride negatif (bottom-up) di-flip saat copy, tidak lagi di-clamp; ukuran frame berubah di tengah jalan → pipeline di-Shutdown + di-Init ulang dengan ukuran baru.
+
+**Teruji di Linux (kg_tests, hijau):** konversi BGRA/RGB32→RGBA alpha=255, stride berpady, flip bottom-up→top-down, statistik luma/alpha (termasuk baris center pada sumber bottom-up), penulis PNG (signature, IHDR w/h, CRC IHDR/IEND, keberadaan IDAT) + vektor CRC32/Adler32 standar.
+
+**TIDAK bisa diverifikasi tanpa GPU + webcam di PC pengguna (jujur):** apakah preview kamera tampil (hitam→terang), orientasi gambar (tegak/terbalik — konvensi UV baru berdasarkan analisis source gpupixel, bukan pengamatan), F4 menampilkan frame mentah dengan warna/benar, F5 menghasilkan PNG yang bisa dibuka, scaling 1280x720@30 diterima kamera (atau jatuh ke mode native), perilaku stride negatif di perangkat nyata, jumlah `glGetError`=0 di GPU nyata, dan reinit pipeline saat ukuran berubah. **Jangan mengklaim preview berfungsi sebelum pengguna menguji.**
+
+## M2d — detail (2026-11-12)
+
+**Akar masalah (terbukti di source):** dump pengguna: AV READ 0x0 di `gpupixel.dll` RVA 0x3968a, deterministik lintas build. `beauty_face_unit_filter.cc` (GPUPixel v1.3.1): `gray_image_ = SourceImage::Create(res/lookup_*.png)` — tanpa folder `res/`, `SourceImage::Create` return `nullptr` (assert di-strip di Release) → `Init()` tetap `return true` → `DoRender()` mengikat GL_TEXTURE5 → `gray_image_->GetFramebuffer()` di atas null → AV. Fungsi berisi 0x3968a dilaporkan CI via PDB/MAP (`scripts/resolve-pdb-rva.ps1`).
+
+**Fix:** (1) CI menyalin `src/res/*.png` dari ref GPUPixel yang di-pin ke `dist\res\` (tidak di-commit ke repo); app memanggil `GPUPixel::SetResourcePath(exe_dir)` sebelum filter dibuat; log `[pipeline] resource res/<file>: OK (N B)` per file. (2) Pre-verify 4 lookup wajib sebelum pipeline dibuat — hilang/ukuran nol → init gagal → efek GPU nonaktif (preview tetap jalan) + pesan merah di status bar, bukan crash. (3) Cek null `BeautyFaceFilter::Create` + source_/sink_. (4) gpupixel dibangun `/Zi` + `/MAP`; CI resolve RVA crash terhadap `gpupixel.map`. (5) Langkah CI "Verify artifact contents" menggagalkan build bila ada file wajib yang hilang (exe, 4 DLL, 7 PNG res, 2 model, THIRD_PARTY/README/STATUS, pdb+map). (6) `models/*.onnx` ikut artifact; urutan pencarian disatukan via `kg_pipeline/windows_paths.h` (env → `exe\models` → LOCALAPPDATA) di app dan selftest. (7) `--safe` sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; apply kamera diblokir); label FPS render/kamera dipisah; checkbox VSync; glif non-ASCII dibuang dari UI.
+
+**Fungsi di RVA 0x3968a (CI, terverifikasi):** `?DoRender@BeautyFaceUnitFilter@gpupixel@@UEAA_N_N@Z` — mulai 0x39030 (Init 0x39CD0); crash di tengah badan DoRender. Bukti level fungsi untuk hipotesis resource-hilang. Catatan: `/DEBUG` mengubah default `/OPT` linker (REF/ICF) dan menggeser layout — dipaksa eksplisit `/OPT:REF /OPT:ICF` agar peta cocok dengan dll yang crash.
+
+**Belum diverifikasi:** crash-hilang-di-PC (butuh PC pengguna menjalankan artifact M2d).
+
+## M2c — detail (2026-11-12)
+
+**Latar:** artifact M2 langsung *force-close* saat dibuka di PC pengguna — tanpa pesan apa pun. M2c bukan perbaikan tebakan, melainkan (a) agar crash berikutnya **tercatat** (log + dump + faulting module + MessageBox), dan (b) **mengisolasi** tahap yang gagal lewat `--selftest` (DLL/ORT/model), `--safe` (window/UI tanpa kamera/ORT/GPUPixel), dan normal.
+
+**Artifact terbaru:** `kamerageulis-m2-windows-x64` — **CI hijau, run [43192212350](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43192212350)** (Configure → Build → Test → Package → **Smoke test** → Upload ✅; 7.510.560 B; kedaluwarsa 2026-11-26).
+
+**Yang diverifikasi di CI (bukan di Windows nyata):**
+- `--selftest` **exit 0** di runner windows-latest dari folder artifact yang dipaketkan (`dist/`, bukan build dir): preload `onnxruntime.dll` + `gpupixel.dll` dari folder app-local (path modul aktual dicatat di log), `OrtGetApiBase()->GetVersionString()` jalan, kedua model `models-v1` diunduh (`gh release download`) lalu dimuat ORT CPU dengan verifikasi SHA-256 + ukuran, satu inferensi per model dengan output shape sesuai pin (BlazeFace `regressors[1,896,16]`, `classificators[1,896]`; FaceMesh `conv2d_21[1404]`, `conv2d_31[1]`), semua finite. Model dihapus dari `dist/` sebelum upload artifact (tidak ikut).
+- Log `%APPDATA%\KameraGeulis\log.txt` ber-timestamp per baris, di-flush tiap baris — di runner terbukti berisi jejak ini (dibaca di CI step).
+- Crash handler: **belum pernah terpicu di CI** (tidak ada crash); sintaks/struktur benar, perilakunya belum diuji di kasus nyata (dump validitas, isi MessageBox).
+- Linux: `kg_core` tests hijau (log.h baru backward-compatible).
+
+**Yang BELUM diverifikasi (jujur):**
+- App normal (`KameraGeulis.exe`) tetap **belum pernah berhasil dibuka** di Windows nyata mana pun — penyebab force-close awal **belum diketahui**. M2c hanya menjamin penyebabnya kini tercatat + bisa diisolasi.
+- GL context 3 tahap + log `GL_VERSION/RENDERER` — belum pernah jalan di mesin nyata.
+- `--safe` dan `--selftest` di PC pengguna — belum dicoba; ini langkah diagnosis berikutnya.
+- GPUPixel init di mesin nyata; MF capture; UI.
+- GPU/VRAM: `--selftest` tidak menyentuh GL sama sekali.
+
+**Untuk pengembang/pemilik (urut):**
+```bat
+KameraGeulis.exe --selftest   :: exit 0 = DLL+ORT+model OK; kode lain → docs/TROUBLESHOOTING.md §4
+KameraGeulis.exe --safe       :: window+UI hidup? tanpa kamera/ORT/GPUPixel
+KameraGeulis.exe              :: normal
+```
+Kirim `%APPDATA%\KameraGeulis\log.txt` + `crash-*.dmp` (bila ada) + faulting module dari Event Viewer (TROUBLESHOOTING.md §1).
+
+**Catatan proses CI:** 1 run merah (43191736110 — `glfwGetError` signature GLFW 3.3 salah + `RunSelftest` tidak dideklarasikan; diperbaiki a7e3721), lalu hijau penuh termasuk smoke test. Ini sekaligus membuktikan step smoke test bekerja (kalau `--selftest` gagal exit, job merah).
+
+## M2 — detail (2026-11-12)
+
+**Artifact:** `kamerageulis-m2-windows-x64` — **CI hijau penuh** pada run [43183762692](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43183762692) (Configure → Build → Test → Package → Upload ✅, 7.488.666 byte) dan di-rebuild identik untuk commit docs terakhir (run [43184275535](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184275535), 7.491.609 byte). Kedaluwarsa: **2026-11-26**. Utamakan mengunduh dari run terakhir (43184507751); perintah di bawah memakai run terakhir.
+
+**Isi artifact** (diverifikasi dari langkah Package/Upload CI, bukan unduhan sandbox — unduhan dari sandbox gagal di blob storage; isi persis sesuai `dist/` di workflow): `KameraGeulis.exe`, `gpupixel.dll`, `onnxruntime.dll`, CRT app-local `vcruntime140.dll` + `vcruntime140_1.dll` + `msvcp140.dll` (VS binary terdistribusi ulang, diizinkan app-local, tanpa admin — lihat [docs/REDISTRIBUTABLES.md](docs/REDISTRIBUTABLES.md)), `THIRD_PARTY.md`, `README.md`, `STATUS.md`.
+
+**Cara mengunduh artifact** (pilih salah satu):
+
+```bat
+:: via gh CLI (perlu gh auth login)
+gh run download 43184507751 -R hanlimzie-glitch/KameraGeulis -n kamerageulis-m2-windows-x64 -D kamerageulis-m2
+```
+
+atau buka https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184507751 → bagian **Artifacts** → `kamerageulis-m2-windows-x64` → ekstrak → jalankan `KameraGeulis.exe`. Tidak perlu installer; CRT sudah app-local. (Run 43183762692 dan 43184275535 juga masih tersedia dengan isi yang sama.)
+
+**Yang diimplementasikan (M2):**
+- Preview besar + panel 6 tab (**Kulit | Wajah | Makeup | Preset | Kamera | Info**), tema gelap.
+- **Slider Haluskan Kulit & Cerahkan Kulit (0–100%) aktif** dan di-apply live tiap frame (`BeautyFaceFilter::SetBlurAlpha` / `SetWhite` via `BeautyPipeline::SetBeautyStrength`).
+- Preset **Natural / Soft / Glam / ClearSkin** (nilai di `src/kg_core/include/kgcore/presets.h`, diuji di `kg_tests`); slider manual → preset "**Kustom**"; tombol **Reset** (default pabrik); **Simpan/Muat** `settings.json` (`%APPDATA%\KameraGeulis\settings.json`, load otomatis saat startup).
+- **Tahan tombol "Tahan untuk Bandingkan"** → preview raw (tanpa efek) selama ditahan.
+- **Semua kontrol landmark** (Tiruskan Wajah, Perbesar Mata, Lipstik, Blusher, Foundation, Eyeliner, Eyeshadow, Brow Tint) dirender **disabled** berlabel **"Segera hadir"** (bukan disembunyikan) — alur UI final untuk M4.
+- **Picker kamera**: daftar device Media Foundation + resolusi/fps dari mode native kamera (fallback 1280×720 / 640×480 + peringatan bila mode tidak terdeteksi); tombol **Terapkan** / **Segarkan**.
+- **Debug overlay (F3** atau checkbox di tab Info)**: menggambar 468 titik landmark + bounding box + HUD (FPS, waktu capture/detect/mesh/track/render dalam ms, frame sejak deteksi terakhir) di atas preview — untuk verifikasi visual akurasi landmark.
+- Seluruh string lewat tabel ID (default) + EN; toggle radio di status bar.
+- Virtual camera (softcam) tetap **disabled** — M3.
+
+**BELUM diverifikasi di Windows nyata (jujur):**
+- Artifact belum pernah dijalankan di Windows mana pun. Tidak ada GPU, webcam, atau display di CI (`windows-latest`, headless) — "compile+test hijau" ≠ "berjalan mulus".
+- Runtime GL (OpenGL 3.3+), Media Foundation capture, dan ONNX Runtime di mesin nyata belum diuji.
+- **Tampilan UI** (font, tata letak, skala DPI) belum pernah dilihat manusia.
+- Kamera virtual (M3) belum ada sama sekali.
+- Bila `github.com` tidak terjangkau dari mesin user, download model `models-v1` saat first-run gagal → efek landmark nonaktif (pesan jujur) — aplikasi tetap berjalan.
+- Artifact expired 2026-11-26; untuk rilis permanen perlu GitHub Release (di luar scope M2).
+
+**CI notes:** 2 run merah sebelum hijau — (1) `EnumerateDevices` bentrok dengan helper bebas (C2660/C2440, run 43181651089) → helper di-rename `EnumerateDevicesRaw` (dd7c738); (2) konstanta `MF_E_NO_MORE_TYPES` tidak terdeklarasi di toolchain CI (run 43182162374) → enumerasi berhenti pada `FAILED(hr)` apa pun; (3) `C2027: undefined type gpupixel::BeautyFaceFilter` di `main.cc` (run 43182519015) → parameter beauty live dipindah ke `BeautyPipeline::SetBeautyStrength`; (4) Build+Test sudah hijau di run 43182772993 tapi Package gagal — penyebab tidak terbaca; langkah redist kini diagnostik `::error::` + memilih folder CRT terlengkap (dabacc4); (5) run 43183762692 **hijau penuh** termasuk upload artifact.
+
+**Catatan:** `kg_app` hanya di-build di Windows (`KG_BUILD_APP=ON`); di Linux app tidak dikonfigurasi — logika murni (settings, presets, strings, decode) yang diuji di Linux (`kg_tests` hijau, termasuk di CI run di atas).
+
+## LICENSE — keputusan pemilik (owner decision)
+
+- **Repository ini sengaja TIDAK berisi file `LICENSE`.** Penentuan lisensi adalah keputusan **pemilik repository**, bukan keputusan agen. Sampai pemilik menentukan, jangan distribusi publik / rilis binary dengan klaim lisensi tertentu.
+- GPUPixel dipakai di bawah **Apache-2.0**; notice/attribution institusi dipertahankan utuh di [THIRD_PARTY.md](THIRD_PARTY.md) (dan dicopy ke artifact).
+- Dependensi lain (GLFW, Dear ImGui, Catch2, onnxruntime, model MediaPipe→ONNX) telah didokumentasikan lisensi + provenance-nya di THIRD_PARTY.md; model tidak di-commit ke repo (diunduh first-run dari release `models-v1` dengan SHA-256 pin, atau dari `KAMERAGEULIS_MODELS_DIR` untuk CI/dev).
+- Sebelum rilis publik: (a) pilih lisensi, (b) tambahkan file LICENSE, (c) update README/badge, (d) audit ulang THIRD_PARTY.md. Ini ditandai sebagai **keputusan pemilik** di sini agar tidak hilang.
+
+## M1b — detail (2026-11-12)
+
+- **kg_core** (Linux-tested, hijau): `face_anchors` (896 anchor BlazeFace short-range, faithful ke `SsdAnchorsCalculator` + `face_detection_short_range.pbtxt`), `face_detection_decode` (sigmoid, weighted NMS IoU 0.3, letterbox keep-aspect BORDER_ZERO), `roi_align` (eye-aligned crop 1.5×, round-trip teruji), `face_mesh_decode` (conv2d_21 → 468 titik [0,1]; `conv2d_31` face flag), OneEuro/LandmarkSet/FlattenLandmarks (sudah ada).
+- **OrtLandmarkProvider** (Windows, `kg_pipeline`): BlazeFace 128² → decode → ROI mata-sejajar → FaceMesh 468 → gate faceflag → OneEuro + fade via FaceTracker. Download first-run dari rilis GitHub `models-v1` (SHA-256 tertanam di `ort_landmark_provider.cc`, dihasilkan CI: det `82ac962b…`, mesh `ac72f85b…`); env override `KAMERAGEULIS_MODELS_DIR` untuk CI/dev; gagal → efek nonaktif + pesan jujur (tidak pernah crash).
+- **Efek landmark v1 TIDAK di-wire** (FaceReshape/Lipstick/Blusher GPUPixel): pemetaan 468→106/111 titik Mars tidak bisa diandalkan (proporsi canonical berbeda; residual busur OK 0.010 tetapi alis/mata salah anatomi; docs/LANDMARKS.md §8). UI menyatakannya jujur.
+- **THIRD_PARTY.md**: model ONNX tetap Apache-2.0 via konversi tf2onnx; tidak di-commit. `canonical_face_model.obj` hanya referensi analisis offline (tidak di-commit).
+- **CI**: run 43174282611 hijau (Linux: kg_core tests; Windows: configure mengunduh ONNX Runtime 1.31.1 win-x64 dengan pin SHA-256, build+link sukses termasuk `onnxruntime.dll`, ctest hijau, artifact `kamerageulis-m1b-windows-x64` 6,8 MB). Catatan: run sebelumnya (43173665412) Linux Test exit 8 tanpa ::error::; Test step kini meng-annotasi output ctest; kegagalan itu tidak berulang dan tidak terdiagnosis (jeda infra?) — dicatat jujur.
+- **Belum terverifikasi**: provider di Windows nyata (belum pernah jalan), performa CPU, kualitas ROI/rotasi pada wajah nyata, download first-run dari `models-v1` di mesin bersih (release sudah berisi aset sejak 2026-11-12 — workflow Models run 43179962364), artifact vcam (belum ada).
+
+
+## M2j — detail (2026-11-14)
+
+**Masalah uji-PC M2i yang dijawab:** (a) mask tertinggal 20-40 px saat bergerak
+→ EMA motion-compensated (geser frame sebelumnya mengikuti centroid + α naik
+0.5→1 seiring kecepatan, hard re-assert fitur SETELAH temporal); (b) tepi atas
+datar memotong dahi → **bukan bug topology**: ring `FACEMESH_FACE_OVAL` kami
+**identik dengan file resmi** `mediapipe/python/solutions/face_mesh_connections.py`
+(gh api raw) — oval memang berakhir di bawah hairline → ditutup oleh **union
+peta seg**; (c) guratan/lubang di pipi → gerakan + blend; (d) telinga/leher di
+luar mask → segmen `selfie_multiclass` (kelas kulit tubuh+wajah).
+
+**Model & verifikasi SHA (jujur):** sandbox TIDAK bisa mengunduh GCS/langsung
+(SSL) → SHA-256 TFLITE `c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0`
+disilangkan dari **4 OID LFS independen** (face_landmarker, segmentation_v1,
+face_landmarker_v2, image_segmenter) **+ model card**; **diukur ulang di CI**
+(langkah `sha256sum -c` + cek ukuran 16371837) — mismatch = workflow gagal dan
+SHA aktual muncul di log. ONNX (opset 17) diverifikasi ORT: in `[1,256,256,3]`
+[-1,1], out `[1,256,256,6]`, aktivasi dicatat (logit → softmax di luar model,
+auto-detect di runtime). Pin SHA ONNX `kSegOnnxSha256` diisi dari keluaran CI.
+
+**Jalur kualitas (F5):** dugaan akar rasio 1.326 = penguat HF `sharpen` gpupixel
+(0.10) pada kandidat beauty + `smooth_amount` terlalu kecil; delta +19.5 = LUT
+`SetWhite` gpupixel. Perbaikan mode kulit: `SetSharpen(0)+SetWhite(0)`,
+`smooth_amount=0.45+0.55×slider` (guided shader), **lift** `0.9×whitening`
+di komposit (identik GPU & CPU) →22% ≈ +6.6 luma inti, 100% ≈ +30; chroma
+retensi mentah dipertahankan (anti-cast). Target **rasio ≤0.85 pada default
+diukur di log F5** — angka final menunggu pengukuran PC (log tag `app` "F5 metrik").
+
+**Re-pin det/mesh + desain manifest (peristiwa jujur M2j):** run Models
+43590566734 menghasilkan byte ONNX det/mesh **berbeda** dari run asli
+43179962364 (paket terpin sama) → rilis ikut ter-`--clobber` → smoke CI
+(selftest) gagal exit 4 (pin lama `82ac962b…`/`ac72f85b…`). Selidik lanjutan:
+run berikutnya menghasilkan hash **ketiga** berbeda lagi (`8c2e32dd…`) walau
+`PYTHONHASHSEED=0` → **konversi tf2onnx tidak byte-reproducible antar-image
+runner** (ukuran identik → selisih metadata/urutan; I/O verify tetap lulus).
+Kebijakan final: (1) pin det/mesh diperbarui ke byte rilis saat ini
+(`5ff2cd91…`/`a17115cb…`) di `ort_landmark_provider.cc` + `selftest.cc` +
+LANDMARKS; (2) workflow **tidak mengunggah ulang det/mesh** (rilis = sumber
+kebenaran yang stabil; hash konversi dicetak sebagai notice); (3) **seg**
+memakai **manifest `*.onnx.sha256`** diunggah pada run yang sama — runtime
+mengunduh/membacanya untuk verifikasi integritas (tanpa pin lintas-run),
+tanpa manifest → peringatan jujur + gerbang semantik ORT (load + bentuk
+`[1,256,256,6]`); (4) sumber tflite tetap di-assert SHA di CI. PC pengguna
+dengan model lama: saat pin det/mesh berubah, file lama gagal cocok → unduh
+ulang sekali dari rilis → cocok → lanjut (landmark tidak mati).
+
+**Uji Linux (data sintetis):** letterbox/unletterbox roundtrip + pad edge-replicate,
+normalisasi [-1,1], deteksi logit vs probabilitas + P_kulit=p2+p3 (clamp),
+argmax/statistik per kelas/warna seg_, guided upsampling mempertahankan tepi
+panduan, union+eksklusi fitur (mata/alis/bibir selalu 0), pemetaan peta seg→mask.
+**Tidak bisa diverifikasi di Linux:** ms inferensi ORT, thread 10-15 Hz, unduhan
+WinHTTP, parity shader GPU, gerak webcam nyata, tampilan visual → PC pengguna.
+
+## M2i — detail (2026-11-14)
+
+**Masalah dari uji PC pengguna (log-6.txt, Screenshot_5.png, mask/out/raw_150212):**
+1. **REGRESI kritis:** preview HITAM di mode skin-only; `diag tex=1 0x0`
+   (preview tex tidak pernah di-upload saat blend = desain), `upload: out=482`
+   naik, `glErr total=0`, tanpa log init; centang OFF -> preview NORMAL.
+2. **Settings:** `GAGAL menyimpan perangkat (index 2)` dua kali -> default
+   DroidCam tiap start; notice 'nyaris hitam' tidak hilang saat ganti kamera.
+3. **Kualitas terukur:** luma +19, chroma +20%, B/G 0.96->1.00 (cast pink),
+   energi detail 0.574->0.585 (smoothing nyaris mati), cincin di sekitar
+   mata/alis.
+
+**Akar masalah (verifikasi kode):** `tex_out` dibuat `glTexImage2D` tanpa
+`glTexParameteri(GL_TEXTURE_MIN_FILTER)` -> default GL `NEAREST_MIPMAP_LINEAR`
++ tanpa mipmap -> tekstur INCOMPLETE -> semua sampling = hitam, `glGetError`
+tetap 0 (kelengkapan tekstur bukan error GL). `Settings::Save` memakai
+`std::rename` C - di Windows tujuan yang SUDAH ADA membuat rename gagal
+(EEXIST) sehingga simpan pertama (tujuan belum ada) OK lalu semua berikutnya
+gagal.
+
+**Perubahan:** lihat baris tabel M2i. Detail teknis:
+- `mask_blender.h`: parameter filter tekstur eksplisit (akar fix), log init
+  kompilasi/link/FBO/id tekstur, `glGetError` per tahap, pass statistik
+  RGBA16F (encode Y,Y^2 -> box H -> box V) dengan fallback bila FBO 16F tidak
+  lengkap, shader final baru (guided + retensi chroma + mask mix + debug F6),
+  `ReadOutputLuma` utk swa-uji, flag `disabled`.
+- `skin_mask.{h,cc}`: `BeautyComposeConfig`, `SmoothLumaGuidedCpu`,
+  `ComposeBeautyRaw` (CPU identik utk F5), `ComputeInMaskMetrics`, feather
+  per-region (fitur terpisah, inti di-restore 0).
+- `settings.{h,cc}`: field `chroma_retain`, Save/Load dengan `err`, mkdir,
+  `std::filesystem::rename`.
+- preset: Natural 0.18/0.06, Soft 0.30/0.12, Glam 0.48/0.20, ClearSkin
+  0.38/0.15 (settings/panel default ikut).
+- `startup`: `--no-mask-gl`; `main.cc`: flag + swa-uji + notice-clear + F5
+  komposit/mertik baru + diag `blend=%u %dx%d`.
+
+**Jujur:** semua klaim GL/preview/visual di atas menunggu uji PC pengguna;
+Linux hanya membuktikan matematika komposit/mask/metrik (83 TC).
+
+
+## M2k — detail (2026-11-12)
+
+- `scripts/topology/gen_face_topology.py` menghasilkan triangulasi teselasi resmi MediaPipe 468-point: 852 segitiga, manifold edge-use ≤2. Uji Linux mengecek triangulasi, loop mata/alis/bibir, elips hidung, serta raster CPU referensi.
+- Jalur GPU `MaskBlender` meraster segitiga landmark frame aktif setiap frame; merender kontur pengecualian ke R8 dengan GL_MAX, feather 5×5, union mask seg tubuh/mesh lalu mengalikan `(1-exclusion)` dan hard-zero <0.02. Shader blend mengonsumsi texture final yang sama; F5 membaca kembali `tex_mask` dan `tex_out` yang dipakai pada blend. Hair/beard trim menggunakan probabilitas class 3 dari seg (bila tersedia), bukan iris—model 468 legacy tidak memiliki landmark iris.
+- Setelah blender GPU siap, pipeline menjalankan jalur CPU seg-only (tanpa full-frame guided bilateral, feather, dan temporal mask wajah); probabilitas face class dipakai untuk trim, dan pergeseran seg dihitung dari centroid landmark submit→current. Gerbang warna per-piksel (CbCr adaptif + batas/fade) kini dieksekusi di shader pada resolusi mask; CPU hanya menyiapkan sampel landmark dan peta p2+p3. Benchmark lokal Release sintetis 1920×1080, mask 1/5: upsample skin+wajah ~1.2 ms, kalibrasi+persiapan mask ~0.2 ms (CPU saja, bukan Windows; belum termasuk upload/raster GPU/pipeline). Fallback CPU lengkap tetap tersedia jika GPU gagal.
+- GL timer query (bila GL 3.3/ARB/EXT timer query tersedia) mencatat biaya raster+exclusion+compose; bila tidak, log secara eksplisit menyebut GPU timing unavailable. CPU log berkala mencatat upsample, guided, sampling kalibrasi warna (`gate_prep`), union, temporal, fitur; gerbang warna per-piksel berjalan di shader. **Belum ada angka GPU nyata**, sehingga target msk total ≤3 ms, render ≥60 FPS, dan 30 fps diproses di 1080p belum bisa dinyatakan lulus.
+- F5 mengambil raw kamera dan frame `tex_out` pada iterasi blend yang sama; mask disimpan dari readback `tex_mask`; log mean diff per rentang `<0.01`, `0.01–0.1`, `0.1–0.5`, `0.5–0.9`, `>0.9` dan kelas seg, serta `diff_*.png` amplifikasi ×8. Hard passthrough shader/CPU pada mask×gain <8/255 ditargetkan agar area luar byte-identik.
+- ORT session intra-op=3, graph optimization ALL; interval inferensi clamp 200–333 ms (3–5 Hz) lalu dikalikan beban aktual; guard dapat minta 1–2 s. Paket ORT yang dibangun CPU-only, jadi probe symbol DirectML dan log transparan; tidak ada benchmark DML dan fallback/runtime DirectML tidak dapat diuji di sandbox.
+- PerfGuard: FPS <20 selama 3 s → seg diturunkan dulu; bila rendah berlanjut 3 s lagi → mode Wajah saja + notice; 4 s pulih → normal. Settings startup mencatat alasan Load; JSON rusak dipindah ke `.bad` tanpa ditimpa defaults; perangkat terakhir tetap default bila file valid.
+- Verifikasi lokal: `kg_tests` **107 test cases / 17,210 assertions lulus**. Sintetis Linux saja; shader, GL timer, parity, webcam, settings Windows, dan target throughput butuh mesin Windows+GPU nyata.

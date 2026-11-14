@@ -1,0 +1,19 @@
+name: Capability Check
+on:
+  push:
+    paths: ['.github/workflows/capability.yml']
+  workflow_dispatch:
+jobs:
+  hello-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Basic toolchain info
+        shell: pwsh
+        run: |
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          cmake --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+          git --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -latest -property displayName }
+          else { Write-Host "vswhere not found"; exit 1 }
+          Write-Host "Capability check OK"
