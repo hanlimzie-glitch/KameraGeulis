@@ -4,6 +4,7 @@
 #include <vector>
 #include "kgcore/frame.h"
 #include "kgcore/landmark.h"
+#include "kgcore/skin_mask.h"
 #include "face_tracker.h"
 
 namespace gpupixel {
@@ -40,6 +41,13 @@ class BeautyPipeline {
   // Live-apply the two global beauty parameters ([0,1] each); idempotent.
   void SetBeautyStrength(float smoothing, float whitening);
 
+  // M2h: mask kulit wajah (hanya dihitung bila aktif - hemat CPU saat mati).
+  void SetSkinMaskEnabled(bool on) { skin_mask_enabled_ = on; }
+  bool SkinMaskEnabled() const { return skin_mask_enabled_; }
+  const SkinMaskBuilder& MaskBuilder() const { return mask_builder_; }
+  // RGBA penuh frame input terakhir (setara OutputRGBA - untuk komposit M2h).
+  const uint8_t* InputRGBA() const { return convert_buf_.empty() ? nullptr : convert_buf_.data(); }
+
   // Human-readable reason when Init() returns false ("resource res/…" /
   // "BeautyFaceFilter::Create gagal …"). Empty on success.
   const std::string& LastResourceError() const { return last_resource_error_; }
@@ -74,5 +82,9 @@ class BeautyPipeline {
   // output (sink pernah Render); sebelum itu GetRgbaBuffer crash (0xC0000005).
   uint64_t frames_produced_ = 0;
   bool readback_blocked_logged_ = false;
+  // M2h: mask kulit + timingnya.
+  SkinMaskBuilder mask_builder_;
+  bool skin_mask_enabled_ = false;
+  float mask_ms_ = 0.0f;
 };
 }  // namespace kgcore

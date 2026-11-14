@@ -1,6 +1,6 @@
 # TESTING-WINDOWS.md — Menguji KameraGeulis (artifact CI) di Windows nyata
 
-**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2g — objek source segar per tingkat, lihat §9):** [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) · **Run M2f:** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
+**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2h — mask kulit wajah, lihat §10):** (menunggu push) · **Run M2g:** [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) · **Run M2f:** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
 
 > Dokumen ini jujur: artifact **belum pernah dijalankan di Windows mana pun** sebelum kamu mengujinya.
 > Semua yang di bawah "Checklist" adalah hal yang **perlu kamu verifikasi**, bukan jaminan yang sudah hijau.
@@ -166,3 +166,41 @@ Setelah unzip ke D:\Project Camera (atau folder pilihanmu), cukup jalankan `Kame
 
 **Kirim balik:** `log.txt` lengkap (termasuk baris `reader percobaan tingkat`
 dan `MF capture start:`), screenshot tab Kamera bila gagal, PNG F5 bila ada.
+
+## 10. Artifact M2h — mask kulit: efek hanya di wajah (setelah Screenshot_4)
+
+> M2g terbukti (kamera+efek+landmark hidup). Keluhan: Haluskan/Cerahkan
+> memengaruhi SELURUH frame (dinding/baju ikut) - sumber gpupixel memang
+> tanpa mask. M2h menambah mask kulit dari landmark 468 + komposit
+> `mix(raw, beauty, mask*gain)` di GPU aplikasi. Langkah singkat:
+
+1. **Normal (checkbox "Terapkan hanya pada kulit wajah" ON = default):**
+   jalankan exe, arahkan kamera ke wajah - dinding/baju TIDAK ikut cerah/
+   halus; mata/alis/bibi tetap tajam; geser slider berlaku cepat. Log harap
+   memuat `skin mask: dikonfigurasi ...` (sekali) dan HUD F3 memuat
+   `msk ... ms`. Wajah keluar frame -> efek MEMUDAR ke tampilan mentah
+   (bukan langsung ke seluruh frame), masuk lagi -> efek balik.
+2. **F6:** mask tampil sebagai lapisan MERAH transparan di atas preview
+   (tekan lagi utk mati). Bila centang kulit dimatikan, F6 memberi catatan di
+   log dan perilaku kembali KE SELURUH frame (perilaku lama).
+3. **F5** (dengan wajah, mode skin-only): di `debug\` ada tiga PNG per
+   tekan - `raw_*` (mentah), `out_*` (komposit), `mask_*` (gray mask), plus
+   log:
+   `F5: selisih rata-rata LUAR mask = 0.000 (harus mendekati 0), DALAM mask = ... | gain=... | mode=skin-only`
+   - angka LUAR harus ~0 (bila tidak, kirim log + ketiga PNG).
+   Dengan checkbox mati: mode `seluruh-frame` (luar mask memang besar).
+4. **F3/F4/**compare/tangga reader/guard: perilaku sama seperti M2g.
+5. **Perangkat:** pilih kamera lain + Terapkan -> log `settings: perangkat
+   kamera terakhir (index N) disimpan sebagai default`; jalankan ulang ->
+   perangkat tsb dipakai otomatis. Bila gambar nyaris hitam > ~3 dtk ->
+   notice `Gambar nyaris hitam ...` muncul sekali (hilang saat gambar pulih).
+6. **Penghitung:** overlay & `diag` - `sent` tidak pernah melebihi `recv`
+   (termasuk setelah ganti perangkat - selisih +30 di log-5 lama diperbaiki).
+
+**Kirim balik M2h:** `log.txt` lengkap (baris `skin mask`, `F5: selisih ...`,
+`settings: perangkat ...`), screenshot preview (F3 HUD + F6 mask), ketiga PNG
+F5, dan catatan bila dinding/baju masih ikut terpengaruh.
+
+**Jujur:** shader blend/visual mask/GPU belum terverifikasi di sandbox (Linux
+hanya menguji matematika mask/komposit - 79 TC); klaim "berhasil" menunggu
+uji PC ini.

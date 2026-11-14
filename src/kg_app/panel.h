@@ -9,6 +9,8 @@ struct AppUiState {
   // ---- persisted (mirror of Settings) ----
   float smoothing = 0.35f;    // [0,1] - Haluskan Kulit
   float whitening = 0.25f;    // [0,1] - Cerahkan Kulit
+  bool skin_only = true;      // M2h: efek hanya lewat mask kulit wajah (default ON)
+  bool show_mask = false;     // M2h: F6 - overlay merah mask di preview
   float face_slim = 0.0f;     // [0,1] - disabled ("Segera hadir")
   float big_eyes = 0.0f;      // [0,1] - disabled
   float lipstick = 0.0f;      // [0,1] - disabled
@@ -41,6 +43,7 @@ struct AppUiState {
   float detect_ms = 0.0f;      // detector stage (0 when tracking)
   float mesh_ms = 0.0f;        // mesh stage (incl. crop)
   float track_ms = 0.0f;       // total provider Track() (FaceTracker)
+  float mask_ms = 0.0f;        // M2h: pembuatan mask kulit per frame
   float render_ms = 0.0f;      // GL/UI render block
   int frames_since_detect = 0;
   std::string status_message;

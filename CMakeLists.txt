@@ -45,7 +45,8 @@ add_library(kg_core STATIC
   src/kg_core/src/face_mesh_decode.cc
   src/kg_core/src/roi_align.cc
   src/kg_core/src/frame_convert.cc
-  src/kg_core/src/png_write.cc)
+  src/kg_core/src/png_write.cc
+  src/kg_core/src/skin_mask.cc)
 target_include_directories(kg_core PUBLIC src/kg_core/include)
 target_link_libraries(kg_core PUBLIC nlohmann_json::nlohmann_json)
 
@@ -67,6 +68,7 @@ if(KG_BUILD_TESTS)
     src/kg_tests/roi_align_test.cc
     src/kg_tests/frame_convert_test.cc
     src/kg_tests/png_write_test.cc
+    src/kg_tests/skin_mask_test.cc
     src/kg_tests/reader_fallback_test.cc)
   target_link_libraries(kg_tests PRIVATE kg_core Catch2::Catch2WithMain)
   add_test(NAME kg_tests COMMAND kg_tests)

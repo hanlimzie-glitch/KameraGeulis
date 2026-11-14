@@ -14,6 +14,7 @@ struct StageTimings {
   float detect_ms = 0.0f;
   float mesh_ms = 0.0f;
   float track_ms = 0.0f;  // whole provider Track() call (FaceTracker fills it)
+  float mask_ms = 0.0f;   // M2h: pembuatan mask kulit (0 bila checkbox mati)
   int frames_since_detect = 0;
 };
 

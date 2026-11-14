@@ -321,6 +321,15 @@ void RenderPanel(AppUiState& ui) {
       if (ui.smoothing != prev_smoothing || ui.whitening != prev_whitening) {
         ui.preset = "Custom";
       }
+      // M2h butuh 3: mask kulit (default aktif) - matikan = perilaku lama
+      // (efek ke seluruh frame).
+      ImGui::Checkbox(s.Get("skin.only").c_str(), &ui.skin_only);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", s.Get("skin.only_tip").c_str());
+      }
+      if (!ui.skin_only) {
+        ImGui::TextDisabled("%s", s.Get("skin.only_off_note").c_str());
+      }
       ImGui::Spacing();
       ImGui::TextWrapped("%s", s.Get("skin.coming_soon_note").c_str());
       ImGui::EndTabItem();

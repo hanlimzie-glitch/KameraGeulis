@@ -1,5 +1,7 @@
 #include "beauty_pipeline.h"
 #include <gpupixel/gpupixel.h>
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include "kgcore/frame_convert.h"
 #include "kgcore/log.h"
@@ -114,6 +116,24 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
                        convert_buf_.data());
   source_->ProcessData(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
                        gpupixel::GPUPIXEL_FRAME_TYPE_RGBA);
+  // M2h: mask kulit dari landmark + warna frame ini (resolusi rendah, CPU
+  // murni - lihat kgcore/skin_mask.h). Tidak dihitung bila checkbox mati.
+  mask_ms_ = 0.0f;
+  if (skin_mask_enabled_) {
+    const int mw = std::max(8, w / 4);
+    const int mh = std::max(8, h / 4);
+    if (!mask_builder_.configured() || mask_builder_.w() != mw ||
+        mask_builder_.h() != mh) {
+      mask_builder_.Configure(mw, mh);
+      Log(kTag, "skin mask: dikonfigurasi %dx%d (frame %dx%d)", mw, mh, w, h);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    mask_builder_.Update(tracker_->Current(), tracker_->Current().valid,
+                         convert_buf_.data(), w, h, static_cast<int>(row_bytes));
+    mask_ms_ = std::chrono::duration<float, std::milli>(
+                   std::chrono::steady_clock::now() - t0)
+                   .count();
+  }
   // M2f: sink mengisi width_/height_ bersamaan dengan framebuffer pertamanya
   // (SinkRawData::Render) - sink berarti sudah pernah menghasilkan output.
   if (sink_ && sink_->GetWidth() > 0 && sink_->GetHeight() > 0) {
@@ -163,6 +183,7 @@ bool BeautyPipeline::GetStageTimings(StageTimings* out) const {
   if (tracker_->Provider()) ok = tracker_->Provider()->GetStageTimings(out);
   else *out = StageTimings{};
   out->track_ms = tracker_->LastTrackMs();
+  out->mask_ms = mask_ms_;
   return true;
 }
 }  // namespace kgcore
