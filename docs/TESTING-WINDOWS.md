@@ -238,3 +238,30 @@ F5, dan catatan apakah warna kulit sudah natural (tanpa cast pink/dingin).
 
 **Jujur:** 83 TC Linux membuktikan rumus (chroma/feather/detail/metrik/save),
 bukan tampilan; klaim "berhasil" menunggu bukti PC ini.
+
+## 12. Artifact M2j — semua kulit + anti-lag + kualitas (setelah log-7/Screenshot_8)
+
+Yang berubah di build ini:
+
+1. **Cakupan (tab Kulit)**: combo **"Cakupan Kulit: Semua kulit (default) /
+   Wajah saja"**. Default = semua kulit: wajah + **telinga, leher, dada,
+   lengan, tangan** dari segmenter MediaPipe. Wajah saja = perilaku M2i.
+   Tooltip menjelaskan fallback.
+2. **HUD (F3) & log**: baris `seg xx.x ms (+N fr)` = waktu inferensi segmenter
+   dan **lag dalam satuan frame** (frame saat ini − frame sumber hasil seg).
+   Bila seg mati: `seg mati` + alasan di panel ("Diagnosis"). Log berkala
+   `lag frame serial=…: mesh=… seg=… mask=…`.
+3. **Kualitas (F5)**: rasio detail halus harus **≤ 0.85** pada Haluskan
+   default; Cerahkan 22% → delta luma inti **+6..+8**;100% → **~+30**.
+   Bila meleset, kirim baris `F5 metrik M2i [...]` dari log.
+4. **F5 baru**: `seg_*.png` (peta kelas berwarna) + log `F5 seg: kelas% … |
+   infer xx ms | lag N frame`.
+5. **F6** = mask **akhir** (oval landmark + segmen semua kulit, minus
+   mata/alis/bibir/lubang hidung; rambut/pakaian/aksesori selalu keluar).
+6. **Model segmenter** diunduh otomatis pada pemakaian pertama (16 MB,
+   `selfie_multiclass_256x256.onnx` dari rilis `models-v1`, SHA diverifikasi).
+   Gagal unduh/verifikasi → **kembali ke Wajah saja + pesan jujur**, tidak crash.
+
+Kirim balik: `log-8.txt`, screenshot preview (F3 HUD), F5 `raw_/out_/mask_/seg_*.png`
++ baris metriknya, dan catatan: gerakan cepat (mask masih ketinggalan?),
+telinga/leher ikut halus?, Cerahan terasa kuat/lemah.

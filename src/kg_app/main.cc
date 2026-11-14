@@ -36,6 +36,26 @@
 #include "kgcore/reader_fallback.h"  // M2g: MfErrorName + WantsCameraBusyHint
 #include "mask_blender.h"  // M2h: stage blending mask kulit (GL aplikasi)
 #include "kgcore/skin_mask.h"  // M2i: BeautyComposeConfig + metrik F5
+
+// M2j kualitas: parameter komposit per mode. Mode kulit:
+//  * smooth_amount DITINGKATKAN (0.45 + 0.55*slider) - guided benar-benar
+//    menghaluskan (target rasio detail halus <= 0.85 pada kekuatan default);
+//  * lift = 0.9 * whitening (22% -> +6..8 luma inti, 100% -> ~+30).
+// Mode seluruh frame: dipertahankan persis M2i (tanpa lift).
+static kgcore::BeautyComposeConfig MakeComposeConfig(bool skin_only,
+                                                     float smoothing,
+                                                     float whitening,
+                                                     float chroma_retain) {
+  kgcore::BeautyComposeConfig c;
+  c.chroma_retain = chroma_retain;
+  if (skin_only) {
+    c.smooth_amount = 0.45f + 0.55f * smoothing;
+    c.lift = whitening * 0.90f;
+  } else {
+    c.smooth_amount = smoothing;
+  }
+  return c;
+}
 #include "panel.h"
 #include "startup.h"
 
@@ -80,6 +100,7 @@ kg::Settings UiToSettings(const kg::AppUiState& ui) {
   s.capture_width = ui.capture_width;
   s.capture_height = ui.capture_height;
   s.capture_fps = ui.capture_fps;
+  s.skin_coverage = ui.skin_coverage;  // M2j
   return s;
 }
 
@@ -95,6 +116,7 @@ void ApplySettingsToUi(const kg::Settings& s, kg::AppUiState& ui) {
   ui.capture_width = s.capture_width;
   ui.capture_height = s.capture_height;
   ui.capture_fps = s.capture_fps;
+  ui.skin_coverage = s.skin_coverage;  // M2j: 0 semua kulit, 1 wajah saja
 }
 
 // Synthetic fallback frame so the app renders something even with no camera
@@ -140,7 +162,7 @@ std::string DebugDumpDir() {
 // `raw` = salinan frame mentah TERAKHIR (disimpan walau F4 mati - butuh 4).
 void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
                      bool pipeline_ok, bool skin_only, float smooth_amount,
-                     float chroma_retain) {
+                     float whitening, float chroma_retain) {
   const std::string dir = DebugDumpDir();
   if (dir.empty()) {
     kgcore::Log("app", "F5: APPDATA tidak tersedia - PNG TIDAK disimpan");
@@ -214,6 +236,55 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
     kgcore::Log("app",
                 "F5: mask kulit tidak tersedia (checkbox mati atau belum ada frame wajah) - mask_*.png dilewati");
   }
+  // --- seg_*.png (M2j): peta kelas BERWARNA + statistik per kelas + ms + lag ---
+  {
+    std::vector<float> probs;
+    kgcore::LetterboxInfo lb{};
+    uint64_t seg_serial = 0;
+    double seg_ms = 0.0;
+    if (pipeline->Seg().GetResult(&probs, &lb, &seg_serial, &seg_ms) &&
+        probs.size() == static_cast<size_t>(kgcore::kSegInputSize) *
+                           kgcore::kSegInputSize * kgcore::kSegClasses) {
+      const int sw = kgcore::kSegInputSize, sh = kgcore::kSegInputSize;
+      std::vector<uint8_t> am(static_cast<size_t>(sw) * sh);
+      kgcore::SegArgmax(probs.data(), sw * sh, am.data());
+      // Warna per kelas (256x256) -> upscale nearest ke ukuran frame.
+      std::vector<uint8_t> up(static_cast<size_t>(w) * h * 4);
+      for (int y = 0; y < h; ++y) {
+        const int sy = y * sh / h;
+        for (int x = 0; x < w; ++x) {
+          const int sx = x * sw / w;
+          uint8_t col[4];
+          kgcore::SegClassColor(am[static_cast<size_t>(sy) * sw + sx], col);
+          uint8_t* d = up.data() + (static_cast<size_t>(y) * w + x) * 4;
+          d[0] = col[0]; d[1] = col[1]; d[2] = col[2]; d[3] = 255;
+        }
+      }
+      const std::string path = dir + "\\seg_" + stamp + ".png";
+      if (kgcore::WritePngRgba(path.c_str(), up.data(), w, h)) {
+        kgcore::Log("app", "F5: peta kelas seg -> %s (%dx%d)", path.c_str(), w, h);
+      } else {
+        kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
+      }
+      kgcore::SegClassStats st;
+      kgcore::SegComputeStats(am.data(), static_cast<int>(am.size()), &st);
+      kgcore::Log("app",
+                  "F5 seg: kelas%% latar=%.1f rambut=%.1f kulit_tubuh=%.1f "
+                  "kulit_wajah=%.1f pakaian=%.1f aksesoris=%.1f | infer %.1f ms | "
+                  "lag = %lld frame (serial frame %llu - serial seg %llu)",
+                  st.pct[0], st.pct[1], st.pct[2], st.pct[3], st.pct[4],
+                  st.pct[5], seg_ms,
+                  static_cast<long long>(pipeline->FrameSerial()) -
+                      static_cast<long long>(seg_serial),
+                  static_cast<unsigned long long>(pipeline->FrameSerial()),
+                  static_cast<unsigned long long>(seg_serial));
+    } else {
+      kgcore::Log("app",
+                  "F5: seg tidak tersedia (%s) - seg_*.png dilewati, mask final "
+                  "tetap dari wajah landmark",
+                  pipeline->Seg().LastError().c_str());
+    }
+  }
   // --- statistik selisih raw vs out (untuk out yang dibandingkan) ---
   auto log_stats = [&](const uint8_t* cmp_raw, const uint8_t* cmp_out,
                        const char* mode) {
@@ -246,9 +317,8 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
     std::vector<uint8_t> mixed(raw_rgba.size());
     // M2i (3)+(4): komposit CPU dgn rumus identik shader GPU - guided
     // smoothing luma + retensi chroma mentah (anti cast) + mix mask.
-    kgcore::BeautyComposeConfig bcfg;
-    bcfg.smooth_amount = smooth_amount;
-    bcfg.chroma_retain = chroma_retain;
+    const kgcore::BeautyComposeConfig bcfg =
+        MakeComposeConfig(skin_only, smooth_amount, whitening, chroma_retain);
     kgcore::ComposeBeautyRaw(raw_rgba.data(), out, mb.mask().data(), mb.w(),
                              mb.h(), w, h, gain, bcfg, mixed.data());
     const std::string path = dir + "\\out_" + stamp + ".png";
@@ -627,6 +697,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       const kg::Settings def;
       ui.smoothing = def.smoothing;
       ui.whitening = def.whitening;
+      ui.skin_coverage = def.skin_coverage;  // M2j
       ui.face_slim = def.face_slim;
       ui.big_eyes = def.big_eyes;
       ui.lipstick = def.lipstick;
@@ -806,7 +877,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // Live-apply the two global beauty parameters (cheap; idempotent).
       pipeline->SetBeautyStrength(ui.smoothing, ui.whitening);
       pipeline->SetSkinMaskEnabled(ui.skin_only);  // M2h: mask hanya bila aktif
+      pipeline->SetSkinCoverage(ui.skin_only && ui.skin_coverage == 1);
       pipeline->ProcessFrame(frame);
+      // M2j: telemetri seg ke HUD (thread sendiri; lag dalam satuan frame).
+      ui.seg_ms = pipeline->SegMs();
+      ui.seg_lag = pipeline->SegLagFrames();
+      ui.seg_ok = pipeline->SegActive();
+      ui.seg_status = pipeline->Seg().LastError();
       if (!frame_is_synthetic) ++sent_to_pipeline;  // frame kamera saja (M2h but.6)
       kg::StageTimings st;
       if (pipeline->GetStageTimings(&st)) {
@@ -828,9 +905,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         // blend dimatikan; F4 tetap mentah (lihat blok want_raw).
         if (ui.skin_only && out_w == frame.width && out_h == frame.height &&
             !blender.init_failed && !force_no_mask_gl && !blender.disabled) {
-          kgcore::BeautyComposeConfig bcfg;
-          bcfg.smooth_amount = ui.smoothing;
-          bcfg.chroma_retain = ui.chroma_retain;
+          const kgcore::BeautyComposeConfig bcfg = MakeComposeConfig(
+              ui.skin_only, ui.smoothing, ui.whitening, ui.chroma_retain);
           blended = blender.Blend(bcfg, pipeline->InputRGBA(), frame.width,
                                   frame.height, out, mb.mask().data(), mb.w(),
                                   mb.h(), pipeline->Tracker().Gain(),
@@ -947,7 +1023,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // sintetis), dan komposit out lewat mask + statistik luar/dalam mask.
       DumpDebugFrames(last_camera_raw_valid ? &last_camera_raw : nullptr,
                       pipeline.get(), pipeline_ok, ui.skin_only, ui.smoothing,
-                      ui.chroma_retain);
+                      ui.whitening, ui.chroma_retain);
     }
 
     // Mode kamera aktual (read-back) untuk tab Info (requirement 5).
@@ -1153,12 +1229,21 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
           dl->AddRect(ImVec2(bx0, b0.y), ImVec2(bx1, b1.y), IM_COL32(0, 229, 255, 230),
                       0.0f, 0, 2.0f);
         }
-        char hud[512];
+        char hud[640];
+        char seg_part[64];
+        if (ui.seg_ok) {
+          std::snprintf(seg_part, sizeof(seg_part), "seg %.1f ms (%+.0f fr)",
+                        ui.seg_ms, ui.seg_lag);
+        } else {
+          std::snprintf(seg_part, sizeof(seg_part), "seg mati");
+        }
         std::snprintf(hud, sizeof(hud),
                       "FPS %.1f | cap %.2f ms | det %.2f ms | mesh %.2f ms | "
-                      "trk %.2f ms | msk %.2f ms | render %.2f ms | sejak deteksi %d",
+                      "trk %.2f ms | msk %.2f ms | %s | render %.2f ms | "
+                      "sejak deteksi %d | frame #%llu",
                       ui.fps, ui.capture_ms, ui.detect_ms, ui.mesh_ms, ui.track_ms,
-                      ui.mask_ms, ui.render_ms, ui.frames_since_detect);
+                      ui.mask_ms, seg_part, ui.render_ms, ui.frames_since_detect,
+                      static_cast<unsigned long long>(ui.frames_captured));
         const ImVec2 hud_pos(image_pos.x + 8.0f, image_pos.y + 8.0f);
         const ImVec2 text_size = ImGui::CalcTextSize(hud);
         dl->AddRectFilled(hud_pos,

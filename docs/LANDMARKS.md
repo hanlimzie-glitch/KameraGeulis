@@ -50,6 +50,20 @@ Sumber kebenaran checksum: `third_party/external_files.bzl` repo `google-ai-edge
 
 Koreksi M1c (2026-11-12): dokumen versi awal menulis record mesh sebagai "panjang 1261272" dengan SHA `2b2f6274…` — itu sebenarnya `face_landmark.tflite` **ditambah 19376 B binarypb di belakangnya** (end offset keliru menunjuk 3757224). tf2onnx mengabaikan byte trailing sehingga konversi tetap berhasil; record yang benar adalah `c603fa61…` di atas. Pipeline CI (`scripts/models/prepare_sources.py`) sekarang memotong tepat sesuai offset dari metadata loader paket dan memverifikasi semua digest di atas — tidak ada lagi pencarakan manual.
 
+### 2.3b Segmenter semua-kulit (M2j, non-landmark)
+
+`selfie_multiclass_256x256` diunduh CI langsung dari GCS resmi MediaPipe
+(`https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite`),
+**SHA-256 + ukuran dihitung & divalidasi di CI** (pin `c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0`,
+16.371.837 B — silang dengan 4 OID LFS independen + model card; lihat STATUS.md M2j),
+konversi **tf2onnx opset 17**, verifikasi onnxruntime: input `[1,256,256,3]`
+ternormalisasi [-1,1], keluaran **`[1,256,256,6]` — logit, softmax DI LUAR model**
+(runtimes menuliskan aktivasi aktual di log workflow; runtime aplikasi
+auto-detect sum≈1). Kelas mengikuti dokumentasi resmi: **0 latar, 1 rambut,
+2 kulit tubuh, 3 kulit wajah, 4 pakaian, 5 aksesori**. Pin SHA ONNX di
+`src/kg_pipeline/seg_provider.cc` (`kSegOnnxSha256`) — diisi dari keluaran CI,
+bukan mesin dev. Lisensi Apache-2.0 (THIRD_PARTY.md).
+
 ### 2.3 Model ONNX hasil konversi (yang di-download build)
 
 Keduanya dikonversi dari `.tflite` di atas secara **otomatis di GitHub Actions** (workflow `Models`, `.github/workflows/models.yml`) oleh `scripts/models/prepare_sources.py` + `tf2onnx==1.17.0` / `tensorflow==2.17.1` / opset 15 — tanpa modifikasi bobot/graf (hanya Transpose/Cast/Const/Reshape fusion dari optimizer tf2onnx). Verifikasi I/O via onnxruntime CPU: nama & bentuk input/output dicek ketat (inference test lulus di run 43179962364). Digest di bawah adalah **keluaran CI** (bukan dari mesin dev) dan dipin di `ort_landmark_provider.cc`:

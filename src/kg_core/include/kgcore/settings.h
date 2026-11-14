@@ -8,6 +8,8 @@ struct Settings {
   float smoothing = 0.18f;    // [0,1] - M2i: default Natural (lebih natural)
   float whitening = 0.06f;    // [0,1] - M2i: default Natural
   float chroma_retain = 0.8f; // [0,1] - M2i: retensi chroma MENTAH (anti cast)
+  // M2j: cakupan mask kulit — 0 = Semua kulit (default), 1 = Wajah saja.
+  int skin_coverage = 0;
   float face_slim = 0.0f;     // [0,1]
   float big_eyes = 0.0f;      // [0,1]
   float lipstick = 0.0f;      // [0,1]

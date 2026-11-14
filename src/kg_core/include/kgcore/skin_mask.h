@@ -15,10 +15,30 @@
 #include <cstdint>
 #include <vector>
 #include "kgcore/landmark.h"
+#include "kgcore/seg_math.h"  // M2j: SegMaskInput + letterbox segmenasi
 
 namespace kgcore {
 
+// M2j: cakupan mask - SEMUA kulit (default; digabung dgn segmenasi tubuh
+// MediaPipe selfie_multiclass) atau hanya wajah (perilaku M2h).
+enum class SkinCoverage { kAllSkin = 0, kFaceOnly = 1 };
+
+// M2j: hasil segmenasi utk satu frame (peta probabilitas model 256x256
+// sudah diaktivasi; letterbox = transformasi frame -> model utk unletterbox).
+struct SegMaskInput {
+  const float* probs = nullptr;  // [256*256*6] (lihat seg_math.h)
+  const LetterboxInfo* letterbox = nullptr;
+  int64_t frame_serial = 0;      // serial frame saat inferensi (utk lag)
+  bool valid = false;
+};
+
 struct SkinMaskConfig {
+  // M2j: cakupan + kekuatan kulit tubuh (di luar oval wajah) - konstanta
+  // teratur; tubuh sedikit lebih lemah agar tidak terlihat plastik.
+  SkinCoverage coverage = SkinCoverage::kAllSkin;
+  float body_strength = 0.75f;
+  float seg_gate_fade = 1.4f;        // gerbang warna luar-oval: fade di chroma_radius*fade
+  float temporal_speed_gain = 0.04f; // M2j: kenaikan alpha per px gerak/frame
   int feather_radius = 1;   // px di ruang mask - tepi LUAR wajah (box blur/pass)
   int feather_passes = 2;   // pass feather (2 pass ~ gaussian lembut)
   // M2i (3c): feather LEBAR terpisah utk lubang fitur (mata/alis/bibir/
@@ -138,6 +158,9 @@ struct BeautyComposeConfig {
   float chroma_retain = 0.80f;  // [0,1] retensi chroma MENTAH (1 = tanpa cast)
   int smooth_radius = 8;        // px radius box utk statistik guided
   float smooth_eps = 0.0015f;   // ambang var luma (0..1); besar = lebih halus
+  // M2j kualitas: lift Cerahan proporsional DALAM mask
+  // (dv = lift*(255-v); 22% -> +6..8 luma inti, 100% -> ~+30). 0 = mati.
+  float lift = 0.0f;
 };
 
 // Guided smoothing luma: Y' = mix(Y, a*Y + (1-a)*meanY, amount) dengan
@@ -188,18 +211,26 @@ class SkinMaskBuilder {
   // rgba = frame RGBA penuh (untuk sampling warna). Bila face_present false
   // atau lm invalid, mask TIDAK diubah (gain di luar yang memudarkan).
   // Mengembalikan true bila mask diperbarui frame ini.
+  // `seg` (opsional, M2j): bila coverage==kAllSkin dan seg valid, mask
+  // digabung (union) dgn P_kulit hasil segmentasi + gerbang warna di luar
+  // oval. Tanpa seg -> otomatis perilaku wajah-saja (fallback jelas di log).
   bool Update(const LandmarkSet& lm, bool face_present, const uint8_t* rgba,
-              int fw, int fh, int stride);
+              int fw, int fh, int stride, const SegMaskInput* seg = nullptr);
 
   const std::vector<uint8_t>& mask() const { return mask_; }
   bool has_face() const { return face_valid_; }
+  // M2j: alpha temporal terakhir (utk log latensi/gerak).
+  float LastTemporalAlpha() const { return last_alpha_; }
 
  private:
   SkinMaskConfig cfg_;
   int mask_w_ = 0, mask_h_ = 0;
-  std::vector<uint8_t> mask_, prev_;
+  std::vector<uint8_t> mask_, prev_, prev_shift_;
+  std::vector<uint8_t> luma_full_;
   bool has_prev_ = false;
   bool face_valid_ = false;
+  float prev_cx_ = 0.0f, prev_cy_ = 0.0f;  // centroid mask (ruang mask)
+  float last_alpha_ = 0.0f;
 };
 
 }  // namespace kgcore

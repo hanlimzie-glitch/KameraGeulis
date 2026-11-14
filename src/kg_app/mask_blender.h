@@ -93,6 +93,7 @@ uniform float u_gain;
 uniform float u_smooth_amount;
 uniform float u_chroma_retain;
 uniform float u_smooth_eps;
+uniform float u_lift;      // M2j: lift Cerahan dalam mask (0 = mati)
 uniform int u_has_stats;
 uniform int u_debug;
 
@@ -128,6 +129,8 @@ void main() {
 
   // 2) mix dgn raw
   vec3 mixed255 = mix(raw255, cand255, m);
+  // 2b) M2j: lift Cerahan proporsional (identik ComposeBeautyRaw CPU)
+  if (u_lift > 0.0) mixed255 += u_lift * (255.0 - mixed255);
   // 3) retensi chroma MENTAH (M2i 3a) - Y tetap dari hasil mix
   vec3 cm = ycbcr(mixed255.r, mixed255.g, mixed255.b);
   vec3 crw = ycbcr(raw255.r, raw255.g, raw255.b);
@@ -296,6 +299,8 @@ void main() {
     glUniform1f(glGetUniformLocation(prog_final, "u_chroma_retain"),
                 cfg.chroma_retain);
     glUniform1f(glGetUniformLocation(prog_final, "u_smooth_eps"), cfg.smooth_eps);
+    glUniform1f(glGetUniformLocation(prog_final, "u_lift"),
+                cfg.lift < 0.0f ? 0.0f : (cfg.lift > 0.95f ? 0.95f : cfg.lift));
     glUniform1i(glGetUniformLocation(prog_final, "u_has_stats"),
                 (has_stats && cfg.smooth_amount > 0.0f) ? 1 : 0);
     glUniform1i(glGetUniformLocation(prog_final, "u_debug"), debug_mask ? 1 : 0);

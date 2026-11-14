@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-14 (M2i — perbaikan uji-PC M2h: preview hitam (MIN_FILTER tekstur output), settings.json rename-Windows, komposit chroma-preserving + guided smoothing terukur, feather per-region, log F5 metrik inti, flag --no-mask-gl, swa-uji otomatis); M2h — mask kulit wajah dari landmark 468: efek Haluskan/Cerahkan hanya di kulit (fade tanpa wajah), checkbox + F6 overlay mask, F5 simpan raw/out/mask + statistik luar/dalam mask; audit source: BeautyFaceUnitFilter gpupixel memang TANPA mask; M2g TERBUKTI di PC nyata - kamera hidup 1920x1080, mesh 4.9ms, render 9.3ms)**
+Terakhir diperbarui: **2026-11-14 (M2j — segmentasi semua-kulit MediaPipe selfie_multiclass (thread sendiri 10-15 Hz, ORT CPU, unduh+SHA-verified dari models-v1, opset 17), fusi mask (seg ∪ oval landmark − fitur), coverage UI "Semua kulit/Wajah saja", motion-compensated adaptive EMA anti-lag, kalibrasi kualitas F5 (guided boost + lift proporsional, target rasio ≤0.85 /22%→+6..8), F5 + seg_ PNG & statistik kelas, F6 = mask akhir, uji Linux 90 TC); M2i — perbaikan uji-PC M2h: preview hitam (MIN_FILTER tekstur output), settings.json rename-Windows, komposit chroma-preserving + guided smoothing terukur, feather per-region, log F5 metrik inti, flag --no-mask-gl, swa-uji otomatis); M2h — mask kulit wajah dari landmark 468: efek Haluskan/Cerahkan hanya di kulit (fade tanpa wajah), checkbox + F6 overlay mask, F5 simpan raw/out/mask + statistik luar/dalam mask; audit source: BeautyFaceUnitFilter gpupixel memang TANPA mask; M2g TERBUKTI di PC nyata - kamera hidup 1920x1080, mesh 4.9ms, render 9.3ms)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -20,6 +20,7 @@ Legenda status:
 | M2g | Bug log-4: kegagalan membunuh IMFMediaSource lalu tingkat berikut = MF_E_SHUTDOWN → **objek source BARU per tingkat** (ActivateObject ulang), urutan tangga baru **basic→polos→penuh (paling akhir)**, log jumlah/nama device + hr ActivateObject per tingkat + tingkat dipakai, UI **kode awal+akhir** dengan nama simbolis, petunjuk "dipakai aplikasi lain" **hanya** E_ACCESSDENIED/ERROR_SHARING_VIOLATION, audit situs reuse MF lain | ✅ (dikode) | ✅ [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) sukses | ⬜ | tiruan objek mati meniru log-4 persis (E_INVALIDARG lalu SHUTDOWN×2); test pola baru gagal di kode lama & lulus di kode baru; docs MS: default-nya reader me-Shutdown sumber saat di-release → mekanisme bug terkonfirmasi dokumentasi |
 | M2h | Mask kulit per frame (oval FACEMESH_FACE_OVAL dikurangi mata/alis/bibir/lubang hidung + probabilitas warna YCbCr adaptif dari pipi/dahi via landmark, feather + temporal EMA, resolusi 1/4); komposit `mix(raw,beauty,mask*gain)` lewat shader GL aplikasi (tanpa menambal gpupixel); fade ke 0 saat wajah hilang; checkbox "Terapkan hanya pada kulit wajah" (default ON) di tab Kulit; F6 overlay merah mask; F5 selalu raw+out+mask PNG + log selisih luar/dalam mask; simpan perangkat kamera terakhir + petunjuk frame hampir hitam + penghitung sent≤recv; kerusakan lama (tangga/guard F5/BGRA/F4) dipertahankan | ✅ (dikode) | ✅ [43572859909](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43572859909) sukses | ⬜ | uji Linux 79 TC/9604 asersi (rasterisasi, pengurangan fitur, feather, blending piksel LUAR mask identik, builder E2E wajah sintetis); visual GPU/webcam BELUM terverifikasi - menunggu uji PC pengguna |
 | M2i | Perbaikan hasil uji PC M2h: (1) **preview hitam mode skin-only** - `TEXTURE_MIN/MAG_FILTER` tekstur output blender dieksplisitkan (default `NEAREST_MIPMAP_LINEAR` tanpa mipmap = tekstur INCOMPLETE = hitam tanpa glGetError), log init blender (kompilasi/link/FBO/id tekstur) + `glGetError` per tahap + **swa-uji luma keluaran vs mentah setelah ~30 frame** (keluaran gelap -> otomatis jalur lama + notice + log) + flag `--no-mask-gl`; (2) **settings.json** - `std::filesystem::rename` (menimpa tujuan; rename C89 gagal di Windows = 'GAGAL menyimpan perangkat' + default DroidCam), `create_directories`, `Save/Load(path, err)` log penyebab pasti; notifikasi 'nyaris hitam' dicabut saat ganti perangkat/luma pulih; (3) **kualitas**: komposit baru - guided smoothing luma sendiri (box blur H/V statistik Y,Y^2, radius 8, eps 0.0015) + **retensi chroma MENTAH** `chroma_retain` (default 0.8; Y dari beauty, CbCr diarahkan ke raw -> tanpa cast dingin/pink), preset default diturunkan (Natural 0.18/0.06 dst), feather **per-region** (tepi luar r=1, lubang fitur r=3 + inti keras 0 -> cincin merah muka hilang); (4) **log F5 metrik M2i**: delta luma/chroma mask inti (eroded), rasio energi detail halus, diff pita tepi, diff luar; (5) **uji Linux**: transfer chroma (retain 0/1 + mask byte-identik), rasio detail ≤0.85 pada kekuatan default, feather per-region + save timpa-ulang + err penyebab | ✅ (dikode) | ✅ [43577479405](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43577479405) sukses | ⬜ | uji Linux **83 TC/9629 asersi**; **klaim visual/preview BELUM - menunggu uji PC pengguna (log tag `blend`, screenshot, F5 metrik)** |
+| M2j | Segmentasi **semua kulit** (telinga/leher/dada/lengan/tangan) dari MediaPipe `selfie_multiclass_256x256` (Apache-2.0): (1) **model** — unduh GCS resmi + SHA-256 & ukuran **diverifikasi CI** (pin `c6748b12…`, silang 4 OID LFS + model card), tf2onnx **opset 17**, verifikasi ORT `[1,256,256,6]` + softmax-di-luar, upload `models-v1` + artifact `dist\models\`, atribusi THIRD_PARTY; (2) **runtime** — thread terpisah 10-15 Hz (submit letterbox non-blocking, hasil terbaru, lag dicatat dalam frame), ORT CPU, gagal → fallback wajah + notifikasi (tanpa crash); (3) **mask akhir** — P_kulit=p2+p3, guided refine (luma penuh), gerbang warna adaptif di luar oval, ×body_strength, **union** oval landmark (presisi sampai garis rambut) + kecualian absolut (rambut/pakaian/aksesori/mata/alis/bibir/lubang hidung) di-apply SETELAH temporal; (4) **lag** — EMA **motion-compensated** (centroid shift + α adaptif 0.5→1 saat gerak) + hard re-assert fitur; (5) **UI** — combo Cakupan "Semua kulit (default)/Wajah saja" + HUD `seg ms (lag N fr)` + log `lag frame serial=…`; (6) **kualitas F5** — mode kulit: sharpen/white gpupixel DIMATIKAN (penguat HF +19.5 luma), guided `smooth_amount=0.45+0.55×slider`, lift `0.9×whitening` (22%→+6..8, 100%→~+30) identik shader GPU & komposit CPU; (7) **F5/F6** — `seg_*.png` peta kelas + log % per kelas + ms + lag; F6 = mask akhir (kini termasuk seg); (8) **uji Linux** — 7 TC baru (letterbox/unletterbox, softmax argmax, statistik kelas, guided tepi, union/eksklusi, unletterbox peta) → **90 TC** | ✅ (dikode) | ⬜ (CI dijalankan setelah push; SHA ONNX pin menyusul keluaran CI) | ⬜ | **jujur**: ms inferensi seg, perilaku thread, parity GPU, lag webcam nyata, dan hasil visual BELUM terverifikasi tanpa PC pengguna; ring topology wajah = **resmi MediaPipe** (diverifikasi via `face_mesh_connections.py`) sehingga garis datar di dahi = oval memang di bawah hairline → ditutup oleh union seg; GCS/media.githubusercontent tidak terjangkau dari sandbox → verifikasi SHA dilakukan CI (bukan asumsi) |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -265,6 +266,41 @@ atau buka https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184507
 - **CI**: run 43174282611 hijau (Linux: kg_core tests; Windows: configure mengunduh ONNX Runtime 1.31.1 win-x64 dengan pin SHA-256, build+link sukses termasuk `onnxruntime.dll`, ctest hijau, artifact `kamerageulis-m1b-windows-x64` 6,8 MB). Catatan: run sebelumnya (43173665412) Linux Test exit 8 tanpa ::error::; Test step kini meng-annotasi output ctest; kegagalan itu tidak berulang dan tidak terdiagnosis (jeda infra?) — dicatat jujur.
 - **Belum terverifikasi**: provider di Windows nyata (belum pernah jalan), performa CPU, kualitas ROI/rotasi pada wajah nyata, download first-run dari `models-v1` di mesin bersih (release sudah berisi aset sejak 2026-11-12 — workflow Models run 43179962364), artifact vcam (belum ada).
 
+
+## M2j — detail (2026-11-14)
+
+**Masalah uji-PC M2i yang dijawab:** (a) mask tertinggal 20-40 px saat bergerak
+→ EMA motion-compensated (geser frame sebelumnya mengikuti centroid + α naik
+0.5→1 seiring kecepatan, hard re-assert fitur SETELAH temporal); (b) tepi atas
+datar memotong dahi → **bukan bug topology**: ring `FACEMESH_FACE_OVAL` kami
+**identik dengan file resmi** `mediapipe/python/solutions/face_mesh_connections.py`
+(gh api raw) — oval memang berakhir di bawah hairline → ditutup oleh **union
+peta seg**; (c) guratan/lubang di pipi → gerakan + blend; (d) telinga/leher di
+luar mask → segmen `selfie_multiclass` (kelas kulit tubuh+wajah).
+
+**Model & verifikasi SHA (jujur):** sandbox TIDAK bisa mengunduh GCS/langsung
+(SSL) → SHA-256 TFLITE `c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0`
+disilangkan dari **4 OID LFS independen** (face_landmarker, segmentation_v1,
+face_landmarker_v2, image_segmenter) **+ model card**; **diukur ulang di CI**
+(langkah `sha256sum -c` + cek ukuran 16371837) — mismatch = workflow gagal dan
+SHA aktual muncul di log. ONNX (opset 17) diverifikasi ORT: in `[1,256,256,3]`
+[-1,1], out `[1,256,256,6]`, aktivasi dicatat (logit → softmax di luar model,
+auto-detect di runtime). Pin SHA ONNX `kSegOnnxSha256` diisi dari keluaran CI.
+
+**Jalur kualitas (F5):** dugaan akar rasio 1.326 = penguat HF `sharpen` gpupixel
+(0.10) pada kandidat beauty + `smooth_amount` terlalu kecil; delta +19.5 = LUT
+`SetWhite` gpupixel. Perbaikan mode kulit: `SetSharpen(0)+SetWhite(0)`,
+`smooth_amount=0.45+0.55×slider` (guided shader), **lift** `0.9×whitening`
+di komposit (identik GPU & CPU) →22% ≈ +6.6 luma inti, 100% ≈ +30; chroma
+retensi mentah dipertahankan (anti-cast). Target **rasio ≤0.85 pada default
+diukur di log F5** — angka final menunggu pengukuran PC (log tag `app` "F5 metrik").
+
+**Uji Linux (data sintetis):** letterbox/unletterbox roundtrip + pad edge-replicate,
+normalisasi [-1,1], deteksi logit vs probabilitas + P_kulit=p2+p3 (clamp),
+argmax/statistik per kelas/warna seg_, guided upsampling mempertahankan tepi
+panduan, union+eksklusi fitur (mata/alis/bibir selalu 0), pemetaan peta seg→mask.
+**Tidak bisa diverifikasi di Linux:** ms inferensi ORT, thread 10-15 Hz, unduhan
+WinHTTP, parity shader GPU, gerak webcam nyata, tampilan visual → PC pengguna.
 
 ## M2i — detail (2026-11-14)
 

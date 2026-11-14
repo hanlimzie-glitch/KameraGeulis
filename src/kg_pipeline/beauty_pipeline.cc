@@ -83,9 +83,27 @@ void BeautyPipeline::Shutdown() {
 }
 
 void BeautyPipeline::SetBeautyStrength(float smoothing, float whitening) {
+  smoothing_ = smoothing;
+  whitening_ = whitening;
   if (!beauty_filter_) return;
-  beauty_filter_->SetBlurAlpha(smoothing);
-  beauty_filter_->SetWhite(whitening);
+  if (skin_mask_enabled_) {
+    // M2j kualitas (F5): jalur LUT kulit = penguat HF (ratio 1.326) dan
+    // lift putih gpupixel terlalu kuat (+19.5 luma @22%). Pada mode kulit:
+    //   * sharpen/LUT putih DIMATIKAN -> smoothing dijalankan sbg guided
+    //     smoothing murni (radius dari slider Haluskan) di mask_blender;
+    //   * Cerahkan = lift proporsional: dv = k*(255-v), k = 0.9*whitening
+    //     (22% -> +6..8 di inti terang, 100% -> ~+30) - lihat mask_blender.
+    beauty_filter_->SetSharpen(0.0f);
+    beauty_filter_->SetBlurAlpha(0.0f);  // koefisien rumus sharpen = 0
+    beauty_filter_->SetWhite(0.0f);
+    mask_blender_.SetLift(whitening * 0.90f);
+    mask_blender_.SetSmoothSigma(0.6f + smoothing * 2.4f);  // 0.6..3.0 px
+  } else {
+    mask_blender_.SetLift(0.0f);
+    mask_blender_.SetSmoothSigma(0.0f);
+    beauty_filter_->SetBlurAlpha(smoothing);
+    beauty_filter_->SetWhite(whitening);
+  }
 }
 
 void BeautyPipeline::ProcessFrame(const Frame& frame) {
@@ -127,12 +145,71 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
       mask_builder_.Configure(mw, mh);
       Log(kTag, "skin mask: dikonfigurasi %dx%d (frame %dx%d)", mw, mh, w, h);
     }
+    // M2j: segmen semua-kulit di thread sendiri (tidak memblokir render).
+    // Hasil dipakai SYNCHRONOUS dgn serial frame yang sedang diproses (bila
+    // seg lebih lambat, lag-nya dicatat dalam satuan frame - jangan bohong).
+    ++frame_serial_;
+    if (!seg_start_logged_) {
+      seg_.Start();
+      seg_start_logged_ = true;
+      Log(kTag, "seg thread: mulai (target 10-15 Hz, ORT CPU)");
+    }
+    seg_.SubmitFrame(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
+                     /*bgra=*/false, frame_serial_);
+    SegMaskInput seg_in;
+    const SegMaskInput* seg_ptr = nullptr;
+    if (seg_.Available()) {
+      std::vector<float> probs;
+      LetterboxInfo lb{};
+      uint64_t seg_serial = 0;
+      double seg_ms = 0.0;
+      if (seg_.GetResult(&probs, &lb, &seg_serial, &seg_ms)) {
+        seg_in.probs = probs.data();
+        seg_in.letterbox = lb;
+        seg_in.frame_serial = seg_serial;
+        seg_in.valid = true;
+        seg_ptr = &seg_in;
+        seg_ms_ = static_cast<float>(seg_ms);
+        const int64_t lag = static_cast<int64_t>(frame_serial_) -
+                            static_cast<int64_t>(seg_serial);
+        seg_lag_frames_ = static_cast<float>(
+            std::clamp<int64_t>(lag, 0, 60));
+        seg_result_ok_ = true;
+      } else {
+        seg_result_ok_ = false;
+        seg_lag_frames_ = -1.0f;
+      }
+    } else {
+      // Gagal/ belum siap -> WAJAH SAJA + notifikasi sekali (jujur, no crash).
+      seg_result_ok_ = false;
+      seg_lag_frames_ = -1.0f;
+      if (!seg_fail_logged_) {
+        seg_fail_logged_ = true;
+        Log(kTag, "seg tidak tersedia (%s) -> mask wajah saja",
+            seg_.LastError().c_str());
+      }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     mask_builder_.Update(tracker_->Current(), tracker_->Current().valid,
-                         convert_buf_.data(), w, h, static_cast<int>(row_bytes));
+                         convert_buf_.data(), w, h, static_cast<int>(row_bytes),
+                         seg_ptr);
     mask_ms_ = std::chrono::duration<float, std::milli>(
                    std::chrono::steady_clock::now() - t0)
                    .count();
+    // Log latensi ujung-ke-ujung berkala (mesh/landmark, seg, mask) - M2j.
+    static thread_local uint64_t s_lag_log_n = 0;
+    if ((frame_serial_ % 90) == 0) {
+      StageTimings st{};
+      const bool has_st = tracker_->GetStageTimings(&st);
+      Log(kTag,
+          "lag frame serial=%llu: mesh=%.1fms (~%.1ffr@30) seg=%.1fms "
+          "(lag %.0f fr) mask=%.2fms%s",
+          static_cast<unsigned long long>(frame_serial_),
+          has_st ? st.mesh_ms : -1.0,
+          has_st ? st.mesh_ms / 33.3f : -1.0f, seg_ms_, seg_lag_frames_,
+          mask_ms_, seg_result_ok_ ? "" : " [seg mati -> wajah saja]");
+    }
+    (void)s_lag_log_n;
   }
   // M2f: sink mengisi width_/height_ bersamaan dengan framebuffer pertamanya
   // (SinkRawData::Render) - sink berarti sudah pernah menghasilkan output.

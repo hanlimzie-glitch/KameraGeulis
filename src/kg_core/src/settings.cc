@@ -16,6 +16,7 @@ bool Settings::operator==(const Settings& o) const {
   auto feq = [](float a, float b) { return std::fabs(a - b) < 1e-6f; };
   return feq(smoothing, o.smoothing) && feq(whitening, o.whitening) &&
          feq(chroma_retain, o.chroma_retain) &&
+         skin_coverage == o.skin_coverage &&
          feq(face_slim, o.face_slim) && feq(big_eyes, o.big_eyes) &&
          feq(lipstick, o.lipstick) && feq(blusher, o.blusher) &&
          mirror == o.mirror && virtual_camera == o.virtual_camera &&
@@ -73,6 +74,7 @@ bool Settings::FromJson(const std::string& text) {
   capture_width = ClampInt(j, "capture_width", capture_width, 16, 7680);
   capture_height = ClampInt(j, "capture_height", capture_height, 16, 4320);
   capture_fps = ClampInt(j, "capture_fps", capture_fps, 1, 240);
+  skin_coverage = ClampInt(j, "skin_coverage", skin_coverage, 0, 1);
   return true;
 }
 
@@ -94,6 +96,7 @@ std::string Settings::ToJson() const {
   j["capture_width"] = capture_width;
   j["capture_height"] = capture_height;
   j["capture_fps"] = capture_fps;
+  j["skin_coverage"] = skin_coverage;
   return j.dump(2);
 }
 

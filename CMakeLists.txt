@@ -46,7 +46,8 @@ add_library(kg_core STATIC
   src/kg_core/src/roi_align.cc
   src/kg_core/src/frame_convert.cc
   src/kg_core/src/png_write.cc
-  src/kg_core/src/skin_mask.cc)
+  src/kg_core/src/skin_mask.cc
+  src/kg_core/src/seg_math.cc)
 target_include_directories(kg_core PUBLIC src/kg_core/include)
 target_link_libraries(kg_core PUBLIC nlohmann_json::nlohmann_json)
 
@@ -69,6 +70,7 @@ if(KG_BUILD_TESTS)
     src/kg_tests/frame_convert_test.cc
     src/kg_tests/png_write_test.cc
     src/kg_tests/skin_mask_test.cc
+    src/kg_tests/seg_math_test.cc
     src/kg_tests/reader_fallback_test.cc)
   target_link_libraries(kg_tests PRIVATE kg_core Catch2::Catch2WithMain)
   add_test(NAME kg_tests COMMAND kg_tests)
@@ -136,7 +138,8 @@ if(WIN32)
     add_library(kg_pipeline STATIC
       src/kg_pipeline/face_tracker.cc
       src/kg_pipeline/beauty_pipeline.cc
-      src/kg_pipeline/ort_landmark_provider.cc)
+      src/kg_pipeline/ort_landmark_provider.cc
+    src/kg_pipeline/seg_provider.cc)
     target_include_directories(kg_pipeline PUBLIC src/kg_pipeline)
     target_link_libraries(kg_pipeline PUBLIC
       kg_core gpupixel glad glfw onnxruntime winhttp bcrypt)

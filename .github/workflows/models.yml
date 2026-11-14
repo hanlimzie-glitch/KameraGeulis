@@ -23,6 +23,7 @@ on:
     paths:
       - .github/workflows/models.yml
       - scripts/models/**
+      - THIRD_PARTY.md
 
 permissions:
   contents: write  # upload release assets to models-v1
@@ -33,6 +34,16 @@ env:
   MESH_TGZ_URL: https://registry.npmjs.org/@mediapipe/face_mesh/-/face_mesh-0.4.1633559619.tgz
   MESH_TGZ_SHA256: a65c9a7509560f29e574c026dc6a667d2154617eb3ba0c287db02350de0c116f
   TF2ONNX_OPSET: "15"
+  # M2j — segmenter kulit multikelas (MediaPipe image_segmenter,
+  # selfie_multiclass_256x256, Apache-2.0). SHA-256 TFLITE DIHITUNG & DIVERIFIKASI
+  # DI SINI (bukan dari kartu semata): langkah "Download" menjalankan
+  # sha256sum -c terhadap pin; nilai pin disilangkan dengan 4 OID LFS
+  # independen + model card (lihat STATUS.md M2j). Mismatch = langkah gagal
+  # dan SHA aktual muncul di log.
+  SEG_TFLITE_URL: https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite
+  SEG_TFLITE_SHA256: c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
+  SEG_TFLITE_SIZE: "16371837"
+  SEG_ONNX_OPSET: "17"
 
 jobs:
   build-models:
@@ -49,6 +60,17 @@ jobs:
       - name: Install converter + verifier (pinned)
         run: |
           python -m pip install --disable-pip-version-check "tensorflow==2.17.1" "tf2onnx==1.17.0" "onnx==1.17.0" "onnxruntime==1.31.1" "numpy<2"
+
+      - name: Download segmenter TFLITE from official GCS (SHA-256 + ukuran diverifikasi)
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/models-src"
+          mkdir -p "$workdir"
+          curl -fSL --retry 3 "$SEG_TFLITE_URL" -o "$workdir/selfie_multiclass_256x256.tflite"
+          echo "$SEG_TFLITE_SHA256  $workdir/selfie_multiclass_256x256.tflite" | sha256sum -c -
+          size=$(stat -c%s "$workdir/selfie_multiclass_256x256.tflite")
+          echo "ukuran: $size (pin: $SEG_TFLITE_SIZE)"
+          test "$size" = "$SEG_TFLITE_SIZE"
 
       - name: Download npm MediaPipe packages (SHA-256 verified)
         run: |
@@ -74,11 +96,47 @@ jobs:
             --output "$out/face_detection_short_range.onnx" --opset "$TF2ONNX_OPSET"
           python -m tf2onnx.convert --tflite "$out/face_landmark.tflite" \
             --output "$out/face_mesh.onnx" --opset "$TF2ONNX_OPSET"
+          # M2j: segmenter multikelas — OPSET 17 (pin terpisah).
+          cp "$RUNNER_TEMP/models-src/selfie_multiclass_256x256.tflite" "$out/"
+          python -m tf2onnx.convert --tflite "$out/selfie_multiclass_256x256.tflite" \
+            --output "$out/selfie_multiclass_256x256.onnx" --opset "$SEG_ONNX_OPSET"
 
       - name: "Verify ONNX (onnxruntime: names, shapes, inference)"
         run: |
           set -euo pipefail
           python scripts/models/verify_onnx.py "$RUNNER_TEMP/models-out" | tee "$RUNNER_TEMP/models-out/verify.txt"
+
+      - name: "Verify segmenter ONNX (M2j: [1,256,256,6], softmax di luar model)"
+        run: |
+          set -euo pipefail
+          python - <<'PYEOF'
+          import os, numpy as np, onnxruntime as ort
+          path = os.path.join(os.environ["RUNNER_TEMP"], "models-out", "selfie_multiclass_256x256.onnx")
+          sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+          inp = sess.get_inputs()[0]
+          out = sess.get_outputs()[0]
+          print("input:", inp.name, inp.shape, inp.type)
+          print("output:", out.name, out.shape, out.type)
+          # Bentuk wajib: input NHWC [1,256,256,3] float; keluaran [1,256,256,6].
+          assert list(inp.shape) == [1, 256, 256, 3], inp.shape
+          assert list(out.shape) == [1, 256, 256, 6], out.shape
+          # Inferensi dummy: normalisasi [-1,1] (v/127.5-1) - dokumentasi resmi.
+          x = np.random.uniform(-1.0, 1.0, size=(1, 256, 256, 3)).astype(np.float32)
+          y = sess.run(None, {inp.name: x})[0]
+          assert y.shape == (1, 256, 256, 6), y.shape
+          # Aktivasi: model mengeluarkan LOGIT (softmax di luar model) ATAU
+          # probabilitas - kedua bentuk diterima runtime (auto-detect), di sini
+          # kita CATAT mana yang keluar agar docs jujur.
+          flat = y.reshape(-1, 6)
+          ssum = flat.sum(axis=1)
+          kind = "probabilitas (sum~1)" if np.allclose(ssum, 1.0, atol=1e-3) else "logit (softmax di luar)"
+          print("aktivasi keluaran:", kind, "sum min/max:", float(ssum.min()), float(ssum.max()))
+          if kind.startswith("logit"):
+              e = np.exp(flat - flat.max(axis=1, keepdims=True))
+              p = e / e.sum(axis=1, keepdims=True)
+              print("softmax contoh[0]:", np.round(p[0], 4).tolist())
+          print("M2j seg verify OK")
+          PYEOF
 
       - name: Upload models to the models-v1 release
         env:
@@ -94,6 +152,7 @@ jobs:
           gh release upload models-v1 \
             "$out/face_detection_short_range.onnx" \
             "$out/face_mesh.onnx" \
+            "$out/selfie_multiclass_256x256.onnx" \
             --clobber --repo "$GITHUB_REPOSITORY"
 
       # NOTE: GitHub Actions logs are not reachable from every environment;
@@ -105,7 +164,8 @@ jobs:
           out="$RUNNER_TEMP/models-out"
           det=$(sha256sum "$out/face_detection_short_range.onnx" | cut -d' ' -f1)
           mesh=$(sha256sum "$out/face_mesh.onnx" | cut -d' ' -f1)
-          echo "::notice title=models-v1 SHA-256::face_detection_short_range.onnx=$det face_mesh.onnx=$mesh"
+          seg=$(sha256sum "$out/selfie_multiclass_256x256.onnx" | cut -d' ' -f1)
+          echo "::notice title=models-v1 SHA-256::face_detection_short_range.onnx=$det face_mesh.onnx=$mesh selfie_multiclass_256x256.onnx=$seg"
 
       - name: Publish SHA-256 summary
         run: |
@@ -115,9 +175,9 @@ jobs:
             echo "## Models built & uploaded to \`models-v1\`"
             echo ""
             echo '```'
-            (cd "$out" && sha256sum face_detection_short_range.onnx face_mesh.onnx)
-            echo "tf2onnx opset: $TF2ONNX_OPSET (tensorflow 2.17.1 / tf2onnx 1.17.0 / onnxruntime 1.31.1)"
+            (cd "$out" && sha256sum face_detection_short_range.onnx face_mesh.onnx selfie_multiclass_256x256.onnx)
+            echo "tf2onnx opset: $TF2ONNX_OPSET (det/mesh) / $SEG_ONNX_OPSET (seg, M2j) (tensorflow 2.17.1 / tf2onnx 1.17.0 / onnxruntime 1.31.1)"
             echo '```'
             echo ""
-            echo "Pin these values in \`ort_landmark_provider.cc\` + \`docs/LANDMARKS.md\`."
+            echo "Pin these values in \`ort_landmark_provider.cc\` + \`seg_provider.cc\` (kSegOnnxSha256) + \`docs/LANDMARKS.md\`."
           } | tee -a "$GITHUB_STEP_SUMMARY"

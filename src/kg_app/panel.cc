@@ -281,6 +281,16 @@ void DrawAboutTab(AppUiState& ui) {
               s.Get("debug.since_detect").c_str(), ui.frames_since_detect);
   ImGui::Text("mesh     %.2f ms", ui.mesh_ms);
   ImGui::Text("track    %.2f ms", ui.track_ms);
+  ImGui::Text("%s %.2f ms", s.Get("debug.mask_ms").c_str(), ui.mask_ms);
+  if (ui.seg_ok) {
+    ImGui::Text("%s %.1f ms (lag %+.0f fr)", s.Get("debug.seg_ms").c_str(),
+                ui.seg_ms, ui.seg_lag);
+  } else {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s: %s",
+                       s.Get("debug.seg_ms").c_str(),
+                       ui.seg_status.empty() ? "belum siap"
+                                             : ui.seg_status.c_str());
+  }
   ImGui::Text("render   %.2f ms", ui.render_ms);
   ImGui::TextWrapped("%s", s.Get("debug.unverified").c_str());
   ImGui::Separator();
@@ -329,6 +339,23 @@ void RenderPanel(AppUiState& ui) {
       }
       if (!ui.skin_only) {
         ImGui::TextDisabled("%s", s.Get("skin.only_off_note").c_str());
+      }
+      // M2j: cakupan — Semua kulit (default) / Wajah saja.
+      if (ui.skin_only) {
+        ImGui::SetNextItemWidth(220.0f);
+        // String lokal wajib: Get() mengembalikan salinan (jangan c_str()
+        // dari temporary).
+        const std::string cov_label = s.Get("skin.coverage");
+        const std::string cov_all = s.Get("skin.coverage_all");
+        const std::string cov_face = s.Get("skin.coverage_face");
+        const char* items[] = {cov_all.c_str(), cov_face.c_str()};
+        int cov = ui.skin_coverage;
+        if (ImGui::Combo(cov_label.c_str(), &cov, items, 2)) {
+          ui.skin_coverage = cov;
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("%s", s.Get("skin.coverage_tip").c_str());
+        }
       }
       ImGui::Spacing();
       ImGui::TextWrapped("%s", s.Get("skin.coming_soon_note").c_str());

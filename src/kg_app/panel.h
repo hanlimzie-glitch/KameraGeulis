@@ -11,6 +11,7 @@ struct AppUiState {
   float whitening = 0.06f;    // [0,1] - Cerahkan Kulit (M2i: default natural)
   float chroma_retain = 0.8f; // [0,1] - M2i: retensi chroma mentah (anti cast)
   bool skin_only = true;      // M2h: efek hanya lewat mask kulit wajah (default ON)
+  int skin_coverage = 0;      // M2j: 0 = Semua kulit (default), 1 = Wajah saja
   bool show_mask = false;     // M2h: F6 - overlay merah mask di preview
   float face_slim = 0.0f;     // [0,1] - disabled ("Segera hadir")
   float big_eyes = 0.0f;      // [0,1] - disabled
@@ -45,6 +46,10 @@ struct AppUiState {
   float mesh_ms = 0.0f;        // mesh stage (incl. crop)
   float track_ms = 0.0f;       // total provider Track() (FaceTracker)
   float mask_ms = 0.0f;        // M2h: pembuatan mask kulit per frame
+  float seg_ms = 0.0f;         // M2j: waktu inferensi seg (thread sendiri)
+  float seg_lag = -1.0f;       // M2j: lag seg dalam FRAME (-1 = belum ada)
+  bool seg_ok = false;         // M2j: hasil seg aktif dipakai frame ini
+  std::string seg_status;      // M2j: "ok" / alasan gagal (fallback wajah)
   float render_ms = 0.0f;      // GL/UI render block
   int frames_since_detect = 0;
   std::string status_message;

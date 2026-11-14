@@ -519,6 +519,14 @@ void ComposeBeautyRaw(const uint8_t* raw, const uint8_t* beauty,
         const float cv = static_cast<float>(c[i4 + ch]);
         mixc[ch] = rv + (cv - rv) * t;
       }
+      // 2b) M2j: lift Cerahan proporsional (hanya di dalam mask; chroma
+      //     mentah dipertahankan di langkah 3 -> tanpa cast warna).
+      if (cfg.lift > 0.0f) {
+        const float k = cfg.lift;
+        for (int ch = 0; ch < 3; ++ch) {
+          mixc[ch] += k * (255.0f - mixc[ch]);
+        }
+      }
       // 3) retensi chroma MENTAH: Y dari hasil mix, CbCr diarahkan ke raw
       //    sebanyak `retain` (float; tanpa kuantisasi ganda).
       const float y_m = 0.299f * mixc[0] + 0.587f * mixc[1] + 0.114f * mixc[2];
@@ -650,7 +658,8 @@ void SkinMaskBuilder::Configure(int mask_w, int mask_h,
 }
 
 bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
-                             const uint8_t* rgba, int fw, int fh, int stride) {
+                             const uint8_t* rgba, int fw, int fh, int stride,
+                             const SegMaskInput* seg) {
   if (mask_w_ <= 0 || !rgba || fw <= 0 || fh <= 0) return false;
   if (!face_present || !lm.valid) {
     face_valid_ = false;
@@ -751,12 +760,144 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
     }
   }
 
-  // 5) Perataan temporal.
-  if (has_prev_) {
+  // 5) M2j: fusion segmenasi (cakupan SEMUA kulit, bila hasil seg ada).
+  //    P_kulit = min(1, P(kulit tubuh)+P(kulit wajah)) -> guided refine
+  //    (luma penuh) -> gerbang warna HANYA di luar oval -> body_strength
+  //    -> union dgn mask wajah -> ramp fitur (fsoft) -> inti fitur nol.
+  const bool use_seg = cfg_.coverage == SkinCoverage::kAllSkin && seg &&
+                       seg->valid && seg->probs && seg->letterbox;
+  if (use_seg) {
+    // 5a) unletterbox bilinear -> kasar di resolusi mask.
+    std::vector<float> skin0(static_cast<size_t>(n));
+    SegProbsToMaskSkin(seg->probs, *seg->letterbox, w, h, skin0.data());
+    // 5b) guided refine: panduan = luma frame RESOLUSI PENUH (rasio aspek
+    //     mask = rasio frame -> sampel titik-ke-titik).
+    luma_full_.resize(static_cast<size_t>(fw) * fh);
+    for (int y = 0; y < fh; ++y) {
+      const uint8_t* row = rgba + static_cast<size_t>(y) * stride;
+      uint8_t* lum = luma_full_.data() + static_cast<size_t>(y) * fw;
+      for (int x = 0; x < fw; ++x) {
+        const uint8_t* p = row + static_cast<size_t>(x) * 4;
+        lum[x] = static_cast<uint8_t>(
+            0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2] + 0.5f);
+      }
+    }
+    std::vector<float> skin1(static_cast<size_t>(n));
+    JointBilateralUpsample(skin0.data(), w, h, luma_full_.data(), fw, fh, w, h,
+                           skin1.data(), /*sigma_space=*/2.0f,
+                           /*sigma_range=*/0.08f);
+    // 5c) gerbang warna adaptif + body_strength HANYA di luar oval;
+    //     di dalam oval mask landmark tetap raja (presisi fitur).
+    const float sx = static_cast<float>(fw) / static_cast<float>(w);
+    const float sy = static_cast<float>(fh) / static_cast<float>(h);
+    const float gate_r1 = cfg_.chroma_radius * cfg_.chroma_feather;
+    const float gate_r2 = cfg_.chroma_radius * cfg_.seg_gate_fade;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        if (region[idx] != 0) continue;  // dalam oval: bagian wajah presisi
+        float v = skin1[idx];
+        if (v <= 0.0f) continue;
+        if (use_adaptif) {
+          int px = std::min(fw - 1,
+                            static_cast<int>((static_cast<float>(x) + 0.5f) * sx));
+          int py = std::min(fh - 1,
+                            static_cast<int>((static_cast<float>(y) + 0.5f) * sy));
+          float cb, cr;
+          RgbToCbCr(rgba + static_cast<size_t>(py) * stride +
+                        static_cast<size_t>(px) * 4, &cb, &cr);
+          const bool band = cb >= cfg_.cb_min && cb <= cfg_.cb_max &&
+                            cr >= cfg_.cr_min && cr <= cfg_.cr_max;
+          if (!band) {
+            v = 0.0f;
+          } else {
+            const float dcb = cb - cb0, dcr = cr - cr0;
+            const float d = std::sqrt(dcb * dcb + dcr * dcr);
+            if (d > gate_r1) {
+              const float fade = std::clamp(1.0f - (d - gate_r1) /
+                                                        (gate_r2 - gate_r1),
+                                            0.0f, 1.0f);
+              v *= fade;
+            }
+          }
+        }
+        v *= cfg_.body_strength;
+        skin1[idx] = v;
+      }
+    }
+    // 5d) ramp fitur berlaku utk seg juga (celah antar-fitur tetap halus).
+    for (size_t i = 0; i < mask_.size(); ++i) {
+      if (fsoft[i]) {
+        const float mul = 1.0f - static_cast<float>(fsoft[i]) / 255.0f;
+        skin1[i] *= mul;
+      }
+    }
+    // 5e) union dengan mask wajah landmark.
+    for (size_t i = 0; i < mask_.size(); ++i) {
+      const uint8_t sv =
+          static_cast<uint8_t>(std::min(255.0f, skin1[i] * 255.0f + 0.5f));
+      if (sv > mask_[i]) mask_[i] = sv;
+    }
+  }
+
+  // 6) M2j: perataan temporal KOMPENSASI GERAK + adaptif (alpha naik saat
+  //    gerak cepat -> lag 20-40 px dari M2i hilang; diam -> tetap halus).
+  double cen_x = 0.0, cen_y = 0.0;
+  int cen_n = 0;
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      if (mask_[static_cast<size_t>(y) * w + x] > 8) {
+        cen_x += x;
+        cen_y += y;
+        ++cen_n;
+      }
+    }
+  }
+  const float cx = cen_n ? static_cast<float>(cen_x / cen_n)
+                         : static_cast<float>(w) * 0.5f;
+  const float cy = cen_n ? static_cast<float>(cen_y / cen_n)
+                         : static_cast<float>(h) * 0.5f;
+  if (has_prev_ && cen_n > 0) {
+    const float dx = cx - prev_cx_;
+    const float dy = cy - prev_cy_;
+    const float speed = std::sqrt(dx * dx + dy * dy);  // px mask / frame
+    // Geser mask lama sebesar delta centroid (kompensasi translasi).
+    const int ix = static_cast<int>(std::lround(dx));
+    const int iy = static_cast<int>(std::lround(dy));
+    prev_shift_.assign(static_cast<size_t>(n), 0);
+    for (int y = 0; y < h; ++y) {
+      const int sy2 = std::clamp(y - iy, 0, h - 1);
+      for (int x = 0; x < w; ++x) {
+        const int sx2 = std::clamp(x - ix, 0, w - 1);
+        prev_shift_[static_cast<size_t>(y) * w + x] =
+            prev_[static_cast<size_t>(sy2) * w + sx2];
+      }
+    }
+    const float alpha =
+        std::clamp(cfg_.temporal_alpha + cfg_.temporal_speed_gain * speed,
+                   cfg_.temporal_alpha, 1.0f);
+    for (size_t i = 0; i < mask_.size(); ++i) {
+      const float a = static_cast<float>(mask_[i]);
+      const float b = static_cast<float>(prev_shift_[i]);
+      mask_[i] = static_cast<uint8_t>(alpha * a + (1.0f - alpha) * b + 0.5f);
+    }
+    last_alpha_ = alpha;
+  } else if (has_prev_) {
     TemporalBlend(prev_.data(), mask_.data(), n, cfg_.temporal_alpha);
+    last_alpha_ = cfg_.temporal_alpha;
+  } else {
+    last_alpha_ = 1.0f;
   }
   prev_ = mask_;
+  prev_cx_ = cx;
+  prev_cy_ = cy;
   has_prev_ = true;
+
+  // 7) M2j: inti fitur frame INI selalu keras 0 SETELAH temporal (lubang
+  //    mengikuti landmark frame N - bukan tertinggal).
+  for (size_t i = 0; i < mask_.size(); ++i) {
+    if (feat[i]) mask_[i] = 0;
+  }
   face_valid_ = true;
   return true;
 }

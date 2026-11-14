@@ -6,6 +6,7 @@
 #include "kgcore/landmark.h"
 #include "kgcore/skin_mask.h"
 #include "face_tracker.h"
+#include "seg_provider.h"
 
 namespace gpupixel {
 class SourceRawData;
@@ -42,9 +43,26 @@ class BeautyPipeline {
   void SetBeautyStrength(float smoothing, float whitening);
 
   // M2h: mask kulit wajah (hanya dihitung bila aktif - hemat CPU saat mati).
-  void SetSkinMaskEnabled(bool on) { skin_mask_enabled_ = on; }
+  // M2j: menyalakan/mematikan mode kulit MENGIKUT-SETELAHU parameter beauty
+  // (jalur kulit = sharpen/white gpupixel netral; lihat SetBeautyStrength).
+  void SetSkinMaskEnabled(bool on) {
+    skin_mask_enabled_ = on;
+    if (beauty_filter_) SetBeautyStrength(smoothing_, whitening_);
+  }
   bool SkinMaskEnabled() const { return skin_mask_enabled_; }
   const SkinMaskBuilder& MaskBuilder() const { return mask_builder_; }
+  // M2j: segmentasi semua kulit (thread terpisah; lihat seg_provider.h).
+  SegProvider& Seg() { return seg_; }
+  // M2j: cakupan mask (true = Wajah saja, false = Semua kulit/default).
+  void SetSkinCoverage(bool face_only) {
+    mask_builder_.SetCoverage(face_only ? SkinCoverage::kFaceOnly
+                                        : SkinCoverage::kAllSkin);
+  }
+  float SegMs() const { return seg_ms_; }
+  // Lag frame: serial_frame_sekarang - serial_frame_hasil_seg (-1 bila belum).
+  float SegLagFrames() const { return seg_lag_frames_; }
+  bool SegActive() const { return seg_result_ok_; }
+  uint64_t FrameSerial() const { return frame_serial_; }  // M2j: lag F5
   // RGBA penuh frame input terakhir (setara OutputRGBA - untuk komposit M2h).
   const uint8_t* InputRGBA() const { return convert_buf_.empty() ? nullptr : convert_buf_.data(); }
 
@@ -86,5 +104,15 @@ class BeautyPipeline {
   SkinMaskBuilder mask_builder_;
   bool skin_mask_enabled_ = false;
   float mask_ms_ = 0.0f;
+  // M2j: seg + serial frame (sinkronitas mask/seg dgn frame).
+  SegProvider seg_;
+  float seg_ms_ = 0.0f;
+  float seg_lag_frames_ = -1.0f;
+  bool seg_result_ok_ = false;
+  bool seg_start_logged_ = false;
+  bool seg_fail_logged_ = false;
+  uint64_t frame_serial_ = 0;
+  float smoothing_ = 0.0f;   // dipakai jalur kulit (guided radius)
+  float whitening_ = 0.0f;
 };
 }  // namespace kgcore
