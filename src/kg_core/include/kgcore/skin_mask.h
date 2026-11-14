@@ -204,6 +204,9 @@ class SkinMaskBuilder {
  public:
   // wajib dipanggil sekali; bila frame berubah ukuran, Configure ulang.
   void Configure(int mask_w, int mask_h, const SkinMaskConfig& cfg = {});
+  // M2j: ubah cakupan (Semua kulit / Wajah saja) tanpa re-configure ukuran.
+  void SetCoverage(SkinCoverage c) { cfg_.coverage = c; }
+  SkinCoverage coverage() const { return cfg_.coverage; }
   bool configured() const { return mask_w_ > 0; }
   int w() const { return mask_w_; }
   int h() const { return mask_h_; }

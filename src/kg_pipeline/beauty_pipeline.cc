@@ -96,11 +96,9 @@ void BeautyPipeline::SetBeautyStrength(float smoothing, float whitening) {
     beauty_filter_->SetSharpen(0.0f);
     beauty_filter_->SetBlurAlpha(0.0f);  // koefisien rumus sharpen = 0
     beauty_filter_->SetWhite(0.0f);
-    mask_blender_.SetLift(whitening * 0.90f);
-    mask_blender_.SetSmoothSigma(0.6f + smoothing * 2.4f);  // 0.6..3.0 px
+    // Lift Cerahan + guided smoothing TIDAK di sini: keduanya masuk lewat
+    // BeautyComposeConfig (MakeComposeConfig di main.cc — GPU & CPU identik).
   } else {
-    mask_blender_.SetLift(0.0f);
-    mask_blender_.SetSmoothSigma(0.0f);
     beauty_filter_->SetBlurAlpha(smoothing);
     beauty_filter_->SetWhite(whitening);
   }
@@ -156,29 +154,28 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
     }
     seg_.SubmitFrame(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
                      /*bgra=*/false, frame_serial_);
+    // Buffer hasil hidup SAMPAI Update() (seg_in.letterbox = &seg_lb).
+    std::vector<float> seg_probs;
+    LetterboxInfo seg_lb{};
+    uint64_t seg_serial = 0;
+    double seg_ms_val = 0.0;
     SegMaskInput seg_in;
     const SegMaskInput* seg_ptr = nullptr;
-    if (seg_.Available()) {
-      std::vector<float> probs;
-      LetterboxInfo lb{};
-      uint64_t seg_serial = 0;
-      double seg_ms = 0.0;
-      if (seg_.GetResult(&probs, &lb, &seg_serial, &seg_ms)) {
-        seg_in.probs = probs.data();
-        seg_in.letterbox = lb;
-        seg_in.frame_serial = seg_serial;
-        seg_in.valid = true;
-        seg_ptr = &seg_in;
-        seg_ms_ = static_cast<float>(seg_ms);
-        const int64_t lag = static_cast<int64_t>(frame_serial_) -
-                            static_cast<int64_t>(seg_serial);
-        seg_lag_frames_ = static_cast<float>(
-            std::clamp<int64_t>(lag, 0, 60));
-        seg_result_ok_ = true;
-      } else {
-        seg_result_ok_ = false;
-        seg_lag_frames_ = -1.0f;
-      }
+    if (seg_.Available() &&
+        seg_.GetResult(&seg_probs, &seg_lb, &seg_serial, &seg_ms_val)) {
+      seg_in.probs = seg_probs.data();
+      seg_in.letterbox = &seg_lb;
+      seg_in.frame_serial = static_cast<int64_t>(seg_serial);
+      seg_in.valid = true;
+      seg_ptr = &seg_in;
+      seg_ms_ = static_cast<float>(seg_ms_val);
+      const int64_t lag = static_cast<int64_t>(frame_serial_) -
+                          static_cast<int64_t>(seg_serial);
+      seg_lag_frames_ = static_cast<float>(std::clamp<int64_t>(lag, 0, 60));
+      seg_result_ok_ = true;
+    } else if (seg_.Available()) {
+      seg_result_ok_ = false;
+      seg_lag_frames_ = -1.0f;
     } else {
       // Gagal/ belum siap -> WAJAH SAJA + notifikasi sekali (jujur, no crash).
       seg_result_ok_ = false;
@@ -200,7 +197,7 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
     static thread_local uint64_t s_lag_log_n = 0;
     if ((frame_serial_ % 90) == 0) {
       StageTimings st{};
-      const bool has_st = tracker_->GetStageTimings(&st);
+      const bool has_st = GetStageTimings(&st);
       Log(kTag,
           "lag frame serial=%llu: mesh=%.1fms (~%.1ffr@30) seg=%.1fms "
           "(lag %.0f fr) mask=%.2fms%s",
