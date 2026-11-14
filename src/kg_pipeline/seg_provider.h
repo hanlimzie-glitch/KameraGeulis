@@ -38,6 +38,8 @@ class SegProvider {
   // Mulai/berhenti thread inferensi (Start idempoten).
   void Start();
   void Stop();
+  // M2k: set minimum spacing between inferences (200–3000 ms), requested by PerfGuard.
+  void SetPeriodMs(int period_ms);
 
   bool Available() const { return available_.load(); }
   // Alasan kegagalan / "ok" (login sekali + notifikasi UI).

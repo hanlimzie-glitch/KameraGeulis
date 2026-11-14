@@ -156,6 +156,10 @@ void SegProvider::Stop() {
   running_.store(false);
 }
 
+void SegProvider::SetPeriodMs(int period_ms) {
+  requested_period_ms_.store(std::clamp(period_ms, 200, 3000));
+}
+
 std::string SegProvider::LastError() const {
   std::lock_guard<std::mutex> lk(err_mu_);
   return last_error_;
