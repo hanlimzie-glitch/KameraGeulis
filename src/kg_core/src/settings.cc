@@ -1,7 +1,10 @@
 #include "kgcore/settings.h"
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <nlohmann/json.hpp>
@@ -12,6 +15,7 @@ using nlohmann::json;
 bool Settings::operator==(const Settings& o) const {
   auto feq = [](float a, float b) { return std::fabs(a - b) < 1e-6f; };
   return feq(smoothing, o.smoothing) && feq(whitening, o.whitening) &&
+         feq(chroma_retain, o.chroma_retain) &&
          feq(face_slim, o.face_slim) && feq(big_eyes, o.big_eyes) &&
          feq(lipstick, o.lipstick) && feq(blusher, o.blusher) &&
          mirror == o.mirror && virtual_camera == o.virtual_camera &&
@@ -54,6 +58,7 @@ bool Settings::FromJson(const std::string& text) {
   if (!j.is_object()) return false;
   smoothing = ClampUnit(j, "smoothing", smoothing);
   whitening = ClampUnit(j, "whitening", whitening);
+  chroma_retain = ClampUnit(j, "chroma_retain", chroma_retain);
   face_slim = ClampUnit(j, "face_slim", face_slim);
   big_eyes = ClampUnit(j, "big_eyes", big_eyes);
   lipstick = ClampUnit(j, "lipstick", lipstick);
@@ -75,6 +80,7 @@ std::string Settings::ToJson() const {
   json j;
   j["smoothing"] = smoothing;
   j["whitening"] = whitening;
+  j["chroma_retain"] = chroma_retain;
   j["face_slim"] = face_slim;
   j["big_eyes"] = big_eyes;
   j["lipstick"] = lipstick;
@@ -91,25 +97,74 @@ std::string Settings::ToJson() const {
   return j.dump(2);
 }
 
-bool Settings::Load(const std::string& path) {
+bool Settings::Load(const std::string& path, std::string* err) {
+  if (err) err->clear();
   std::ifstream in(path, std::ios::binary);
-  if (!in) return false;
+  if (!in) {
+    if (err) {
+      *err = "tidak bisa membuka " + path + " (" +
+             std::string(std::strerror(errno)) + ")";
+    }
+    return false;
+  }
   std::ostringstream ss;
   ss << in.rdbuf();
-  return FromJson(ss.str());
+  std::string text = ss.str();
+  try {
+    json j = json::parse(text);
+    if (!j.is_object()) {
+      if (err) *err = "JSON di " + path + " bukan object";
+      return false;
+    }
+  } catch (const std::exception& e) {
+    if (err) *err = "JSON tidak valid di " + path + ": " + e.what();
+    return false;
+  }
+  return FromJson(text);
 }
 
-bool Settings::Save(const std::string& path) const {
+bool Settings::Save(const std::string& path, std::string* err) const {
+  if (err) err->clear();
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  // Pastikan direktori tujuan ada (mis. %APPDATA%\KameraGeulis).
+  const fs::path p(path);
+  if (p.has_parent_path()) {
+    fs::create_directories(p.parent_path(), ec);
+    if (ec && !fs::is_directory(p.parent_path())) {
+      if (err)
+        *err = "gagal membuat direktori " + p.parent_path().string() + ": " +
+               ec.message();
+      return false;
+    }
+    ec.clear();
+  }
   const std::string tmp = path + ".tmp";
   {
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+    if (!out) {
+      if (err)
+        *err = "gagal menulis " + tmp + " (" + std::string(std::strerror(errno)) +
+               ")";
+      return false;
+    }
     out << ToJson();
-    if (!out.good()) return false;
+    out.flush();
+    if (!out.good()) {
+      if (err)
+        *err = "stream rusak saat menulis " + tmp + " (" +
+               std::string(std::strerror(errno)) + ")";
+      out.close();
+      std::remove(tmp.c_str());
+      return false;
+    }
   }
-  // Atomic-ish replace (best effort across platforms).
-  if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+  // Rename atomik menimpa tujuan (POSIX + Windows MoveFileEx REPLACE).
+  // std::rename C89 GAGAL bila tujuan sudah ada di Windows - itulah bug M2i.
+  fs::rename(tmp, path, ec);
+  if (ec) {
     std::remove(tmp.c_str());
+    if (err) *err = "rename " + tmp + " -> " + path + ": " + ec.message();
     return false;
   }
   return true;

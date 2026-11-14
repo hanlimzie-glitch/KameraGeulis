@@ -19,8 +19,12 @@
 namespace kgcore {
 
 struct SkinMaskConfig {
-  int feather_radius = 1;   // px di ruang mask (box blur per pass)
+  int feather_radius = 1;   // px di ruang mask - tepi LUAR wajah (box blur/pass)
   int feather_passes = 2;   // pass feather (2 pass ~ gaussian lembut)
+  // M2i (3c): feather LEBAR terpisah utk lubang fitur (mata/alis/bibir/
+  // lubang hidung) agar transisi di sekitar fitur tidak menghasilkan
+  // cincin; inti lubang tetap 0 (di-restore setelah blur).
+  int feature_feather_radius = 3;
   float temporal_alpha = 0.5f;  // EMA: bobot frame BARU (sisa ke frame lama)
   // Pagar adaptif YCbCr: elips di sekitar sampel pipi/dahi + band lebar
   // klasik sebagai sanity gate (Kovac-ish, dilebarkan agar tidak
@@ -107,6 +111,70 @@ int MaskDiffStats(const uint8_t* raw, const uint8_t* out, const uint8_t* mask,
 // Mask u8 -> PNG grayscale-RGBA berukuran penuh (untuk dump F5).
 void UpsampleMaskToGrayRgba(const uint8_t* mask, int mw, int mh, int w, int h,
                             uint8_t* rgba_out);
+
+// ---- M2i: komposit kecantikan (CPU - rumus IDENTIK dgn shader GPU) ----
+
+// YCbCr ruang-nyata (Cb/Cr berbasis 128, skala level 0..255).
+struct YCbCrF { float y = 0.0f, cb = 128.0f, cr = 128.0f; };
+inline YCbCrF RgbToYCbCrF(uint8_t r, uint8_t g, uint8_t b) {
+  const float y = 0.299f * r + 0.587f * g + 0.114f * b;
+  return {y, 128.0f + 0.564f * (static_cast<float>(b) - y),
+          128.0f + 0.713f * (static_cast<float>(r) - y)};
+}
+// Balik ke RGB; hasil di-clamp 0..255 (round).
+inline void YCbCrToRgb8(float y, float cb, float cr, uint8_t* rgb) {
+  const float r = y + 1.402f * (cr - 128.0f);
+  const float b = y + 1.772f * (cb - 128.0f);
+  const float g = (y - 0.299f * r - 0.114f * b) / 0.587f;
+  auto q = [](float v) {
+    v += 0.5f;
+    return static_cast<uint8_t>(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+  };
+  rgb[0] = q(r); rgb[1] = q(g); rgb[2] = q(b);
+}
+
+struct BeautyComposeConfig {
+  float smooth_amount = 0.18f;  // [0,1] bobot guided smoothing luma (preset M2i)
+  float chroma_retain = 0.80f;  // [0,1] retensi chroma MENTAH (1 = tanpa cast)
+  int smooth_radius = 8;        // px radius box utk statistik guided
+  float smooth_eps = 0.0015f;   // ambang var luma (0..1); besar = lebih halus
+};
+
+// Guided smoothing luma: Y' = mix(Y, a*Y + (1-a)*meanY, amount) dengan
+// a = var/(var+eps) (mean/var dari box blur radius); RGB baru = Y baru +
+// chroma asli. rgba_out harus berukuran sama.
+void SmoothLumaGuidedCpu(const uint8_t* rgba_in, int w, int h, int radius,
+                         float eps, float amount, uint8_t* rgba_out);
+
+// Komposit M2i (rumus identik shader GPU mask_blender):
+//  1) cand = beauty dgn Y diguided (radius/eps/amount dari cfg)
+//  2) mixed = mix(raw, cand, mask*gain)
+//  3) CbCr_out = lerp(CbCr(mixed), CbCr(raw), chroma_retain)  <- retensi
+//     chroma MENTAH (mencegah cast dingin/pink dari LUT whitening)
+//  4) out = YCbCr2Rgb(Y(mixed), CbCr_out); mask*gain == 0 -> out == raw
+//     BYTE-IDENTIK (syarat "luar mask tak berubah" dipertahankan).
+void ComposeBeautyRaw(const uint8_t* raw, const uint8_t* beauty,
+                      const uint8_t* mask, int mw, int mh, int w, int h,
+                      float gain, const BeautyComposeConfig& cfg, uint8_t* out);
+
+// Metrik M2i utk log F5 (butuh 4):
+//  - delta_luma / delta_chroma: rata-rata perubahan di MASK INTI
+//    (mask ter-erosi 2x dari ambang 200);
+//  - detail_ratio: rasio energi detail halus (high-pass luma, mean kuadrat)
+//    out/raw di mask inti (smoothing terukur);
+//  - edge_band_diff: mean |out-raw| RGB di pita tepi mask (transisi);
+//  - outside_diff: mean |out-raw| di luar mask (harus ~0).
+struct InMaskMetrics {
+  float delta_luma = 0.0f;
+  float delta_chroma = 0.0f;
+  float detail_ratio = 0.0f;
+  float edge_band_diff = 0.0f;
+  float outside_diff = 0.0f;
+  int core_n = 0, edge_n = 0, outside_n = 0;
+};
+void ComputeInMaskMetrics(const uint8_t* raw, const uint8_t* out,
+                          const uint8_t* mask, int mw, int mh, int w, int h,
+                          float gain, InMaskMetrics* m);
 
 // ---- Builder stateful (dipanggil per frame oleh BeautyPipeline) ----
 class SkinMaskBuilder {

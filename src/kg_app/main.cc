@@ -35,9 +35,9 @@
 #include "kgcore/png_write.h"
 #include "kgcore/reader_fallback.h"  // M2g: MfErrorName + WantsCameraBusyHint
 #include "mask_blender.h"  // M2h: stage blending mask kulit (GL aplikasi)
+#include "kgcore/skin_mask.h"  // M2i: BeautyComposeConfig + metrik F5
 #include "panel.h"
 #include "startup.h"
-#include "kgcore/skin_mask.h"  // M2h: komposit + statistik mask (uji Linux)
 
 namespace kg = kgcore;
 
@@ -71,6 +71,7 @@ std::string SettingsPath() {
 kg::Settings UiToSettings(const kg::AppUiState& ui) {
   kg::Settings s;
   s.smoothing = ui.smoothing; s.whitening = ui.whitening;
+  s.chroma_retain = ui.chroma_retain;
   s.face_slim = ui.face_slim; s.big_eyes = ui.big_eyes;
   s.lipstick = ui.lipstick; s.blusher = ui.blusher;
   s.mirror = ui.mirror; s.landmark_enabled = ui.landmark_enabled;
@@ -84,6 +85,7 @@ kg::Settings UiToSettings(const kg::AppUiState& ui) {
 
 void ApplySettingsToUi(const kg::Settings& s, kg::AppUiState& ui) {
   ui.smoothing = s.smoothing; ui.whitening = s.whitening;
+  ui.chroma_retain = s.chroma_retain;
   ui.face_slim = s.face_slim; ui.big_eyes = s.big_eyes;
   ui.lipstick = s.lipstick; ui.blusher = s.blusher;
   ui.mirror = s.mirror; ui.landmark_enabled = s.landmark_enabled;
@@ -137,7 +139,8 @@ std::string DebugDumpDir() {
 // rata-rata piksel LUAR mask (harus ~0 saat mode kulit aktif) & DALAM mask.
 // `raw` = salinan frame mentah TERAKHIR (disimpan walau F4 mati - butuh 4).
 void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
-                     bool pipeline_ok, bool skin_only) {
+                     bool pipeline_ok, bool skin_only, float smooth_amount,
+                     float chroma_retain) {
   const std::string dir = DebugDumpDir();
   if (dir.empty()) {
     kgcore::Log("app", "F5: APPDATA tidak tersedia - PNG TIDAK disimpan");
@@ -226,13 +229,28 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
                 "F5: selisih rata-rata LUAR mask = %.3f (harus mendekati 0), "
                 "DALAM mask = %.3f | gain=%.2f | mode=%s | mask %dx%d",
                 outside, inside, gain, mode, mb.w(), mb.h());
+    // M2i (4): metrik tambahan di mask INTI (ter-erosi) + pita tepi.
+    kgcore::InMaskMetrics met;
+    kgcore::ComputeInMaskMetrics(cmp_raw, cmp_out, mb.mask().data(), mb.w(),
+                                 mb.h(), w, h, gain, &met);
+    kgcore::Log("app",
+                "F5 metrik M2i [%s]: delta luma inti = %+.1f | delta chroma inti = %.1f | "
+                "rasio detail halus = %.3f | diff pita tepi = %.1f | "
+                "n core=%d tepi=%d luar=%d",
+                mode, met.delta_luma, met.delta_chroma, met.detail_ratio,
+                met.edge_band_diff, met.core_n, met.edge_n, met.outside_n);
   };
   // --- out_*.png ---
   if (skin_only && mask_ok && !raw_rgba.empty() && raw_w == w && raw_h == h) {
     // Komposit CPU dengan rumus identik shader GPU (tampilan di layar).
     std::vector<uint8_t> mixed(raw_rgba.size());
-    kgcore::MixMasked(raw_rgba.data(), out, mb.mask().data(), mb.w(), mb.h(), w,
-                      h, gain, mixed.data());
+    // M2i (3)+(4): komposit CPU dgn rumus identik shader GPU - guided
+    // smoothing luma + retensi chroma mentah (anti cast) + mix mask.
+    kgcore::BeautyComposeConfig bcfg;
+    bcfg.smooth_amount = smooth_amount;
+    bcfg.chroma_retain = chroma_retain;
+    kgcore::ComposeBeautyRaw(raw_rgba.data(), out, mb.mask().data(), mb.w(),
+                             mb.h(), w, h, gain, bcfg, mixed.data());
     const std::string path = dir + "\\out_" + stamp + ".png";
     if (kgcore::WritePngRgba(path.c_str(), mixed.data(), w, h)) {
       kgcore::Log("app",
@@ -448,7 +466,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       kg::Settings dev;
       dev.Load(settings_path);
       dev.camera_device = ui.camera_device;
-      dev.Save(settings_path);
+      std::string dev_err;
+      if (!dev.Save(settings_path, &dev_err)) {
+        kgcore::Log("app", "settings: GAGAL menyimpan perangkat awal - %s",
+                    dev_err.c_str());
+      }
     }
     // M2f: "OK" TIDAK dicetak di sini - hanya setelah reader jadi + frame
     // pertama diterima (lihat log "MF capture start: OK" dari thread capture).
@@ -514,6 +536,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   bool frame_is_synthetic = false; // frame iterasi ini bukan dari kamera
   bool preview_show_blend = false; // preview menampilkan tex_out blender
   bool blender_warned = false;     // warning shader sudah sekali
+  // M2i (1): swa-uji blend GL (sekali per sesi) + flag jalur lama.
+  bool s_selftest_done = false;
+  int s_blend_frames = 0;
+  bool s_blend_logged_first = false;
+  const bool force_no_mask_gl = args.no_mask_gl;
   int dark_streak = 0;             // detik berturut gambar nyaris hitam
   bool dark_hint_shown = false;
 
@@ -570,12 +597,14 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     // ---- settings action requests (from the panel, previous frame) ----
     if (ui.request_save_settings) {
       settings = UiToSettings(ui);
-      if (settings.Save(settings_path)) {
+      std::string save_err;
+      if (settings.Save(settings_path, &save_err)) {
         ui.notice = kg::Strings::Instance().Get("presets.saved");
         ui.notice_is_error = false;
       } else {
         ui.notice = kg::Strings::Instance().Get("presets.save_failed");
         ui.notice_is_error = true;
+        kgcore::Log("app", "settings: GAGAL menyimpan - %s", save_err.c_str());
       }
       ui.request_save_settings = false;
     }
@@ -640,16 +669,24 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
           kg::Settings dev;
           dev.Load(settings_path);  // pertahankan nilai lain; default bila hilang
           dev.camera_device = ui.camera_device;
-          if (dev.Save(settings_path)) {
+          std::string save_err;
+          if (dev.Save(settings_path, &save_err)) {
             kgcore::Log("app",
                         "settings: perangkat kamera terakhir (index %d) disimpan sebagai default",
                         ui.camera_device);
+            // M2i (2): perangkat BERUBAH -> notifikasi "nyaris hitam" dicabut.
+            if (ui.notice == kg::Strings::Instance().Get("camera.black_frames"))
+              ui.notice.clear();
           } else {
             kgcore::Log("app",
-                        "settings: GAGAL menyimpan perangkat kamera (index %d)",
-                        ui.camera_device);
+                        "settings: GAGAL menyimpan perangkat kamera (index %d) - %s",
+                        ui.camera_device, save_err.c_str());
           }
         }
+        // M2i (1): apply baru -> swa-uji blend dijalankan ulang.
+        s_selftest_done = false;
+        s_blend_frames = 0;
+        s_blend_logged_first = false;
         ui.status_message =
             camera_started ? "Membuka kamera (menunggu frame pertama)..."
                            : kg::Strings::Instance().Get("camera.apply_failed");
@@ -787,11 +824,17 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         // mask*gain); tanpa wajah gain->0 (fade ke raw, bukan frame penuh).
         bool blended = false;
         const kg::SkinMaskBuilder& mb = pipeline->MaskBuilder();
+        // M2i (1): `--no-mask-gl` / swa-uji gagal (blender.disabled) -> jalur
+        // blend dimatikan; F4 tetap mentah (lihat blok want_raw).
         if (ui.skin_only && out_w == frame.width && out_h == frame.height &&
-            !blender.init_failed) {
-          blended = blender.Blend(pipeline->InputRGBA(), frame.width, frame.height,
-                                  out, mb.mask().data(), mb.w(), mb.h(),
-                                  pipeline->Tracker().Gain(), ui.show_mask);
+            !blender.init_failed && !force_no_mask_gl && !blender.disabled) {
+          kgcore::BeautyComposeConfig bcfg;
+          bcfg.smooth_amount = ui.smoothing;
+          bcfg.chroma_retain = ui.chroma_retain;
+          blended = blender.Blend(bcfg, pipeline->InputRGBA(), frame.width,
+                                  frame.height, out, mb.mask().data(), mb.w(),
+                                  mb.h(), pipeline->Tracker().Gain(),
+                                  ui.show_mask);
           if (!blended && blender.init_failed && !blender_warned) {
             blender_warned = true;
             kgcore::Log("app",
@@ -804,6 +847,53 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         }
         if (blended) {
           preview_show_blend = true;  // digambar dari tex_out blender (F6 juga)
+          ++s_blend_frames;
+          if (!s_blend_logged_first) {
+            s_blend_logged_first = true;
+            kgcore::Log("blend",
+                        "aktif pertama: tex_out=%u %dx%d has_stats=%d",
+                        blender.tex_out, blender.out_w, blender.out_h,
+                        blender.has_stats ? 1 : 0);
+          }
+          // M2i (1) swa-uji: setelah ~30 frame, luma keluaran vs mentah.
+          if (!s_selftest_done && s_blend_frames >= 30) {
+            s_selftest_done = true;
+            float out_y = 0.0f;
+            double raw_sum = 0.0;
+            long raw_n = 0;
+            // InputRGBA() = buffer RGBA mentah (row-packed w*4); dimensi sama
+            // dengan out_* (syarat blend: out_w == frame.width).
+            const uint8_t* raw_rgba_ptr = pipeline->InputRGBA();
+            if (raw_rgba_ptr) {
+              for (int yy = 0; yy < out_h; yy += 4) {
+                const uint8_t* row =
+                    raw_rgba_ptr + static_cast<size_t>(yy) * out_w * 4;
+                for (int xx = 0; xx < out_w; xx += 4) {
+                  const uint8_t* px = row + static_cast<size_t>(xx) * 4;
+                  raw_sum += 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2];
+                  ++raw_n;
+                }
+              }
+            }
+            const float raw_y =
+                raw_n ? static_cast<float>(raw_sum / raw_n) : 0.0f;
+            if (blender.ReadOutputLuma(&out_y)) {
+              if (raw_y >= 40.0f && out_y < raw_y * 0.10f) {
+                blender.disabled = true;
+                kgcore::Log("blend",
+                            "SWA-UJI GAGAL: luma keluaran %.1f jauh di bawah mentah %.1f -> kembali ke jalur sebelum M2h",
+                            out_y, raw_y);
+                ui.notice =
+                    "Preview blend GL hitam - kembali ke jalur lama. Lihat log (tag blend).";
+                ui.notice_is_error = true;
+              } else {
+                kgcore::Log("blend", "SWA-UJI OK: luma keluaran %.1f vs mentah %.1f",
+                            out_y, raw_y);
+              }
+            } else {
+              kgcore::Log("blend", "swa-uji dilewati (readback keluaran gagal)");
+            }
+          }
         } else {
           preview.Upload(out, out_w, out_h, ui.mirror, /*src_is_bgra=*/false);
           preview_show_blend = false;
@@ -856,7 +946,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // M2h: pakai salinan frame mentah TERAKHIR (walau F4 mati / frame ini
       // sintetis), dan komposit out lewat mask + statistik luar/dalam mask.
       DumpDebugFrames(last_camera_raw_valid ? &last_camera_raw : nullptr,
-                      pipeline.get(), pipeline_ok, ui.skin_only);
+                      pipeline.get(), pipeline_ok, ui.skin_only, ui.smoothing,
+                      ui.chroma_retain);
     }
 
     // Mode kamera aktual (read-back) untuk tab Info (requirement 5).
@@ -898,6 +989,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                           cst.mean_luma, dark_streak);
             }
           } else {
+            if (dark_streak >= 3) {
+              // M2i (2): luma pulih -> notifikasi "nyaris hitam" dicabut.
+              if (ui.notice == kg::Strings::Instance().Get("camera.black_frames"))
+                ui.notice.clear();
+            }
             dark_streak = 0;
             dark_hint_shown = false;
           }
@@ -906,7 +1002,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             "diag",
             "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
             "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
-            "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d",
+            "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
+            "blend=%u %dx%d%s",
             static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
             static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
             cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
@@ -916,7 +1013,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             static_cast<unsigned long long>(uploaded_raw), static_cast<unsigned>(last_gl_err),
             static_cast<unsigned>(gl_err_count), preview.tex, preview.w, preview.h,
             static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
-            pipeline_ok ? 1 : 0);
+            pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
+            blender.disabled ? " (OFF)" : ""),
       } else {
         kgcore::Log("diag",
                     "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "

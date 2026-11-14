@@ -260,3 +260,117 @@ TEST_CASE("skin mask builder: wajah hilang -> mask TIDAK diubah (gain yang fade)
   REQUIRE_FALSE(b.has_face());
   REQUIRE(std::memcmp(before.data(), b.mask().data(), before.size()) == 0);
 }
+
+// ============================ M2i (uji Linux) ============================
+
+TEST_CASE("M2i: transfer chroma - retain=1 mempertahankan chroma MENTAH") {
+  const int w = 32, h = 32;
+  std::vector<uint8_t> raw(static_cast<size_t>(w) * h * 4);
+  std::vector<uint8_t> beauty(raw.size());
+  std::vector<uint8_t> out(raw.size());
+  std::vector<uint8_t> mask(static_cast<size_t>(w) * h, 255);
+  // raw: kulit sedikit jenuh; beauty: lebih terang (efek LUT whitening).
+  // Dipilih agar kombinasi Y tinggi + chroma mentah tetap dalam gamut
+  // (di luar gamut clamp R/G/B - efek clamp diuji terpisah oleh toleransi).
+  for (size_t i = 0; i < raw.size(); i += 4) {
+    raw[i] = 190; raw[i + 1] = 155; raw[i + 2] = 125; raw[i + 3] = 255;
+    beauty[i] = 235; beauty[i + 1] = 225; beauty[i + 2] = 215;
+    beauty[i + 3] = 255;
+  }
+  BeautyComposeConfig cfg;
+  cfg.smooth_amount = 0.0f;  // pisahkan efek chroma dari smoothing
+
+  // retain=1: CbCr keluaran == CbCr MENTAH (Y tetap dari beauty/bright).
+  cfg.chroma_retain = 1.0f;
+  ComposeBeautyRaw(raw.data(), beauty.data(), mask.data(), w, h, w, h, 1.0f,
+                   cfg, out.data());
+  double max_dcb = 0.0, max_dcr = 0.0;
+  for (size_t i = 0; i < raw.size(); i += 4) {
+    const YCbCrF o = RgbToYCbCrF(out[i], out[i + 1], out[i + 2]);
+    const YCbCrF r = RgbToYCbCrF(raw[i], raw[i + 1], raw[i + 2]);
+    max_dcb = std::max(max_dcb, static_cast<double>(std::fabs(o.cb - r.cb)));
+    max_dcr = std::max(max_dcr, static_cast<double>(std::fabs(o.cr - r.cr)));
+  }
+  REQUIRE(max_dcb <= 1.5);
+  REQUIRE(max_dcr <= 1.5);
+  // Luma tetap terang (Y dari beauty, bukan raw).
+  const YCbCrF o0 = RgbToYCbCrF(out[0], out[1], out[2]);
+  REQUIRE(o0.y > 210.0f);
+
+  // retain=0: chroma mengikuti beauty (m=1, amount=0 -> cand == beauty).
+  cfg.chroma_retain = 0.0f;
+  ComposeBeautyRaw(raw.data(), beauty.data(), mask.data(), w, h, w, h, 1.0f,
+                   cfg, out.data());
+  const YCbCrF o1 = RgbToYCbCrF(out[0], out[1], out[2]);
+  const YCbCrF b1 = RgbToYCbCrF(beauty[0], beauty[1], beauty[2]);
+  REQUIRE(std::fabs(o1.cb - b1.cb) <= 1.5f);
+  REQUIRE(std::fabs(o1.cr - b1.cr) <= 1.5f);
+
+  // mask=0 -> keluaran byte-identik dengan raw (syarat luar mask).
+  std::fill(mask.begin(), mask.end(), uint8_t{0});
+  ComposeBeautyRaw(raw.data(), beauty.data(), mask.data(), w, h, w, h, 1.0f,
+                   cfg, out.data());
+  REQUIRE(std::memcmp(raw.data(), out.data(), raw.size()) == 0);
+}
+
+TEST_CASE("M2i: rasio detail halus turun >=15% pada kekuatan default") {
+  const int w = 64, h = 64;
+  std::vector<uint8_t> raw(static_cast<size_t>(w) * h * 4);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const int n = ((x + y) & 1) ? 8 : -8;  // noise checker halus
+      uint8_t* p = raw.data() + (static_cast<size_t>(y) * w + x) * 4;
+      p[0] = static_cast<uint8_t>(200 + n);
+      p[1] = static_cast<uint8_t>(150 + n);
+      p[2] = static_cast<uint8_t>(120 + n);
+      p[3] = 255;
+    }
+  }
+  std::vector<uint8_t> beauty = raw;  // detail kasar = yang harus ditekan
+  std::vector<uint8_t> out(raw.size());
+  std::vector<uint8_t> mask(static_cast<size_t>(w) * h, 255);
+  const BeautyComposeConfig cfg;  // default M2i: amount 0.18 (natural)
+  ComposeBeautyRaw(raw.data(), beauty.data(), mask.data(), w, h, w, h, 1.0f,
+                   cfg, out.data());
+  InMaskMetrics met;
+  ComputeInMaskMetrics(raw.data(), out.data(), mask.data(), w, h, w, h, 1.0f,
+                       &met);
+  REQUIRE(met.core_n > 100);
+  // Energi detail halus (mask inti, ter-erosi) turun minimal 15%.
+  REQUIRE(met.detail_ratio <= 0.85f);
+}
+
+TEST_CASE("M2i: feather per region - inti lubang keras 0, radius fitur melebar") {
+  const int fw = 192, fh = 192;
+  const int mw = 96, mh = 96;
+  LandmarkSet lm = MakeSyntheticFace();
+  std::vector<uint8_t> rgba = MakeFaceRgba(fw, fh);
+
+  SkinMaskBuilder b1;
+  b1.Configure(mw, mh);  // feather fitur default (r=3)
+  REQUIRE(b1.Update(lm, true, rgba.data(), fw, fh, fw * 4));
+  const std::vector<uint8_t> m1 = b1.mask();
+
+  SkinMaskConfig cfg_b;
+  cfg_b.feature_feather_radius = 6;  // lebih lebar dari default 3
+  SkinMaskBuilder b2;
+  b2.Configure(mw, mh, cfg_b);
+  REQUIRE(b2.Update(lm, true, rgba.data(), fw, fh, fw * 4));
+  const std::vector<uint8_t> m2 = b2.mask();
+
+  // Inti mata KERAS 0 pada keduanya (restore setelah feather lebar).
+  REQUIRE(WindowMean(m1, mw, mh, 0.67f, 0.42f, 0.015f) == 0.0f);
+  REQUIRE(WindowMean(m2, mw, mh, 0.67f, 0.42f, 0.015f) == 0.0f);
+
+  // Titik ~8px di luar cincin mata kanan (u=0.8125, v=0.42): radius fitur 3
+  // tidak sampai (support ~2r=6px) -> mask penuh; radius 6 sampai -> mask
+  // lebih rendah (ramp melebar) - membuktikan feather fitur TERPISAH.
+  const int px = 78, py = 40;  // 78/96 = 0.8125 (masih di dalam oval)
+  REQUIRE(m1[static_cast<size_t>(py) * mw + px] > 120);
+  REQUIRE(m2[static_cast<size_t>(py) * mw + px] <
+          m1[static_cast<size_t>(py) * mw + px]);
+
+  // Tepi LUAR (pipi jauh dari fitur) tidak dipengaruhi radius fitur.
+  REQUIRE(std::fabs(WindowMean(m1, mw, mh, 0.17f, 0.55f, 0.03f) -
+                    WindowMean(m2, mw, mh, 0.17f, 0.55f, 0.03f)) < 1.0f);
+}

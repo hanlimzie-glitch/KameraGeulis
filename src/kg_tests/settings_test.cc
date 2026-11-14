@@ -11,8 +11,10 @@ static std::string TempPath() {
 
 TEST_CASE("default settings are sensible") {
   kgcore::Settings s;
-  REQUIRE(s.smoothing == 0.35f);
-  REQUIRE(s.whitening == 0.25f);
+  // M2i: default diturunkan ke nilai Natural (lebih natural).
+  REQUIRE(s.smoothing == 0.18f);
+  REQUIRE(s.whitening == 0.06f);
+  REQUIRE(s.chroma_retain == 0.8f);
   REQUIRE(s.mirror);
   REQUIRE_FALSE(s.virtual_camera);
   REQUIRE(s.language == "id");
@@ -22,6 +24,7 @@ TEST_CASE("default settings are sensible") {
 TEST_CASE("settings round-trip through JSON") {
   kgcore::Settings a;
   a.smoothing = 0.8f; a.whitening = 0.1f; a.face_slim = 0.5f;
+  a.chroma_retain = 0.55f;
   a.big_eyes = 0.25f; a.lipstick = 0.6f; a.blusher = 0.4f;
   a.mirror = false; a.virtual_camera = true; a.preset = "Glam";
   a.language = "en"; a.landmark_enabled = false;
@@ -95,4 +98,37 @@ TEST_CASE("camera fields clamp out-of-range and junk") {
   REQUIRE(s2.FromJson(R"({"camera_device": "x", "capture_fps": "30"})"));
   REQUIRE(s2.camera_device == 0);
   REQUIRE(s2.capture_fps == 30);
+}
+
+TEST_CASE("M2i: Save menimpa tujuan yang sudah ada + err menyebut penyebab") {
+  // Bug PC pengguna: save pertama OK, save berikutnya GAGAL di Windows
+  // (rename C89 tidak menimpa tujuan). std::filesystem::rename harus bisa.
+  kgcore::Settings a;
+  a.smoothing = 0.7f;
+  a.camera_device = 3;
+  const std::string path = TempPath();
+  REQUIRE(a.Save(path));          // tujuan belum ada
+  a.camera_device = 4;
+  REQUIRE(a.Save(path));          // tujuan SUDAH ADA -> wajib tetap OK
+  kgcore::Settings b;
+  REQUIRE(b.Load(path));
+  REQUIRE(b.camera_device == 4);
+  REQUIRE(b.smoothing == 0.7f);
+
+  // Load file korup: false + err memuat path (penyebab JSON).
+  {
+    std::ofstream o(path, std::ios::binary | std::ios::trunc);
+    o << "{ not json !!";
+  }
+  std::string err;
+  kgcore::Settings c;
+  REQUIRE_FALSE(c.Load(path, &err));
+  REQUIRE(err.find(path) != std::string::npos);
+
+  // Save ke direktori tak-valid (parent adalah FILE): false + err non-kosong.
+  std::string err2;
+  kgcore::Settings d;
+  REQUIRE_FALSE(d.Save(path + "/sub/x.json", &err2));
+  REQUIRE_FALSE(err2.empty());
+  std::remove(path.c_str());
 }

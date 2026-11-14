@@ -13,11 +13,14 @@ struct PresetDef {
   float whitening;     // [0,1]
 };
 
+// M2i (3d): nilai diturunkan agar default terlihat natural - smoothing kini
+// juga punya guided-filter sendiri (terukur), whitening cukup angkat luma
+// ringan (chroma dipertahankan oleh komposit M2i).
 inline constexpr PresetDef kPresets[] = {
-    {"Natural",   0.25f, 0.10f},
-    {"Soft",      0.45f, 0.20f},
-    {"Glam",      0.65f, 0.32f},
-    {"ClearSkin", 0.55f, 0.26f},
+    {"Natural",   0.18f, 0.06f},
+    {"Soft",      0.30f, 0.12f},
+    {"Glam",      0.48f, 0.20f},
+    {"ClearSkin", 0.38f, 0.15f},
 };
 
 // nullptr bila nama tidak dikenal. Nama "Custom" disengaja bukan preset.

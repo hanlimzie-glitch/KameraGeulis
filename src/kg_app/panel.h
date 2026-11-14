@@ -7,8 +7,9 @@ namespace kgcore {
 // camera fields mirror Settings; runtime-only fields are transient.
 struct AppUiState {
   // ---- persisted (mirror of Settings) ----
-  float smoothing = 0.35f;    // [0,1] - Haluskan Kulit
-  float whitening = 0.25f;    // [0,1] - Cerahkan Kulit
+  float smoothing = 0.18f;    // [0,1] - Haluskan Kulit (M2i: default natural)
+  float whitening = 0.06f;    // [0,1] - Cerahkan Kulit (M2i: default natural)
+  float chroma_retain = 0.8f; // [0,1] - M2i: retensi chroma mentah (anti cast)
   bool skin_only = true;      // M2h: efek hanya lewat mask kulit wajah (default ON)
   bool show_mask = false;     // M2h: F6 - overlay merah mask di preview
   float face_slim = 0.0f;     // [0,1] - disabled ("Segera hadir")
