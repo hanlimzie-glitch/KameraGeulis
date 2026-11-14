@@ -1014,7 +1014,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             static_cast<unsigned>(gl_err_count), preview.tex, preview.w, preview.h,
             static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
             pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
-            blender.disabled ? " (OFF)" : ""),
+            blender.disabled ? " (OFF)" : "");
       } else {
         kgcore::Log("diag",
                     "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
