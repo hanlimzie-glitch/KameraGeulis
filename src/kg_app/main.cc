@@ -33,6 +33,7 @@
 #include "kgcore/frame.h"
 #include "kgcore/frame_convert.h"
 #include "kgcore/png_write.h"
+#include "kgcore/reader_fallback.h"  // M2g: MfErrorName + WantsCameraBusyHint
 #include "panel.h"
 #include "startup.h"
 
@@ -558,18 +559,44 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       have_frame = true;
     }
 
-    // ---- M2f: status kamera jujur (hanya "streaming" setelah frame pertama) ----
+    // ---- M2f/M2g: status kamera jujur; M2g: kode AWAL + TERAKHIR siklus ----
     if (!safe) {
       const kg::CameraCapture::CaptureStatus cs = capture.GetStatus();
       if (cs.streaming) {
         ui.camera_error_line.clear();
+        ui.camera_busy_hint = false;
         ui.camera_ok = true;
       } else if (cs.had_failure) {
-        char kbuf[160];
-        std::snprintf(kbuf, sizeof(kbuf), "Kamera gagal: 0x%08llX (mencoba lagi...)",
-                      static_cast<unsigned long long>(cs.hr & 0xFFFFFFFFull));
-        ui.camera_error_line = kbuf;
-        ui.status_message = kbuf;
+        // M2g requirement 4: satu baris berisi KODE TERAKHIR + KODE AWAL
+        // siklus, dengan nama simbolis bila dikenal (mis. MF_E_SHUTDOWN).
+        auto fmt_hr = [](int64_t hr, char* out, size_t n) {
+          const char* nm = kgcore::MfErrorName(hr);
+          if (nm[0])
+            std::snprintf(out, n, "0x%08llX (%s)",
+                          static_cast<unsigned long long>(hr & 0xFFFFFFFFull), nm);
+          else
+            std::snprintf(out, n, "0x%08llX",
+                          static_cast<unsigned long long>(hr & 0xFFFFFFFFull));
+        };
+        char last_buf[64];
+        fmt_hr(cs.hr, last_buf, sizeof(last_buf));
+        char kbuf[256];
+        if (cs.first_hr == 0 || cs.first_hr == cs.hr) {
+          std::snprintf(kbuf, sizeof(kbuf), "Kamera gagal: %s (mencoba lagi...)",
+                        last_buf);
+        } else {
+          char first_buf[64];
+          fmt_hr(cs.first_hr, first_buf, sizeof(first_buf));
+          std::snprintf(kbuf, sizeof(kbuf),
+                        "Kamera gagal: %s, awal %s (mencoba lagi...)",
+                        last_buf, first_buf);
+        }
+        ui.camera_error_line = kbuf;  // tab Kamera: baris merah lengkap
+        char sbuf[160];
+        std::snprintf(sbuf, sizeof(sbuf), "Kamera gagal: %s (mencoba lagi...)",
+                      last_buf);
+        ui.status_message = sbuf;  // baris status: versi pendek (satu baris)
+        ui.camera_busy_hint = kgcore::WantsCameraBusyHint(cs.hr);
         ui.camera_ok = false;
       }
     }

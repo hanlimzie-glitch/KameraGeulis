@@ -201,8 +201,15 @@ void DrawCameraTab(AppUiState& ui) {
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
                        ui.camera_error_line.c_str());
-    ImGui::TextWrapped(
-        "Kamera mungkin dipakai aplikasi lain atau akses kamera diblokir.");
+    // M2g requirement 4: petunjuk "dipakai aplikasi lain" HANYA untuk kode
+    // yang memang bermakna itu (E_ACCESSDENIED / ERROR_SHARING_VIOLATION) -
+    // jangan menyalahkan aplikasi lain bila sebabnya E_INVALIDARG/SHUTDOWN.
+    if (ui.camera_busy_hint) {
+      ImGui::TextWrapped(
+          "Kamera mungkin dipakai aplikasi lain atau akses kamera diblokir.");
+    } else {
+      ImGui::TextDisabled("Lihat log untuk rincian tiap percobaan tingkat.");
+    }
     if (ImGui::Button("Coba lagi")) {
       ui.request_camera_apply = true;
     }

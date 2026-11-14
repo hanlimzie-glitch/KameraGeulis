@@ -32,6 +32,7 @@ struct AppUiState {
   uint64_t debug_frame_requests = 0;  // M2e F5 / Info tab: simpan PNG debug
   std::string camera_mode_line;       // mode MF aktual (read-back) untuk UI
   std::string camera_error_line;       // M2f: "Kamera gagal: 0x... (mencoba lagi...)"
+  bool camera_busy_hint = false;        // M2g: true HANYA bila hr = aplikasi lain/izin
   bool camera_ok = false;
   int cam_width = 0, cam_height = 0;
   uint64_t frames_captured = 0;

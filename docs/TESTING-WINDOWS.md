@@ -1,6 +1,6 @@
 # TESTING-WINDOWS.md — Menguji KameraGeulis (artifact CI) di Windows nyata
 
-**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2f — regresi reader + guard F5, lihat §9):** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
+**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2g — objek source segar per tingkat, lihat §9):** (menunggu push) · **Run M2f:** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
 
 > Dokumen ini jujur: artifact **belum pernah dijalankan di Windows mana pun** sebelum kamu mengujinya.
 > Semua yang di bawah "Checklist" adalah hal yang **perlu kamu verifikasi**, bukan jaminan yang sudah hijau.
@@ -135,27 +135,34 @@ Setelah unzip ke D:\Project Camera (atau folder pilihanmu), cukup jalankan `Kame
    screenshot khusus mode F4.
 4. Bila crash: `crash-*.dmp` + pesan Event Viewer ID 1000 (§4).
 
-## 9. Artifact M2f — uji regresi kamera + F5 (setelah log-3.txt)
+## 9. Artifact M2g — kamera: objek source segar per tingkat (setelah log-4.txt)
 
-> Regresi yang kamu temukan: (1) reader `E_INVALIDARG 0x80070057` (atribut
-> M2e), (2) crash F5 `0xC0000005` sebelum frame pertama. Artifact M2f memakai
-> tangga fallback + guard readback. Langkah singkat:
+> M2f masih gagal di PC kamu (log-4): penuh `0x80070057` lalu basic & polos
+> `0xC00D3E85` (MF_E_SHUTDOWN) - percobaan pertama yang gagal mematikan
+> IMFMediaSource, tingkat berikutnya memakai objek mati yang sama. M2g membuat
+> objek BARU per tingkat + urutan baru **basic→polos→penuh**. Langkah singkat:
 
 1. **Normal:** jalankan `KameraGeulis.exe` — harap log memuat, berurutan:
    `MF capture start: ... -> thread dijalankan (menunggu reader + frame pertama)`,
-   `reader percobaan tingkat 2 (penuh...): hr=0x80070057 GAGAL` (atau OK),
-   `reader percobaan tingkat 1 (basic...): hr=0x00000000 OK`,
+   `device: N ditemukan, memakai index I "NAMA"`,
+   `ActivateObject (objek baru, tingkat 0): hr=0x00000000 OK`,
+   `reader percobaan tingkat 0 (basic...): hr=0x00000000 OK`,
+   `MF capture: tingkat dipakai = 0 (basic (ENABLE_VIDEO_PROCESSING))`,
    `MF capture start: OK - frame pertama diterima ...` — lalu preview hidup.
-   Bila gagal: baris merah **"Kamera gagal: 0x... (mencoba lagi...)"** di tab
-   Kamera + status bar, petunjuk pemakaian aplikasi lain, tombol **Coba lagi**,
-   dan ulang otomatis ber-jeda 1→2→4→8 detik.
+   Bila masih gagal: baris merah **"Kamera gagal: 0xTERAKHIR (NAMA), awal
+   0xAWAL (NAMA) (mencoba lagi...)"** di tab Kamera (kode AWAL = kegagahan
+   pertama siklus, kode TERAKHIR = sekarang; nama simbolis bila dikenal),
+   tombol **Coba lagi**, ulang otomatis ber-jeda 1→2→4→8 detik. Petunjuk
+   "dipakai aplikasi lain atau akses diblokir" hanya muncul bila kodenya
+   E_ACCESSDENIED/ERROR_SHARING_VIOLATION - untuk E_INVALIDARG/MF_E_SHUTDOWN
+   tampil "Lihat log untuk rincian tiap percobaan tingkat".
 2. **F4** (kamera jalan): preview mentah; bila kamera belum/bisa mati:
    overlay **"Tidak ada frame kamera"** (tidak diam lagi).
 3. **F5** tanpa frame: log `F5: tidak ada frame keluaran ... - dilewati`,
    **tidak crash**; dengan frame: PNG `raw_*` + `out_*` seperti M2e.
 4. **`KameraGeulis.exe --capture-plain`** (bila perlu): log menunjukkan
-   `flags: ... --capture-plain=1` dan hanya tingkat `(c) polos (tanpa atribut)`
-   yang dicoba.
+   `flags: ... --capture-plain=1` dan hanya tingkat `polos (tanpa atribut)`
+   yang dicoba (tanpa `ActivateObject (objek baru...` untuk tingkat lain).
 
 **Kirim balik:** `log.txt` lengkap (termasuk baris `reader percobaan tingkat`
 dan `MF capture start:`), screenshot tab Kamera bila gagal, PNG F5 bila ada.

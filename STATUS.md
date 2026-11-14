@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-14 (M2f — regresi pembaca source reader (E_INVALIDARG) diatasi tangga fallback + --capture-plain; crash F5 sebelum frame pertama di-guard; status kamera jujur + retry backoff + tombol Coba lagi; uji nyata PC pengguna menemukan 2 bug M2e)**
+Terakhir diperbarui: **2026-11-14 (M2g — objek IMFMediaSource BARU per tingkat tangga (bug MF_E_SHUTDOWN di log-4), urutan baru basic→polos→penuh, log device/ActivateObject/tingkat dipakai, UI kode awal+akhir + nama simbolis + petunjuk sibuk hanya untuk kode yang benar)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -17,6 +17,7 @@ Legenda status:
 | M2d | Crash startup gpupixel.dll 0x3968a (resource `res/` hilang → null lookup → AV di BeautyFaceUnitFilter::DoRender); models ikut artifact; urutan pencarian model disatukan (env → exe\\models → LOCALAPPDATA); PDB/MAP + symbolizer RVA di CI; safe-mode sepenuhnya inert (objek pipeline tidak dibuat; tab Kamera disabled; Terapkan/apply dimatikan); FPS render vs kamera dipisah label; vsync checkbox; resource hilang → efek GPU nonaktif + pesan UI (bukan crash) | ✅ (dikode) | ✅ (run terakhir hijau) | ⬜ | belum diverifikasi di PC pengguna — fix terbukti di level source + CI (artifact wajib berisi res/ & models/, `--selftest` hijau dari dist) |
 | M2e | Diagnosis preview hitam: konversi BGRA→RGBA (alpha 255) sebelum GPUPixel (akar masalah: upload BGRA gpupixel no-op di Windows), F4 frame mentah, F5 dump PNG, log diagnosis 1 detik, negosiasi mode kamera (advanced processing + read-back + reinit saat ukuran berubah), teks status frame | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika konversi/stride/flip/PNG **teruji di Linux**; preview hitam/putih, orientasi UV, F4/F5, dan scaling kamera **belum bisa diverifikasi tanpa GPU + webcam** (lihat "Batasan" + bagian M2e) |
 | M2f | Regresi M2e: tangga fallback atribut source reader (penuh→basic→polos, HRESULT per percobaan, --capture-plain), status kamera jujur ("OK" hanya setelah frame pertama), retry backoff 1-8 dtk + tombol "Coba lagi" + petunjuk, guard readback GPUPixel (crash F5 0xC0000005 sebelum frame pertama), overlay F4 "Tidak ada frame kamera" | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika tangga+guard teruji di Linux (7 TC baru); E_INVALIDARG 0x80070057 pengguna TIDAK terdokumentasi di docs MS (diperiksa: kedua atribut sah secara terpisah; kombinasi ditolak runtime di PC-nya) → tangga turun ke tingkat yang terbukti; regresi BGRA tetap teratasi (belum terbukti karena frame belum pernah masuk) |
+| M2g | Bug log-4: kegagalan membunuh IMFMediaSource lalu tingkat berikut = MF_E_SHUTDOWN → **objek source BARU per tingkat** (ActivateObject ulang), urutan tangga baru **basic→polos→penuh (paling akhir)**, log jumlah/nama device + hr ActivateObject per tingkat + tingkat dipakai, UI **kode awal+akhir** dengan nama simbolis, petunjuk "dipakai aplikasi lain" **hanya** E_ACCESSDENIED/ERROR_SHARING_VIOLATION, audit situs reuse MF lain | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | tiruan objek mati meniru log-4 persis (E_INVALIDARG lalu SHUTDOWN×2); test pola baru gagal di kode lama & lulus di kode baru; docs MS: default-nya reader me-Shutdown sumber saat di-release → mekanisme bug terkonfirmasi dokumentasi |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -46,6 +47,53 @@ Legenda status:
 3. Kamera virtual = softcam (DirectShow) + **registrasi admin 1×**; nama device dipatch jadi `KameraGeulis Camera`. Windows 10: hanya DShow consumers yang melihatnya; Win11 MF-only apps tidak.
 4. Setiap milestone CI meng-upload artifact (`kamerageulis-mN-windows-x64`; M1b: `kamerageulis-m1b-windows-x64`). Log mentah Actions tidak bisa diunduh dari sandbox — error MSVC dibaca via anotasi `::error::` (workflow memancarkannya; lihat `.github/workflows/build.yml` langkah Build).
 5. Detil fix CI selalu dianotasikan di commit message fix (analisis + akar masalah + perbaikan).
+
+## M2g — detail (2026-11-14)
+
+**Masalah (log-4.txt pengguna):** tiap siklus retry: tingkat 2 (penuh)
+`hr=0x80070057` (E_INVALIDARG) → tingkat 1 (basic) `hr=0xC00D3E85` → tingkat 0
+(polos) `hr=0xC00D3E85` = **MF_E_SHUTDOWN**. Dugaan user: percobaan pertama yang
+gagal mematikan IMFMediaSource, lalu tingkat berikutnya memakai objek yang sama
+yang sudah mati → konfigurasi M2d yang terbukti tak pernah jalan.
+
+**Verifikasi di kode:** benar - tangga M2f memakai SATU `source` untuk ketiga
+tingkat tanpa Shutdown di antaranya; `MFCreateSourceReaderFromMediaSource` yang
+gagal melepas reader internalnya, dan menurut dokumentasi Microsoft
+(`MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN`): *"By default, when the
+application releases the source reader, the source reader shuts down the media
+source"* → sumber ikut mati (MF_E_SHUTDOWN pada pemakaian ulang).
+
+**Perubahan (M2g):**
+1. **Objek source baru per tingkat** (`camera_capture.cc`): `activate` disimpan
+   lintas tingkat; tiap tingkat: Shutdown+release sisa objek gagal →
+   `ActivateObject` baru (hr dicetak per tingkat) → baru coba reader. Tidak ada
+   objek MF yang dipakai ulang setelah kegagalan.
+2. **Urutan tangga baru** (`DefaultReaderLadder`): **basic (M2d) → polos →
+   penuh (usaha terakhir)** - konfigurasi terbukti dicoba pertama pada objek
+   segar. `--capture-plain` tetap hanya polos.
+3. **Log perangkat vs reader terpisah:** `device: N ditemukan, memakai index I
+   "NAMA"`, `ActivateObject (objek baru, tingkat X): hr=...`,
+   `reader percobaan tingkat X ...`, `MF capture: tingkat dipakai = X (...)`.
+4. **UI:** baris merah `Kamera gagal: 0xTERAKHIR (NAMA), awal 0xAWAL (NAMA)
+   (mencoba lagi...)`; nama simbolis via `MfErrorName()` (E_INVALIDARG, E_FAIL,
+   E_ACCESSDENIED, ERROR_SHARING_VIOLATION, ERROR_NOT_FOUND, MF_E_SHUTDOWN);
+   petunjuk "dipakai aplikasi lain atau akses diblokir" **hanya** untuk
+   E_ACCESSDENIED (izin diblokir) dan ERROR_SHARING_VIOLATION (dipakai proses
+   lain) - MF tidak mendokumentasikan HRESULT khusus "kamera dipakai aplikasi
+   lain". Untuk E_INVALIDARG/MF_E_SHUTDOWN tampil baris netral "Lihat log…".
+5. **Uji Linux (68 TC / 8666 asersi):** pabrik tiruan objek yang MATI setelah
+   kegagalan - pola lama (urutan lama + reuse) mereproduksi log-4 persis
+   (E_INVALIDARG, SHUTDOWN, SHUTDOWN → -1); pola baru (urutan M2g + objek
+   segar) → basic sukses 1 percobaan (test ini GAGAL bila dijalankan terhadap
+   kode lama); + tes `MfErrorName`/`WantsCameraBusyHint`.
+6. **Audit reuse MF lain:** Coba lagi/apply = `Stop()`+`Start()` (siklus segar
+   penuh) OK; `EnumerateModes` = source+reader sendiri, gagal → Shutdown OK;
+   reinit perubahan ukuran = hanya pipeline GPUPixel, MF tak disentuh OK.
+   Satu-satunya situs reuse = tangga (diperbaiki).
+
+**Belum terverifikasi (jujur):** perilaku Windows asli (aktivasi ulang per
+tingkat) belum diuji di PC pengguna - hanya tiruan Linux; E_INVALIDARG penuh
+masih bisa muncul di tingkat TERAKHIR (memang usaha terakhir).
 
 ## M2f — detail (2026-11-14)
 

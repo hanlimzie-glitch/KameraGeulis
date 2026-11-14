@@ -272,6 +272,7 @@ bool CameraCapture::Start(int device_index, int width, int height, int fps,
   open_attempt_.store(0);
   open_failure_count_.store(0);
   last_open_hr_.store(0);
+  first_open_hr_.store(0);
   running_.store(true);
   thread_ = std::thread(&CameraCapture::CaptureThread, this, device_index, width,
                         height, fps);
@@ -285,6 +286,7 @@ CameraCapture::CaptureStatus CameraCapture::GetStatus() const {
   st.failure_count = open_failure_count_.load();
   st.had_failure = st.failure_count > 0;
   st.hr = last_open_hr_.load();
+  st.first_hr = first_open_hr_.load();
   st.attempt = open_attempt_.load();
   return st;
 }
@@ -319,6 +321,7 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
   if (!mf.ok) {
     open_failure_count_.fetch_add(1);
     last_open_hr_.store(static_cast<int64_t>(0x80004005));  // E_FAIL
+    first_open_hr_.store(static_cast<int64_t>(0x80004005));
     SetError("MFStartup failed - kamera tidak bisa dimulai");
     running_.store(false);
     return;
@@ -335,6 +338,8 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
     const unsigned attempt = open_attempt_.fetch_add(1) + 1;
     IMFSourceReader* reader = nullptr;
     IMFMediaSource* source = nullptr;
+    IMFActivate* activate = nullptr;   // disimpan lintas tingkat (M2g)
+    const char* last_stage = nullptr;  // tahap kegagalan terakhir di ladder
     int used_level = -1;
     int64_t fail_hr = 0;
     const char* fail_stage = nullptr;
@@ -366,14 +371,14 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
         release_devices();
         break;
       }
-      HRESULT hr = devices[device_index]->ActivateObject(IID_PPV_ARGS(&source));
-      if (FAILED(hr)) {
-        fail_hr = static_cast<int64_t>(static_cast<uint32_t>(hr));
-        fail_stage = "ActivateObject";
-        release_devices();
-        break;
-      }
-      release_devices();  // source sudah dibawa keluar; activate boleh lepas
+      // M2g requirement 3: jumlah device + nama dipakai dicatat di sini agar
+      // masalah PERANGKAT terlihat terpisah dari masalah READER. ActivateObject
+      // dipindah ke dalam ladder - setiap tingkat membuat objek source BARU.
+      activate = devices[device_index];
+      activate->AddRef();
+      Log(kTag, "device: %u ditemukan, memakai index %d \"%s\"", device_count,
+          device_index, FriendlyName(activate).c_str());
+      release_devices();  // semua (terpilih sudah dipegang ref sendiri)
 
       // ---- tangga fallback atribut reader (M2f requirement 1) ----
       size_t ladder_n = 0;
@@ -385,15 +390,38 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
       } else {
         ladder = DefaultReaderLadder(&ladder_n);
       }
+      // M2g requirement 1: objek IMFMediaSource BARU untuk SETIAP tingkat.
+      // Pembuatan reader yang gagal me-release reader internalnya, dan "by
+      // default ... the source reader shuts down the media source" (docs MS)
+      // -> sumber mati (MF_E_SHUTDOWN) bila dipakai ulang. Jadi: matikan sisa
+      // objek gagal, ActivateObject baru, baru coba reader di tingkat ini.
       used_level = RunReaderFallbackLadder(
           ladder, ladder_n,
           [&](int level, int64_t* lhr) -> bool {
+            last_stage = "MFCreateSourceReaderFromMediaSource";
+            if (source) {  // pertahanan: jangan pernah memakai ulang objek gagal
+              source->Shutdown();
+              SafeRelease(source);
+            }
+            const HRESULT hr_act = activate->ActivateObject(IID_PPV_ARGS(&source));
+            Log(kTag, "ActivateObject (objek baru, tingkat %d): hr=0x%08llX %s",
+                level, static_cast<unsigned long long>(
+                           static_cast<uint32_t>(hr_act)),
+                SUCCEEDED(hr_act) ? "OK" : "GAGAL");
+            if (FAILED(hr_act)) {
+              last_stage = "ActivateObject";
+              *lhr = static_cast<int64_t>(static_cast<uint32_t>(hr_act));
+              SafeRelease(source);
+              return false;
+            }
             IMFAttributes* attrs = nullptr;
             if (level != kReaderPlain) {
               const HRESULT hr_a =
                   MFCreateAttributes(&attrs, level == kReaderFull ? 2 : 1);
               if (FAILED(hr_a)) {
                 *lhr = static_cast<int64_t>(static_cast<uint32_t>(hr_a));
+                source->Shutdown();
+                SafeRelease(source);
                 return false;
               }
               attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
@@ -406,18 +434,31 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
                 MFCreateSourceReaderFromMediaSource(source, attrs, &reader);
             SafeRelease(attrs);
             *lhr = static_cast<int64_t>(static_cast<uint32_t>(hr_r));
-            return SUCCEEDED(hr_r);
+            if (FAILED(hr_r)) {
+              // Objek ini sudah mati/mati-matian setelah kegagalan reader
+              // (lihat catatan di atas) - buang sekarang, jangan dipakai lagi.
+              source->Shutdown();
+              SafeRelease(source);
+              return false;
+            }
+            return true;
           },
           [&](int level, int64_t lhr, bool ok) {
+            if (!ok && last_stage && std::strcmp(last_stage, "ActivateObject") == 0) {
+              return;  // hr ActivateObject sudah dicetak di barisnya sendiri
+            }
             Log(kTag, "reader percobaan tingkat %d (%s): hr=0x%08llX %s", level,
                 ReaderLevelName(level), static_cast<unsigned long long>(lhr),
                 ok ? "OK" : "GAGAL");
           },
           &fail_hr);
+      SafeRelease(activate);  // ladder selesai; source (bila sukses) dipegang sendiri
       if (used_level < 0) {
-        fail_stage = "MFCreateSourceReaderFromMediaSource";  // hr terakhir di fail_hr
+        fail_stage = last_stage ? last_stage : "MFCreateSourceReaderFromMediaSource";
         break;
       }
+      Log(kTag, "MF capture: tingkat dipakai = %d (%s)", used_level,
+          ReaderLevelName(used_level));
 
       // ---- pilih mode output RGB32 (M2e, tanpa perubahan perilaku) ----
       if (req_width > 0 && req_height > 0) {
@@ -502,12 +543,17 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
     // ---- gagal buka: catat, backoff, ulangi ----
     if (!opened) {
       SafeRelease(reader);
+      SafeRelease(activate);  // bila jalur gagal sebelum ladder melepasnya
       if (source) {
         source->Shutdown();
         SafeRelease(source);
       }
       open_failure_count_.fetch_add(1);
       last_open_hr_.store(fail_hr);
+      {  // hr PERTAMA siklus ini (untuk UI: kode pertama -> terakhir)
+        int64_t expected = 0;
+        first_open_hr_.compare_exchange_strong(expected, fail_hr);
+      }
       const int wait_ms = backoff_ms;
       SetError("MF capture start: GAGAL (%s) hr=0x%08llX - percobaan %u, mencoba lagi dalam %d ms",
                fail_stage ? fail_stage : "tidak diketahui",
@@ -618,6 +664,10 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
     if (read_failed) {
       open_failure_count_.fetch_add(1);
       last_open_hr_.store(read_hr);
+      {  // hr PERTAMA siklus ini
+        int64_t expected = 0;
+        first_open_hr_.compare_exchange_strong(expected, read_hr);
+      }
       const int wait_ms = backoff_ms;
       SetError("MF capture start: GAGAL (ReadSample) hr=0x%08llX - percobaan %u, mencoba lagi dalam %d ms",
                static_cast<unsigned long long>(read_hr), attempt, wait_ms);

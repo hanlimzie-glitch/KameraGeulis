@@ -4,9 +4,10 @@
 
 namespace kgcore {
 
-// M2f — tangga fallback pembuatan IMFSourceReader + guard readback GPUPixel.
-// Logika murni (diuji di Linux dengan pabrik palsu); pemakaian Windows ada di
-// kg_capture/camera_capture.cc dan kg_pipeline/beauty_pipeline.cc.
+// M2f/M2g — tangga fallback pembuatan IMFSourceReader + guard readback
+// GPUPixel + nama HRESULT untuk UI. Logika murni (diuji di Linux dengan
+// pabrik palsu); pemakaian Windows ada di kg_capture/camera_capture.cc dan
+// kg_pipeline/beauty_pipeline.cc.
 //
 // Dokumentasi Microsoft (repo MicrosoftDocs/win32, diakses 2026-11-14):
 //  - mf-source-reader-enable-video-processing.md:
@@ -28,9 +29,17 @@ constexpr int kReaderPlain = 0;  // (c) tanpa atribut
 constexpr int kReaderBasic = 1;  // (b) hanya ENABLE_VIDEO_PROCESSING (terbukti di PC pengguna, M2d)
 constexpr int kReaderFull = 2;   // (a) ENABLE_VIDEO_PROCESSING + ENABLE_ADVANCED_VIDEO_PROCESSING
 
-// Urutan default tangga: (a) -> (b) -> (c).
+// Urutan default tangga (M2g, diubah setelah bukti PC log-4.txt):
+//   (b) basic dulu - konfigurasi M2d yang TERBUKTI jalan di PC pengguna;
+//   (c) polos - fallback aman;
+//   (a) penuh - usaha terakhir saja (kombinasinya ditolak 0x80070057 di PC itu).
+// Alasan urutan lama (a) dulu berbahaya: pembuatan reader yang GAGAL masih
+// me-release reader internal-nya, dan "by default, when the application
+// releases the source reader, the source reader shuts down the media source"
+// (docs MS: MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN) -> sumber
+// mati -> tingkat berikutnya di objek yang sama = MF_E_SHUTDOWN.
 inline const int* DefaultReaderLadder(size_t* count) {
-  static const int kOrder[] = {kReaderFull, kReaderBasic, kReaderPlain};
+  static const int kOrder[] = {kReaderBasic, kReaderPlain, kReaderFull};
   *count = 3;
   return kOrder;
 }
@@ -76,5 +85,32 @@ inline const char* ReaderLevelName(int level) {
     case kReaderPlain: return "polos (tanpa atribut)";
     default: return "tidak dikenal";
   }
+}
+
+// Nama simbolis HRESULT yang kita kenal ("" = tidak dikenal). Hanya kode
+// yang yakin artinya - jangan menebak nama untuk kode yang tidak pasti.
+inline const char* MfErrorName(int64_t hr) {
+  switch (static_cast<uint32_t>(hr)) {
+    case 0x80070057u: return "E_INVALIDARG";
+    case 0x80004005u: return "E_FAIL";
+    case 0x80070005u: return "E_ACCESSDENIED";
+    case 0x80070020u: return "ERROR_SHARING_VIOLATION";
+    case 0x80070490u: return "ERROR_NOT_FOUND";
+    case 0xC00D3E85u: return "MF_E_SHUTDOWN";
+    default: return "";
+  }
+}
+
+// Petunjuk "dipakai aplikasi lain atau akses kamera diblokir" HANYA untuk kode
+// yang memang bermakna itu (M2g requirement 4):
+//  - E_ACCESSDENIED (0x80070005): akses ditolak - mis. izin privasi kamera
+//    Windows diblokir (dokumentasi Win32: "Access denied").
+//  - ERROR_SHARING_VIOLATION (0x80070020): sumber daya dipakai proses lain
+//    (dokumentasi Win32: sharing violation).
+// MF tidak mendokumentasikan HRESULT khusus "kamera dipakai aplikasi lain";
+// kode lain (E_INVALIDARG, MF_E_SHUTDOWN, ...) TIDAK menampilkan petunjuk ini.
+inline bool WantsCameraBusyHint(int64_t hr) {
+  const uint32_t c = static_cast<uint32_t>(hr);
+  return c == 0x80070005u || c == 0x80070020u;
 }
 }  // namespace kgcore

@@ -59,6 +59,7 @@ class CameraCapture {
     bool streaming = false;      // reader jadi DAN frame pertama sudah masuk
     bool had_failure = false;    // minimal satu percobaan gagal sejauh ini
     int64_t hr = 0;              // hr kegagalan terakhir (0 bila belum ada)
+    int64_t first_hr = 0;        // hr kegagalan PERTAMA siklus ini (M2g UI)
     unsigned attempt = 0;        // jumlah percobaan buka
     unsigned failure_count = 0;  // jumlah kegagalan
   };
@@ -102,7 +103,8 @@ class CameraCapture {
   std::atomic<bool> first_frame_seen_{false};
   std::atomic<uint32_t> open_attempt_{0};
   std::atomic<uint32_t> open_failure_count_{0};
-  std::atomic<int64_t> last_open_hr_{0};  // 0 = belum ada kegagalan
+  std::atomic<int64_t> last_open_hr_{0};   // 0 = belum ada kegagalan
+  std::atomic<int64_t> first_open_hr_{0};  // hr pertama sejak Start (M2g)
   bool plain_attrs_ = false;              // --capture-plain (dibaca thread)
 
   mutable std::mutex error_mutex_;
