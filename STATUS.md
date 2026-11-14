@@ -1,6 +1,6 @@
 # STATUS.md — KameraGeulis (jujur, diperbarui per milestone)
 
-Terakhir diperbarui: **2026-11-14 (M2h — mask kulit wajah dari landmark 468: efek Haluskan/Cerahkan hanya di kulit (fade tanpa wajah), checkbox + F6 overlay mask, F5 simpan raw/out/mask + statistik luar/dalam mask; audit source: BeautyFaceUnitFilter gpupixel memang TANPA mask; M2g TERBUKTI di PC nyata - kamera hidup 1920x1080, mesh 4.9ms, render 9.3ms)**
+Terakhir diperbarui: **2026-11-14 (M2i — perbaikan uji-PC M2h: preview hitam (MIN_FILTER tekstur output), settings.json rename-Windows, komposit chroma-preserving + guided smoothing terukur, feather per-region, log F5 metrik inti, flag --no-mask-gl, swa-uji otomatis); M2h — mask kulit wajah dari landmark 468: efek Haluskan/Cerahkan hanya di kulit (fade tanpa wajah), checkbox + F6 overlay mask, F5 simpan raw/out/mask + statistik luar/dalam mask; audit source: BeautyFaceUnitFilter gpupixel memang TANPA mask; M2g TERBUKTI di PC nyata - kamera hidup 1920x1080, mesh 4.9ms, render 9.3ms)**
 Legenda status:
 - ✅ selesai & diverifikasi di lingkungan yang bisa kami akses
 - 🔨 sedang/selesai dikerjakan, **belum** diverifikasi di Windows nyata
@@ -19,6 +19,7 @@ Legenda status:
 | M2f | Regresi M2e: tangga fallback atribut source reader (penuh→basic→polos, HRESULT per percobaan, --capture-plain), status kamera jujur ("OK" hanya setelah frame pertama), retry backoff 1-8 dtk + tombol "Coba lagi" + petunjuk, guard readback GPUPixel (crash F5 0xC0000005 sebelum frame pertama), overlay F4 "Tidak ada frame kamera" | ✅ (dikode) | ⬜ (CI dijalankan setelah push) | ⬜ | logika tangga+guard teruji di Linux (7 TC baru); E_INVALIDARG 0x80070057 pengguna TIDAK terdokumentasi di docs MS (diperiksa: kedua atribut sah secara terpisah; kombinasi ditolak runtime di PC-nya) → tangga turun ke tingkat yang terbukti; regresi BGRA tetap teratasi (belum terbukti karena frame belum pernah masuk) |
 | M2g | Bug log-4: kegagalan membunuh IMFMediaSource lalu tingkat berikut = MF_E_SHUTDOWN → **objek source BARU per tingkat** (ActivateObject ulang), urutan tangga baru **basic→polos→penuh (paling akhir)**, log jumlah/nama device + hr ActivateObject per tingkat + tingkat dipakai, UI **kode awal+akhir** dengan nama simbolis, petunjuk "dipakai aplikasi lain" **hanya** E_ACCESSDENIED/ERROR_SHARING_VIOLATION, audit situs reuse MF lain | ✅ (dikode) | ✅ [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) sukses | ⬜ | tiruan objek mati meniru log-4 persis (E_INVALIDARG lalu SHUTDOWN×2); test pola baru gagal di kode lama & lulus di kode baru; docs MS: default-nya reader me-Shutdown sumber saat di-release → mekanisme bug terkonfirmasi dokumentasi |
 | M2h | Mask kulit per frame (oval FACEMESH_FACE_OVAL dikurangi mata/alis/bibir/lubang hidung + probabilitas warna YCbCr adaptif dari pipi/dahi via landmark, feather + temporal EMA, resolusi 1/4); komposit `mix(raw,beauty,mask*gain)` lewat shader GL aplikasi (tanpa menambal gpupixel); fade ke 0 saat wajah hilang; checkbox "Terapkan hanya pada kulit wajah" (default ON) di tab Kulit; F6 overlay merah mask; F5 selalu raw+out+mask PNG + log selisih luar/dalam mask; simpan perangkat kamera terakhir + petunjuk frame hampir hitam + penghitung sent≤recv; kerusakan lama (tangga/guard F5/BGRA/F4) dipertahankan | ✅ (dikode) | ✅ [43572859909](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43572859909) sukses | ⬜ | uji Linux 79 TC/9604 asersi (rasterisasi, pengurangan fitur, feather, blending piksel LUAR mask identik, builder E2E wajah sintetis); visual GPU/webcam BELUM terverifikasi - menunggu uji PC pengguna |
+| M2i | Perbaikan hasil uji PC M2h: (1) **preview hitam mode skin-only** - `TEXTURE_MIN/MAG_FILTER` tekstur output blender dieksplisitkan (default `NEAREST_MIPMAP_LINEAR` tanpa mipmap = tekstur INCOMPLETE = hitam tanpa glGetError), log init blender (kompilasi/link/FBO/id tekstur) + `glGetError` per tahap + **swa-uji luma keluaran vs mentah setelah ~30 frame** (keluaran gelap -> otomatis jalur lama + notice + log) + flag `--no-mask-gl`; (2) **settings.json** - `std::filesystem::rename` (menimpa tujuan; rename C89 gagal di Windows = 'GAGAL menyimpan perangkat' + default DroidCam), `create_directories`, `Save/Load(path, err)` log penyebab pasti; notifikasi 'nyaris hitam' dicabut saat ganti perangkat/luma pulih; (3) **kualitas**: komposit baru - guided smoothing luma sendiri (box blur H/V statistik Y,Y^2, radius 8, eps 0.0015) + **retensi chroma MENTAH** `chroma_retain` (default 0.8; Y dari beauty, CbCr diarahkan ke raw -> tanpa cast dingin/pink), preset default diturunkan (Natural 0.18/0.06 dst), feather **per-region** (tepi luar r=1, lubang fitur r=3 + inti keras 0 -> cincin merah muka hilang); (4) **log F5 metrik M2i**: delta luma/chroma mask inti (eroded), rasio energi detail halus, diff pita tepi, diff luar; (5) **uji Linux**: transfer chroma (retain 0/1 + mask byte-identik), rasio detail ≤0.85 pada kekuatan default, feather per-region + save timpa-ulang + err penyebab | ✅ (dikode) | ⏳ CI | ⬜ | uji Linux **83 TC/9629 asersi**; **klaim visual/preview BELUM - menunggu uji PC pengguna (log tag `blend`, screenshot, F5 metrik)** |
 | M3 | Virtual camera (softcam) | ⬜ | ⬜ | ⬜ | butuh admin 1×; belum diuji OBS/Discord |
 | M4 | Makeup/reshape kustom + preset + settings | ⬜ | ⬜ | ⬜ | **Efek landmark nonaktif di Windows (default)** — Mars-Face Windows tidak tersedia publik |
 | M5 | Perf pass, README, installer notes | ⬜ | ⬜ | ⬜ | — |
@@ -263,3 +264,43 @@ atau buka https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43184507
 - **THIRD_PARTY.md**: model ONNX tetap Apache-2.0 via konversi tf2onnx; tidak di-commit. `canonical_face_model.obj` hanya referensi analisis offline (tidak di-commit).
 - **CI**: run 43174282611 hijau (Linux: kg_core tests; Windows: configure mengunduh ONNX Runtime 1.31.1 win-x64 dengan pin SHA-256, build+link sukses termasuk `onnxruntime.dll`, ctest hijau, artifact `kamerageulis-m1b-windows-x64` 6,8 MB). Catatan: run sebelumnya (43173665412) Linux Test exit 8 tanpa ::error::; Test step kini meng-annotasi output ctest; kegagalan itu tidak berulang dan tidak terdiagnosis (jeda infra?) — dicatat jujur.
 - **Belum terverifikasi**: provider di Windows nyata (belum pernah jalan), performa CPU, kualitas ROI/rotasi pada wajah nyata, download first-run dari `models-v1` di mesin bersih (release sudah berisi aset sejak 2026-11-12 — workflow Models run 43179962364), artifact vcam (belum ada).
+
+
+## M2i — detail (2026-11-14)
+
+**Masalah dari uji PC pengguna (log-6.txt, Screenshot_5.png, mask/out/raw_150212):**
+1. **REGRESI kritis:** preview HITAM di mode skin-only; `diag tex=1 0x0`
+   (preview tex tidak pernah di-upload saat blend = desain), `upload: out=482`
+   naik, `glErr total=0`, tanpa log init; centang OFF -> preview NORMAL.
+2. **Settings:** `GAGAL menyimpan perangkat (index 2)` dua kali -> default
+   DroidCam tiap start; notice 'nyaris hitam' tidak hilang saat ganti kamera.
+3. **Kualitas terukur:** luma +19, chroma +20%, B/G 0.96->1.00 (cast pink),
+   energi detail 0.574->0.585 (smoothing nyaris mati), cincin di sekitar
+   mata/alis.
+
+**Akar masalah (verifikasi kode):** `tex_out` dibuat `glTexImage2D` tanpa
+`glTexParameteri(GL_TEXTURE_MIN_FILTER)` -> default GL `NEAREST_MIPMAP_LINEAR`
++ tanpa mipmap -> tekstur INCOMPLETE -> semua sampling = hitam, `glGetError`
+tetap 0 (kelengkapan tekstur bukan error GL). `Settings::Save` memakai
+`std::rename` C - di Windows tujuan yang SUDAH ADA membuat rename gagal
+(EEXIST) sehingga simpan pertama (tujuan belum ada) OK lalu semua berikutnya
+gagal.
+
+**Perubahan:** lihat baris tabel M2i. Detail teknis:
+- `mask_blender.h`: parameter filter tekstur eksplisit (akar fix), log init
+  kompilasi/link/FBO/id tekstur, `glGetError` per tahap, pass statistik
+  RGBA16F (encode Y,Y^2 -> box H -> box V) dengan fallback bila FBO 16F tidak
+  lengkap, shader final baru (guided + retensi chroma + mask mix + debug F6),
+  `ReadOutputLuma` utk swa-uji, flag `disabled`.
+- `skin_mask.{h,cc}`: `BeautyComposeConfig`, `SmoothLumaGuidedCpu`,
+  `ComposeBeautyRaw` (CPU identik utk F5), `ComputeInMaskMetrics`, feather
+  per-region (fitur terpisah, inti di-restore 0).
+- `settings.{h,cc}`: field `chroma_retain`, Save/Load dengan `err`, mkdir,
+  `std::filesystem::rename`.
+- preset: Natural 0.18/0.06, Soft 0.30/0.12, Glam 0.48/0.20, ClearSkin
+  0.38/0.15 (settings/panel default ikut).
+- `startup`: `--no-mask-gl`; `main.cc`: flag + swa-uji + notice-clear + F5
+  komposit/mertik baru + diag `blend=%u %dx%d`.
+
+**Jujur:** semua klaim GL/preview/visual di atas menunggu uji PC pengguna;
+Linux hanya membuktikan matematika komposit/mask/metrik (83 TC).

@@ -204,3 +204,37 @@ F5, dan catatan bila dinding/baju masih ikut terpengaruh.
 **Jujur:** shader blend/visual mask/GPU belum terverifikasi di sandbox (Linux
 hanya menguji matematika mask/komposit - 79 TC); klaim "berhasil" menunggu
 uji PC ini.
+
+
+## 11. Artifact M2i — perbaikan hasil uji M2h (setelah log-6/Screenshot_5)
+
+**Kirim balik M2i:** `log.txt` lengkap (tag `blend`, baris `SWA-UJI ...`,
+`settings:`, `F5 metrik M2i ...`), screenshot preview (normal + F6), ketiga PNG
+F5, dan catatan apakah warna kulit sudah natural (tanpa cast pink/dingin).
+
+1. **Preview (REGRESI 1 - paling penting):** jalankan exe normal (checkbox
+   kulit ON). Preview TIDAK boleh hitam; log memuat (sekali):
+   `blend: init OK: prog(...) ... tex out=...` lalu
+   `blend: aktif pertama: tex_out=... WxH` dan ~30 frame kemudian
+   `blend: SWA-UJI OK: luma keluaran ... vs mentah ...`.
+   Bila hitam lagi: kirim log - seharusnya sekarang ada `SWA-UJI GAGAL` atau
+   baris `glGetError`/`GAGAL kompilasi`/`GAGAL link`/`FBO ... tidak lengkap`
+   yang menyebab pastinya. `diag` memuat `blend=<tex> WxH` (bukan 0x0 lagi
+   bila blend aktif).
+2. **Jalur lama:** `--no-mask-gl` pada shortcut -> preview kembali seperti
+   sebelum M2h (efek seluruh frame). F4 tetap mentah di semua mode.
+3. **Settings:** ganti kamera + Terapkan dua kali berturut -> TIDAK ada
+   `GAGAL menyimpan`; log menampilkan penyebab bila gagal (path + pesan);
+   restart -> kamera terpilih tetap. Notice 'nyaris hitam' hilang saat ganti
+   kamera atau gambar pulih.
+4. **Kualitas:** wajah terlihat natural - kulit lebih halus TERUKUR (bukan
+   sekadar putih), tanpa cast pink/dingin, TANPA cincin di sekitar mata/alis.
+   F5 -> baris `F5 metrik M2i [skin-only]: delta luma inti = ... | delta
+   chroma inti = ... | rasio detail halus = ... | diff pita tepi = ... | n
+   core=...` - rasio detail halus harus < 0.85 (turun >=15%), selisih luar
+   tetap ~0.
+5. **Preset:** bila settings.json lama tersimpan, slider menimpa nilai
+   preset - tekan preset **Natural** (0.18/0.06) untuk nilai default baru.
+
+**Jujur:** 83 TC Linux membuktikan rumus (chroma/feather/detail/metrik/save),
+bukan tampilan; klaim "berhasil" menunggu bukti PC ini.
