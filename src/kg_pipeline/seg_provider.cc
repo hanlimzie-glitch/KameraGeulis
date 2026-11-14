@@ -302,7 +302,7 @@ bool SegProvider::EnsureModelLoaded_() {
         return false;
       const std::string expected = ReadShaManifest(p + L".sha256");
       if (expected.empty()) return true;  // tanpa manifest: terima (warn di bawah)
-      return FilesEqualHash(p, expected);
+      return FilesEqualHash(p, expected.c_str());
     };
     std::wstring dir;
     if (present_verified(env)) dir = env;
@@ -372,7 +372,7 @@ bool SegProvider::EnsureModelFile_(const std::wstring& dir,
           ok ? actual.c_str() : "?");
       return true;
     }
-    if (FilesEqualHash(dest, expected)) return true;
+    if (FilesEqualHash(dest, expected.c_str())) return true;
     Log(kTag, "seg %ls tidak cocok manifest - unduh ulang", file_name);
     DeleteFileW(dest.c_str());
   }
@@ -385,7 +385,7 @@ bool SegProvider::EnsureModelFile_(const std::wstring& dir,
     dead_.store(true);
     return false;
   }
-  if (!expected.empty() && !FilesEqualHash(dest, expected)) {
+  if (!expected.empty() && !FilesEqualHash(dest, expected.c_str())) {
     std::lock_guard<std::mutex> lk(err_mu_);
     bool ok = false;
     const std::string actual = Sha256HexOfFile(dest, &ok);
