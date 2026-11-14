@@ -111,22 +111,23 @@ jobs:
           python -m tf2onnx.convert --tflite "$out/selfie_multiclass_256x256.tflite" \
             --output "$out/selfie_multiclass_256x256.onnx" --opset "$SEG_ONNX_OPSET"
 
-      - name: Assert conversion pins (drift = gagal, hash aktual dicetak)
+      - name: Write seg manifest + notice hash det/mesh (M2j)
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/models-out"
-          check() {
-            f="$1"; pin="$2"
-            actual=$(sha256sum "$out/$f" | cut -d' ' -f1)
-            if [ "$actual" != "$pin" ]; then
-              echo "::error title=ONNX SHA drift::$f actual=$actual pin=$pin — perbarui pin di workflow + ort_landmark_provider.cc/seg_provider.cc + docs secara sadar"
-              exit 1
-            fi
-            echo "$f OK $actual"
-          }
-          check face_detection_short_range.onnx "$DET_ONNX_SHA256"
-          check face_mesh.onnx "$MESH_ONNX_SHA256"
-          check selfie_multiclass_256x256.onnx "$SEG_ONNX_SHA256"
+          # Manifest SHA-256 utk model SEG: diunduh runtime/di-bundle artifact
+          # berdampingan dgn onnx → verifikasi integritas transport tanpa pin
+          # lintas-run (konversi tf2onnx TIDAK byte-reproducible antar image
+          # runner — terbukti 3 hash berbeda utk input sama; I/O verify lulus).
+          (cd "$out" && sha256sum selfie_multiclass_256x256.onnx > selfie_multiclass_256x256.onnx.sha256)
+          cat "$out/selfie_multiclass_256x256.onnx.sha256"
+          # det/mesh: TIDAK diunggah ulang (rilis menyimpan byte yang sudah
+          # dipin di ort_landmark_provider.cc/selftest.cc — mengunggah ulang
+          # = drift yang mematikan verifikasi runtime). Hash konversi hari ini
+          # dicetak sbg notice bila suatu saat perlu re-pin sadar.
+          det=$(sha256sum "$out/face_detection_short_range.onnx" | cut -d' ' -f1)
+          mesh=$(sha256sum "$out/face_mesh.onnx" | cut -d' ' -f1)
+          echo "::notice title=konversi det/mesh (tidak diunggah)::face_detection_short_range.onnx=$det face_mesh.onnx=$mesh (rilis tetap; pin saat ini det=$DET_ONNX_SHA256 mesh=$MESH_ONNX_SHA256)"
 
       - name: "Verify ONNX (onnxruntime: names, shapes, inference)"
         run: |
@@ -176,10 +177,11 @@ jobs:
               --title "models-v1" \
               --notes "Model ONNX ter-pin SHA-256 (BlazeFace short-range + FaceMesh 468) — dikonversi dari model MediaPipe Apache-2.0 via tf2onnx; lihat docs/LANDMARKS.md."
           fi
+          # M2j: HANYA seg (+manifest) yang diunggah; det/mesh yang sudah
+          # terverifikasi di rilis TIDAK ditimpa (stabilitas pin runtime).
           gh release upload models-v1 \
-            "$out/face_detection_short_range.onnx" \
-            "$out/face_mesh.onnx" \
             "$out/selfie_multiclass_256x256.onnx" \
+            "$out/selfie_multiclass_256x256.onnx.sha256" \
             --clobber --repo "$GITHUB_REPOSITORY"
 
       # NOTE: GitHub Actions logs are not reachable from every environment;

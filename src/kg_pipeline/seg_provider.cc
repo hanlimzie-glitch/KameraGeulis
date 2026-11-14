@@ -32,11 +32,13 @@ constexpr char kTag[] = "seg";
 //   selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite
 // SHA-256 TFLITE (diverifikasi di CI terhadap 4 sumber independen):
 //   c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
-// SHA-256 ONNX = keluaran CI Models 43590566734 (opset 17); workflow kini
-// menassert pin ini setiap konversi (drift = langkah CI gagal + hash aktual
-// dicetak) sehingga perubahan runner terlihat & disengaja.
+// M2j: verifikasi INTEGRITAS via manifest `*.onnx.sha256` yang diunggah
+// CI pada run yang sama (bukan pin lintas-run — konversi tf2onnx terbukti
+// tidak byte-reproducible antar image runner; lihat docs/LANDMARKS.md §2.3).
+// Tanpa manifest: file diterima dengan PERINGATAN + SHA dicatat; gerbang
+// semantik tetap ada (ORT load + cek bentuk keluaran [1,256,256,6]).
 constexpr wchar_t kSegFile[] = L"selfie_multiclass_256x256.onnx";
-constexpr char kSegOnnxSha256[] = "cdaf12e7d2681517c2619968ff573c258e4b772eb760b479147c3fed867df661";
+constexpr wchar_t kSegManifestFile[] = L"selfie_multiclass_256x256.onnx.sha256";
 constexpr wchar_t kDownloadBase[] = L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =
     L"/hanlimzie-glitch/KameraGeulis/releases/download/models-v1/";
@@ -102,8 +104,18 @@ bool FilesEqualHash(const std::wstring& path, const char* sha256_hex) {
   return actual == sha256_hex;
 }
 
-bool PinIsPlaceholder() {
-  return std::strncmp(kSegOnnxSha256, "TODO", 4) == 0;
+// Baca token pertama dari manifest SHA (hex 64) — "" bila tak terbaca.
+std::string ReadShaManifest(const std::wstring& path) {
+  std::ifstream in(path.c_str());
+  std::string tok;
+  if (!(in >> tok)) return {};
+  if (tok.size() != 64) return {};
+  for (char c : tok) {
+    const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                     (c >= 'A' && c <= 'F');
+    if (!hex) return {};
+  }
+  return tok;
 }
 
 bool EnsureDirectoryExists(const std::wstring& dir) {
@@ -283,13 +295,14 @@ bool SegProvider::EnsureModelLoaded_() {
     const std::wstring env = KgEnvModelsDirW();
     const std::wstring exe = KgExeModelsDirW();
     const std::wstring local = KgLocalModelsDirW();
-    auto present_verified = [](const std::wstring& dir) {
+    auto present_verified = [&](const std::wstring& dir) {
       if (dir.empty()) return false;
       const std::wstring p = dir + L"\\" + kSegFile;
       if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES)
         return false;
-      if (PinIsPlaceholder()) return true;  // belum dipin -> terima + nanti warn
-      return FilesEqualHash(p, kSegOnnxSha256);
+      const std::string expected = ReadShaManifest(p + L".sha256");
+      if (expected.empty()) return true;  // tanpa manifest: terima (warn di bawah)
+      return FilesEqualHash(p, expected);
     };
     std::wstring dir;
     if (present_verified(env)) dir = env;
@@ -309,7 +322,7 @@ bool SegProvider::EnsureModelLoaded_() {
       dead_.store(true);
       return false;
     }
-    if (!EnsureModelFile_(dir, kSegFile, kSegOnnxSha256)) {
+    if (!EnsureModelFile_(dir, kSegFile, nullptr)) {
       dead_.store(true);  // last_error_ sudah diisi
       return false;
     }
@@ -335,23 +348,36 @@ bool SegProvider::EnsureModelLoaded_() {
 bool SegProvider::EnsureModelFile_(const std::wstring& dir,
                                    const wchar_t* file_name,
                                    const char* sha256_hex) {
+  (void)sha256_hex;  // pin lintas-run TIDAK dipakai (lihat catatan di atas)
   const std::wstring dest = dir + L"\\" + file_name;
-  const bool pinned = !PinIsPlaceholder();
+  const std::wstring manifest = dest + L".sha256";
+  // 1) Manifest dari rilis (best-effort; berdampingan dgn file).
+  if (GetFileAttributesW(manifest.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    Log(kTag, "manifest %ls tidak ada - mengunduh dari rilis models-v1 ...",
+        kSegManifestFile);
+    DownloadFile_(kSegManifestFile, manifest);
+  }
+  const std::string expected = ReadShaManifest(manifest);
+  if (expected.empty()) {
+    Log(kTag,
+        "manifest SHA seg tidak tersedia - verifikasi memakai ukuran + "
+        "pemuatan ORT + cek bentuk (gerbang semantik)");
+  }
+  // 2) File sudah ada? cocokkan dgn manifest.
   if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
-    if (!pinned) {
+    if (expected.empty()) {
       bool ok = false;
       const std::string actual = Sha256HexOfFile(dest, &ok);
-      if (ok) {
-        Log(kTag,
-            "seg ONNX ada; SHA-256 (belum dipin - catat untuk STATUS): %s",
-            actual.c_str());
-      }
+      Log(kTag, "seg ONNX ada (tanpa manifest); SHA-256: %s",
+          ok ? actual.c_str() : "?");
       return true;
     }
-    if (FilesEqualHash(dest, sha256_hex)) return true;
-    Log(kTag, "seg %ls ada tapi SHA-256 mismatch — unduh ulang", file_name);
+    if (FilesEqualHash(dest, expected)) return true;
+    Log(kTag, "seg %ls tidak cocok manifest - unduh ulang", file_name);
+    DeleteFileW(dest.c_str());
   }
-  Log(kTag, "mengunduh %ls dari rilis models-v1 …", file_name);
+  // 3) Unduh lalu verifikasi thdp manifest.
+  Log(kTag, "mengunduh %ls dari rilis models-v1 ...", file_name);
   if (!DownloadFile_(file_name, dest)) {
     std::lock_guard<std::mutex> lk(err_mu_);
     last_error_ = std::string("unduh gagal untuk ") + WideToUtf8(file_name) +
@@ -359,23 +385,21 @@ bool SegProvider::EnsureModelFile_(const std::wstring& dir,
     dead_.store(true);
     return false;
   }
-  if (pinned && !FilesEqualHash(dest, sha256_hex)) {
+  if (!expected.empty() && !FilesEqualHash(dest, expected)) {
     std::lock_guard<std::mutex> lk(err_mu_);
     bool ok = false;
     const std::string actual = Sha256HexOfFile(dest, &ok);
-    last_error_ = "SHA-256 ONNX seg tidak cocok (dihitung: " +
+    last_error_ = "SHA-256 ONNX seg tidak cocok manifest (dihitung: " +
                   (ok ? actual : std::string("?")) + ")";
     DeleteFileW(dest.c_str());
     dead_.store(true);
     return false;
   }
-  if (!pinned) {
-    bool ok = false;
-    const std::string actual = Sha256HexOfFile(dest, &ok);
-    Log(kTag,
-        "seg ONNX terunduh; SHA-256 (BELUM DIPIN — perbarui kSegOnnxSha256): %s",
-        ok ? actual.c_str() : "?");
-  }
+  bool ok = false;
+  const std::string actual = Sha256HexOfFile(dest, &ok);
+  Log(kTag, "seg ONNX siap; SHA-256: %s%s", ok ? actual.c_str() : "?",
+      expected.empty() ? " (tanpa manifest - terima dgn peringatan)"
+                       : " (cocok manifest)");
   return true;
 }
 

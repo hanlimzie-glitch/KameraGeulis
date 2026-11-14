@@ -37,10 +37,12 @@ namespace {
 // Model provenance (docs/LANDMARKS.md §2.3) — must match the app provider pins.
 constexpr wchar_t kDetFile[] = L"face_detection_short_range.onnx";
 constexpr wchar_t kMeshFile[] = L"face_mesh.onnx";
+// M2j: pin dari rilis models-v1 saat ini (CI 43590566734; ukuran identik
+// dengan pin lama — byte berbeda, lihat docs/LANDMARKS.md §2.3 catatan).
 constexpr char kDetSha256[] =
-    "82ac962b24dfd78a5b6a3331e8c4091e377d699c6e4fdaca158fba03b5af8e3d";
+    "5ff2cd91827ab8a9fff56ed7f95854069d9d66cf5ec32ff4cdf6cd17ef48ef8e";
 constexpr char kMeshSha256[] =
-    "ac72f85b77368a2ee1d065257674cb25099699d98376685af549df50d6a40337";
+    "a17115cbad5fdcc7647cc0e4f5cf9178721cc2557bf8feda047f2d8b3832975a";
 constexpr uint64_t kDetBytes = 418502;
 constexpr uint64_t kMeshBytes = 2429059;
 

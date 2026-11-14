@@ -74,15 +74,25 @@ Model di-upload ke release **`models-v1`** (workflow create-if-missing; asset pu
 |---|---|---|
 | `face_detection_short_range.onnx` | npm face_detection (sha tflite `3bc1…` ✓) | `5ff2cd91827ab8a9fff56ed7f95854069d9d66cf5ec32ff4cdf6cd17ef48ef8e` (CI 43590566734; pin lama `82ac962b…` dari 43179962364 — byte berbeda karena runner image berubah, I/O verify tetap lulus) |
 | `face_mesh.onnx` | carve `face_landmark.tflite` `c603fa61…` ✓ | `a17115cbad5fdcc7647cc0e4f5cf9178721cc2557bf8feda047f2d8b3832975a` (CI 43590566734; pin lama `ac72f85b…`, idem) |
-| `selfie_multiclass_256x256.onnx` (M2j) | GCS resmi (tflite sha `c6748b12…` ✓) + tf2onnx **opset 17** | `cdaf12e7d2681517c2619968ff573c258e4b772eb760b479147c3fed867df661` (CI 43590566734; pin di `seg_provider.cc`) |
+| `selfie_multiclass_256x256.onnx` (M2j) | GCS resmi (tflite sha `c6748b12…` ✓) + tf2onnx **opset 17** | **manifest `selfie_multiclass_256x256.onnx.sha256`** diunggah bersama (CI 43590566734: `cdaf12e7d2681517c2619968ff573c258e4b772eb760b479147c3fed867df661`) — lihat catatan reproduktibilitas di bawah |
 
 **Catatan reproduktibilitas (jujur, M2j):** konversi tf2onnx terikat versi
 (tensorflow 2.17.1 / tf2onnx 1.17.0 / opset 15-17 / numpy<2), tetapi **byte
-ONNX bisa berbeda antar-image runner** (terbukti: run 43179962364 vs
-43590566734). Karena itu workflow kini **menassert** ketiga SHA pin setelah
-konversi (`PYTHONHASHSEED=0` diset) — drift = langkah CI gagal + hash aktual
-tercetak, lalu pin diperbarui **secara sadar** di `ort_landmark_provider.cc`,
-`seg_provider.cc`, dokumen ini, dan workflow (empat tempat disilangkan).
+ONNX TIDAK byte-reproducible antar-image runner** — terbukti 3 hash berbeda
+untuk input yang sama (`82ac962b…` → `5ff2cd91…` → `8c2e32dd…` utk det;
+`PYTHONHASHSEED=0` pun tidak menstabilkan; ukuran file identik → selisih
+metadata/urutan, I/O onnxruntime tetap lulus). Kebijakan M2j:
+
+- **det/mesh**: workflow **tidak lagi mengunggah ulang** ke rilis (byte di
+  rilis = `5ff2cd91…`/`a17115cb…` = pin di `ort_landmark_provider.cc` +
+  `selftest.cc` + baris tabel ini) — konversi tetap diverifikasi I/O tiap
+  run, hash dicetak sebagai notice bila suatu saat perlu re-pin sadar.
+- **seg**: integritas runtime memakai **manifest `*.onnx.sha256`** yang
+  diunggah CI pada run yang sama (dibundel di `dist\models\` + diunduh
+  berdampingan) — tahan terhadap unduhan rusak/parsial tanpa pin lintas-run;
+  tanpa manifest, runtime menerima file dengan peringatan + gerbang semantik
+  (ORT load + cek bentuk `[1,256,256,6]`) tetap berlaku.
+- Sumber `.tflite` tetap **di-assert SHA-256 di CI** (stabil, byte-pinned).
 
 I/O ONNX (diverifikasi dengan onnxruntime 1.31.1):
 - `face_detection_short_range.onnx`: input `input` `[1,128,128,3]` f32, range `[-1,1]` (letterbox, keep-aspect, zero border). Output `regressors` `[1,896,16]` (x,y,w,h + 6 keypoints ×2, ternormalisasi ke 128-px tensor), output `classificators` `[1,896,1]` (logit, apply sigmoid).

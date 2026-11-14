@@ -295,18 +295,23 @@ di komposit (identik GPU & CPU) →22% ≈ +6.6 luma inti, 100% ≈ +30; chroma
 retensi mentah dipertahankan (anti-cast). Target **rasio ≤0.85 pada default
 diukur di log F5** — angka final menunggu pengukuran PC (log tag `app` "F5 metrik").
 
-**Re-pin det/mesh (peristiwa jujur M2j):** run Models 43590566734 (2026-11-14)
-menghasilkan byte ONNX det/mesh **berbeda** dari run pertama 43179962364
-(versi paket terpin sama; kemungkinan besar perubahan image runner) — verifikasi
-I/O onnxruntime tetap lulus, tetapi rilis `models-v1` ikut ter-`--clobber`.
-Konsekuensi: pin lama (`82ac962b…`/`ac72f85b…`) tidak lagi cocok → smoke CI
-(selftest) gagal (exit 4) → **pin diperbarui** ke `5ff2cd91…`/`a17115cb…`
-(+ seg `cdaf12e7…`) di `ort_landmark_provider.cc`, `seg_provider.cc`,
-`docs/LANDMARKS.md`, dan workflow; workflow kini **menassert** ketiga pin
-(`PYTHONHASHSEED=0`) sehingga drift berikutnya = gagal CI dengan hash aktual
-tercetak (update pin = keputusan sadar, bukan diam-diam). PC pengguna yang
-sudah punya model lama akan mengunduh ulang sekali saat pin berubah (verifikasi
-ulang → cocok → lanjut; landmark tidak mati).
+**Re-pin det/mesh + desain manifest (peristiwa jujur M2j):** run Models
+43590566734 menghasilkan byte ONNX det/mesh **berbeda** dari run asli
+43179962364 (paket terpin sama) → rilis ikut ter-`--clobber` → smoke CI
+(selftest) gagal exit 4 (pin lama `82ac962b…`/`ac72f85b…`). Selidik lanjutan:
+run berikutnya menghasilkan hash **ketiga** berbeda lagi (`8c2e32dd…`) walau
+`PYTHONHASHSEED=0` → **konversi tf2onnx tidak byte-reproducible antar-image
+runner** (ukuran identik → selisih metadata/urutan; I/O verify tetap lulus).
+Kebijakan final: (1) pin det/mesh diperbarui ke byte rilis saat ini
+(`5ff2cd91…`/`a17115cb…`) di `ort_landmark_provider.cc` + `selftest.cc` +
+LANDMARKS; (2) workflow **tidak mengunggah ulang det/mesh** (rilis = sumber
+kebenaran yang stabil; hash konversi dicetak sebagai notice); (3) **seg**
+memakai **manifest `*.onnx.sha256`** diunggah pada run yang sama — runtime
+mengunduh/membacanya untuk verifikasi integritas (tanpa pin lintas-run),
+tanpa manifest → peringatan jujur + gerbang semantik ORT (load + bentuk
+`[1,256,256,6]`); (4) sumber tflite tetap di-assert SHA di CI. PC pengguna
+dengan model lama: saat pin det/mesh berubah, file lama gagal cocok → unduh
+ulang sekali dari rilis → cocok → lanjut (landmark tidak mati).
 
 **Uji Linux (data sintetis):** letterbox/unletterbox roundtrip + pad edge-replicate,
 normalisasi [-1,1], deteksi logit vs probabilitas + P_kulit=p2+p3 (clamp),

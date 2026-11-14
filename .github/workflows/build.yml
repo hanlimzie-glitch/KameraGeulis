@@ -137,6 +137,7 @@ jobs:
           gh release download models-v1 --repo hanlimzie-glitch/KameraGeulis `
             --pattern "face_detection_short_range.onnx" --pattern "face_mesh.onnx" `
             --pattern "selfie_multiclass_256x256.onnx" `
+            --pattern "selfie_multiclass_256x256.onnx.sha256" `
             --dir dist\models --clobber
           if ($LASTEXITCODE -ne 0) { throw "models-v1 download failed (exit $LASTEXITCODE)" }
           Write-Host "models copied into dist\models"
@@ -160,6 +161,7 @@ jobs:
             'dist\res\lookup_light.png','dist\res\lookup_custom.png','dist\res\mouth.png','dist\res\blusher.png',
             'dist\models\face_detection_short_range.onnx','dist\models\face_mesh.onnx',
             'dist\models\selfie_multiclass_256x256.onnx',
+            'dist\models\selfie_multiclass_256x256.onnx.sha256',
             'dist\gpupixel.pdb','dist\gpupixel.map')
           $missing = $required | Where-Object { -not (Test-Path $_) }
           if ($missing) {
