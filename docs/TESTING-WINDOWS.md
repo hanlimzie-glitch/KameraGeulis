@@ -1,6 +1,6 @@
 # TESTING-WINDOWS.md — Menguji KameraGeulis (artifact CI) di Windows nyata
 
-**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2h — mask kulit wajah, lihat §10):** (menunggu push) · **Run M2g:** [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) · **Run M2f:** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
+**Tanggal:** 2026-11-14 · **Artifact:** `kamerageulis-m2-windows-x64` · **Run terakhir (M2h — mask kulit wajah, lihat §10):** [43572859909](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43572859909) · **Run M2g:** [43566921708](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43566921708) · **Run M2f:** [43551626084](https://github.com/hanlimzie-glitch/KameraGeulis/actions/runs/43551626084) · **Kedaluwarsa:** 2026-11-28
 
 > Dokumen ini jujur: artifact **belum pernah dijalankan di Windows mana pun** sebelum kamu mengujinya.
 > Semua yang di bawah "Checklist" adalah hal yang **perlu kamu verifikasi**, bukan jaminan yang sudah hijau.
