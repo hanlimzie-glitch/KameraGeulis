@@ -461,6 +461,7 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
           ReaderLevelName(used_level));
 
       // ---- pilih mode output RGB32 (M2e, tanpa perubahan perilaku) ----
+      HRESULT hr = S_OK;  // (dulu diisi ActivateObject; kini hr per tingkat)
       if (req_width > 0 && req_height > 0) {
         hr = SelectRgb32OutputAt(reader, req_width, req_height, req_fps);
         if (FAILED(hr)) {
