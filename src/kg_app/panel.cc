@@ -193,6 +193,22 @@ void DrawCameraTab(AppUiState& ui) {
     cache.RefreshDevices();
     cache.RefreshModes(ui.camera_device);
   }
+
+  // M2f: status kamera jujur - kegagalan membuka reader (mis. 0x80070057)
+  // tampil di sini + tombol coba manual (ulang otomatis dengan backoff jalan
+  // terus di latar belakang).
+  if (!ui.camera_error_line.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                       ui.camera_error_line.c_str());
+    ImGui::TextWrapped(
+        "Kamera mungkin dipakai aplikasi lain atau akses kamera diblokir.");
+    if (ImGui::Button("Coba lagi")) {
+      ui.request_camera_apply = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(ulang otomatis aktif, jeda 1-8 detik)");
+  }
   ImGui::Separator();
   ImGui::Text("%s: %dx%d", s.Get("camera.current").c_str(), ui.cam_width, ui.cam_height);
   ImGui::Text("FPS render: %.1f", ui.fps);

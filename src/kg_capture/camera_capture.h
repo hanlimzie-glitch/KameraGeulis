@@ -44,9 +44,25 @@ class CameraCapture {
   // are > 0, requests that resolution (and fps, if > 0); falls back to the
   // camera's default RGB32 mode with a log line when the exact request is
   // rejected. Returns false and sets LastError() on failure.
-  bool Start(int device_index = 0, int width = 0, int height = 0, int fps = 0);
+  // M2f: `plain_attrs` = --capture-plain -> source reader TANPA atribut
+  // (tingkat (c) ladder) langsung dari awal. Reader creation di thread worker
+  // memakai tangga fallback (a)->(b)->(c) dan mengulang dengan backoff bila
+  // gagal; "OK" hanya dicetak setelah reader jadi + frame pertama diterima.
+  bool Start(int device_index = 0, int width = 0, int height = 0, int fps = 0,
+             bool plain_attrs = false);
   void Stop();
   bool Running() const { return running_.load(); }
+
+  // M2f status jujur untuk UI/log (snapshot atomik).
+  struct CaptureStatus {
+    bool thread_active = false;  // thread jalan (bisa sedang backoff)
+    bool streaming = false;      // reader jadi DAN frame pertama sudah masuk
+    bool had_failure = false;    // minimal satu percobaan gagal sejauh ini
+    int64_t hr = 0;              // hr kegagalan terakhir (0 bila belum ada)
+    unsigned attempt = 0;        // jumlah percobaan buka
+    unsigned failure_count = 0;  // jumlah kegagalan
+  };
+  CaptureStatus GetStatus() const;
 
   // Enumerates capture devices (video capture sources). Static so the
   // settings UI can populate pickers before any capture starts; cheap, but
@@ -81,6 +97,13 @@ class CameraCapture {
 
   mutable std::mutex stats_mutex_;
   CameraStats stats_;
+
+  // M2f: status buka-kamera untuk UI (atomik, tanpa lock).
+  std::atomic<bool> first_frame_seen_{false};
+  std::atomic<uint32_t> open_attempt_{0};
+  std::atomic<uint32_t> open_failure_count_{0};
+  std::atomic<int64_t> last_open_hr_{0};  // 0 = belum ada kegagalan
+  bool plain_attrs_ = false;              // --capture-plain (dibaca thread)
 
   mutable std::mutex error_mutex_;
   std::string last_error_;

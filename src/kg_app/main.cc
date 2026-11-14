@@ -180,10 +180,11 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
         kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
       }
     } else {
-      kgcore::Log("app", "F5: pipeline aktif tetapi belum menghasilkan keluaran");
+      kgcore::Log("app",
+                  "F5: tidak ada frame keluaran (pipeline belum pernah memproses frame) - dilewati");
     }
   } else {
-    kgcore::Log("app", "F5: pipeline nonaktif - frame keluaran tidak ada");
+    kgcore::Log("app", "F5: pipeline nonaktif - tidak ada frame keluaran");
   }
 }
 
@@ -369,10 +370,16 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   bool camera_started = false;
   if (!safe) {
     camera_started = capture.Start(ui.camera_device, ui.capture_width,
-                                   ui.capture_height, ui.capture_fps);
-    kgcore::Log("app", "MF capture start: device=%d %dx%d@%dfps -> %s", ui.camera_device,
-                ui.capture_width, ui.capture_height, ui.capture_fps,
-                camera_started ? "OK" : "GAGAL - memakai gradien sintetis");
+                                   ui.capture_height, ui.capture_fps,
+                                   args.capture_plain);
+    // M2f: "OK" TIDAK dicetak di sini - hanya setelah reader jadi + frame
+    // pertama diterima (lihat log "MF capture start: OK" dari thread capture).
+    kgcore::Log("app", "MF capture start: device=%d %dx%d@%dfps%s -> %s",
+                ui.camera_device, ui.capture_width, ui.capture_height,
+                ui.capture_fps, args.capture_plain ? " [--capture-plain]" : "",
+                camera_started
+                    ? "thread dijalankan (menunggu reader + frame pertama)"
+                    : "GAGAL (preflight) - memakai gradien sintetis");
   } else {
     kgcore::Log("app", "MF capture: dinonaktifkan (mode aman)");
   }
@@ -394,10 +401,10 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   ui.landmark_status = ui.landmark_available
                            ? kg::Strings::Instance().Get("landmark.active")
                            : kg::Strings::Instance().Get("landmark.inactive");
-  ui.status_message = safe
-                          ? "Mode aman (tanpa kamera/ORT/GPUPixel)"
-                          : (camera_started ? kg::Strings::Instance().Get("status.ready")
-                                            : kg::Strings::Instance().Get("status.no_camera"));
+  ui.status_message =
+      safe ? "Mode aman (tanpa kamera/ORT/GPUPixel)"
+           : (camera_started ? "Membuka kamera (menunggu frame pertama)..."
+                             : kg::Strings::Instance().Get("status.no_camera"));
 
   auto last_frame_time = clock_type::now();
   float fps_smooth = 0.0f;
@@ -508,13 +515,14 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       } else {
         capture.Stop();
         camera_started = capture.Start(ui.camera_device, ui.capture_width,
-                                       ui.capture_height, ui.capture_fps);
+                                       ui.capture_height, ui.capture_fps,
+                                       args.capture_plain);
         ui.camera_ok = camera_started;
         synthetic = !camera_started;
         ui.frames_captured = 0;
-        ui.status_message = camera_started
-                                ? kg::Strings::Instance().Get("camera.applied")
-                                : kg::Strings::Instance().Get("camera.apply_failed");
+        ui.status_message =
+            camera_started ? "Membuka kamera (menunggu frame pertama)..."
+                           : kg::Strings::Instance().Get("camera.apply_failed");
         if (!camera_started) {
           ui.notice = kg::Strings::Instance().Get("camera.apply_failed");
           ui.notice_is_error = true;
@@ -548,6 +556,22 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                         .count();
       frame = MakeSyntheticFrame(synthetic_w, synthetic_h, now_ms);
       have_frame = true;
+    }
+
+    // ---- M2f: status kamera jujur (hanya "streaming" setelah frame pertama) ----
+    if (!safe) {
+      const kg::CameraCapture::CaptureStatus cs = capture.GetStatus();
+      if (cs.streaming) {
+        ui.camera_error_line.clear();
+        ui.camera_ok = true;
+      } else if (cs.had_failure) {
+        char kbuf[160];
+        std::snprintf(kbuf, sizeof(kbuf), "Kamera gagal: 0x%08llX (mencoba lagi...)",
+                      static_cast<unsigned long long>(cs.hr & 0xFFFFFFFFull));
+        ui.camera_error_line = kbuf;
+        ui.status_message = kbuf;
+        ui.camera_ok = false;
+      }
     }
 
     // ---- M2e requirement 5: ukuran frame berubah di tengah jalan ----
@@ -747,9 +771,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(preview.tex)),
                      image_size, ImVec2(0, 0), ImVec2(1, 1));
         // Status overlay di sudut bawah kiri gambar.
-        if (cam_recv > 0 || pipe_out > 0 || ui.raw_preview) {
+        // M2f: F4 tanpa frame kamera wajib bicara ("Tidak ada frame kamera").
+        const bool f4_no_frame = ui.raw_preview && cam_recv == 0;
+        if (f4_no_frame || cam_recv > 0 || pipe_out > 0 || ui.raw_preview) {
           char line[192];
-          if (cam_recv > 0 || pipe_out > 0) {
+          if (f4_no_frame) {
+            std::snprintf(line, sizeof(line), "Tidak ada frame kamera");
+          } else if (cam_recv > 0 || pipe_out > 0) {
             std::snprintf(line, sizeof(line), "%s%s", ui.raw_preview ? "RAW (F4) | " : "",
                           fstatus);
           } else {
@@ -761,8 +789,12 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                           image_pos.y + image_size.y - ts.y - 12.0f);
           dl->AddRectFilled(sp, ImVec2(sp.x + ts.x + 12.0f, sp.y + ts.y + 8.0f),
                             IM_COL32(0, 0, 0, 160));
-          dl->AddText(ImVec2(sp.x + 6.0f, sp.y + 4.0f), IM_COL32_WHITE, line);
+          dl->AddText(ImVec2(sp.x + 6.0f, sp.y + 4.0f),
+                      f4_no_frame ? IM_COL32(255, 180, 80, 255) : IM_COL32_WHITE, line);
         }
+      } else if (ui.raw_preview && cam_recv == 0) {
+        // M2f: F4 aktif tapi belum ada frame kamera sama sekali.
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Tidak ada frame kamera");
       } else if (cam_recv == 0) {
         ImGui::TextUnformatted("Menunggu frame kamera...");
       } else {

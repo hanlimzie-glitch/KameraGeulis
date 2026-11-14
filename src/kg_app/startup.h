@@ -12,6 +12,7 @@ namespace kgcore {
 struct StartupArgs {
   bool safe = false;     // --safe:     window + UI only — no camera, no ORT, no GPUPixel
   bool selftest = false; // --selftest: headless DLL+ORT+model smoke test, exit code 0/non-0
+  bool capture_plain = false; // --capture-plain: source reader TANPA atribut (tingkat (c) M2f)
 };
 
 struct StartupPaths {

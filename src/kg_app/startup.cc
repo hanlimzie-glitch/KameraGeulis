@@ -200,6 +200,7 @@ StartupArgs ParseStartupArgs(const wchar_t* cmdline) {
   for (int i = 1; i < argc; ++i) {
     if (wcscmp(argv[i], L"--safe") == 0) args.safe = true;
     if (wcscmp(argv[i], L"--selftest") == 0) args.selftest = true;
+    if (wcscmp(argv[i], L"--capture-plain") == 0) args.capture_plain = true;
   }
   LocalFree(argv);
   return args;
@@ -229,7 +230,8 @@ void BeginFileLog(const StartupPaths& paths, const StartupArgs& args) {
   kgcore::Log("startup", "cmdline: %ls", GetCommandLineW());
   kgcore::Log("startup", "exe_dir: %ls", paths.exe_dir.c_str());
   kgcore::Log("startup", "log: %ls", paths.log_path.c_str());
-  kgcore::Log("startup", "flags: --safe=%d --selftest=%d", args.safe ? 1 : 0, args.selftest ? 1 : 0);
+  kgcore::Log("startup", "flags: --safe=%d --selftest=%d --capture-plain=%d",
+              args.safe ? 1 : 0, args.selftest ? 1 : 0, args.capture_plain ? 1 : 0);
 }
 
 void EndFileLog() { kgcore::CloseLogFile(); }

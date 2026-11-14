@@ -70,5 +70,9 @@ class BeautyPipeline {
   // until the next ProcessFrame/OutputRGBA call).
   std::vector<uint8_t> convert_buf_;  // pre-upload BGRA->RGBA staging
   std::vector<uint8_t> out_buf_;      // post-readback RGBA (alpha forced)
+  // M2f: guard readback - hanya setelah pipeline benar-benar menghasilkan
+  // output (sink pernah Render); sebelum itu GetRgbaBuffer crash (0xC0000005).
+  uint64_t frames_produced_ = 0;
+  bool readback_blocked_logged_ = false;
 };
 }  // namespace kgcore

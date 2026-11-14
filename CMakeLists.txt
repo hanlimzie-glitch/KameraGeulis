@@ -66,7 +66,8 @@ if(KG_BUILD_TESTS)
     src/kg_tests/face_mesh_decode_test.cc
     src/kg_tests/roi_align_test.cc
     src/kg_tests/frame_convert_test.cc
-    src/kg_tests/png_write_test.cc)
+    src/kg_tests/png_write_test.cc
+    src/kg_tests/reader_fallback_test.cc)
   target_link_libraries(kg_tests PRIVATE kg_core Catch2::Catch2WithMain)
   add_test(NAME kg_tests COMMAND kg_tests)
 endif()

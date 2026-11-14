@@ -3,6 +3,7 @@
 #include <fstream>
 #include "kgcore/frame_convert.h"
 #include "kgcore/log.h"
+#include "kgcore/reader_fallback.h"
 #include "ort_landmark_provider.h"
 
 namespace kgcore {
@@ -75,6 +76,8 @@ void BeautyPipeline::Shutdown() {
   beauty_filter_.reset();
   source_.reset();
   initialized_ = false;
+  frames_produced_ = 0;
+  readback_blocked_logged_ = false;
 }
 
 void BeautyPipeline::SetBeautyStrength(float smoothing, float whitening) {
@@ -111,16 +114,34 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
                        convert_buf_.data());
   source_->ProcessData(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
                        gpupixel::GPUPIXEL_FRAME_TYPE_RGBA);
+  // M2f: sink mengisi width_/height_ bersamaan dengan framebuffer pertamanya
+  // (SinkRawData::Render) - sink berarti sudah pernah menghasilkan output.
+  if (sink_ && sink_->GetWidth() > 0 && sink_->GetHeight() > 0) {
+    ++frames_produced_;
+  }
 }
 
 const uint8_t* BeautyPipeline::OutputRGBA() {
   if (!sink_) return nullptr;
+  const int w = sink_->GetWidth();
+  const int h = sink_->GetHeight();
+  // M2f guard: GetRgbaBuffer() me-run glReadPixels di framebuffer yang hanya
+  // dibuat pada Render() pertama - sebelum ada frame output, framebuffer_
+  // null dan readback crash (bukti F5 di PC pengguna: 0xC0000005 di
+  // gpupixel.dll). Ditolak tanpa menyentuh gpupixel sama sekali.
+  if (!SinkReadbackAllowed(w, h, frames_produced_)) {
+    if (!readback_blocked_logged_) {
+      Log(kTag, "readback dilewati: tidak ada frame keluaran (sink %dx%d, out=%llu)",
+          w, h, static_cast<unsigned long long>(frames_produced_));
+      readback_blocked_logged_ = true;
+    }
+    return nullptr;
+  }
+  readback_blocked_logged_ = false;
   // GetRgbaBuffer() runs glReadPixels on gpupixel's own GL context and
   // returns CPU memory - the app never touches gpupixel texture ids (M2e
   // requirement 4: official readback path, plain readback; PBO later).
   const uint8_t* src = sink_->GetRgbaBuffer();
-  const int w = sink_->GetWidth();
-  const int h = sink_->GetHeight();
   if (!src || w <= 0 || h <= 0) return nullptr;
   out_buf_.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
   // Copy + force alpha 255 in one place. Sink buffer is treated as top-down

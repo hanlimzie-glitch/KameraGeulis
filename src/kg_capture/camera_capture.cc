@@ -14,6 +14,7 @@
 #include <cstring>
 #include "kgcore/frame_convert.h"
 #include "kgcore/log.h"
+#include "kgcore/reader_fallback.h"
 
 namespace kgcore {
 namespace {
@@ -233,8 +234,10 @@ std::vector<VideoMode> CameraCapture::EnumerateModes(int device_index) {
   return modes;
 }
 
-bool CameraCapture::Start(int device_index, int width, int height, int fps) {
+bool CameraCapture::Start(int device_index, int width, int height, int fps,
+                          bool plain_attrs) {
   if (running_.load()) return true;
+  plain_attrs_ = plain_attrs;
 
   // Preflight: enumerate devices synchronously so the UI can report "no
   // camera" immediately instead of failing silently on a worker thread.
@@ -265,10 +268,25 @@ bool CameraCapture::Start(int device_index, int width, int height, int fps) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_ = CameraStats{};  // fresh diagnosis counters for this session
   }
+  first_frame_seen_.store(false);
+  open_attempt_.store(0);
+  open_failure_count_.store(0);
+  last_open_hr_.store(0);
   running_.store(true);
   thread_ = std::thread(&CameraCapture::CaptureThread, this, device_index, width,
                         height, fps);
   return true;
+}
+
+CameraCapture::CaptureStatus CameraCapture::GetStatus() const {
+  CaptureStatus st;
+  st.thread_active = running_.load();
+  st.streaming = first_frame_seen_.load();
+  st.failure_count = open_failure_count_.load();
+  st.had_failure = st.failure_count > 0;
+  st.hr = last_open_hr_.load();
+  st.attempt = open_attempt_.load();
+  return st;
 }
 
 void CameraCapture::Stop() {
@@ -299,142 +317,224 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
                                   int req_fps) {
   MfStartup mf;
   if (!mf.ok) {
-    SetError("MFStartup failed");
+    open_failure_count_.fetch_add(1);
+    last_open_hr_.store(static_cast<int64_t>(0x80004005));  // E_FAIL
+    SetError("MFStartup failed - kamera tidak bisa dimulai");
     running_.store(false);
     return;
   }
 
-  IMFActivate** devices = nullptr;
-  UINT32 device_count = 0;
-  HRESULT hr = EnumerateDevicesRaw(&devices, &device_count);
-  if (FAILED(hr) || static_cast<UINT32>(device_index) >= device_count) {
-    SetError("device disappeared between preflight and open (hr=0x%08lx)",
-             static_cast<unsigned long>(hr));
-    goto cleanup_devices;
-  }
-
-  {
-    IMFMediaSource* source = nullptr;
-    hr = devices[device_index]->ActivateObject(IID_PPV_ARGS(&source));
-    if (FAILED(hr)) {
-      SetError("ActivateObject failed (0x%08lx)", static_cast<unsigned long>(hr));
-      goto cleanup_devices;
-    }
-
-    // Enable the video processor so MF can transcode NV12/MJPG -> RGB32.
-    // M2e: also enable ADVANCED processing - it adds scaling/frame-rate
-    // conversion, without which a requested 1280x720@30 is rejected when the
-    // sensor natively delivers another size (e.g. 2560x1440) and the reader
-    // silently falls back to the native mode.
-    IMFAttributes* reader_attrs = nullptr;
-    MFCreateAttributes(&reader_attrs, 2);
-    if (reader_attrs) {
-      reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
-      reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-                              TRUE);
-    }
+  // M2f: loop percobaan dengan backoff (1s -> 2s -> 4s -> 8s cap). Pembuatan
+  // reader memakai tangga fallback atribut (a) penuh -> (b) basic -> (c) polos,
+  // atau HANYA (c) bila --capture-plain. Setiap percobaan mencatat HRESULT.
+  // "MF capture start: OK" hanya dicetak setelah reader jadi DAN frame
+  // pertama diterima (lihat blok first-frame di bawah).
+  const int64_t thread_start_ms = NowMs();
+  int backoff_ms = 1000;
+  while (running_.load()) {
+    const unsigned attempt = open_attempt_.fetch_add(1) + 1;
     IMFSourceReader* reader = nullptr;
-    hr = MFCreateSourceReaderFromMediaSource(source, reader_attrs, &reader);
-    SafeRelease(reader_attrs);
-    if (FAILED(hr)) {
-      SetError("MFCreateSourceReaderFromMediaSource failed (0x%08lx)",
-               static_cast<unsigned long>(hr));
-      source->Shutdown();
-      SafeRelease(source);
-      goto cleanup_devices;
-    }
-
-    if (req_width > 0 && req_height > 0) {
-      hr = SelectRgb32OutputAt(reader, req_width, req_height, req_fps);
-      if (FAILED(hr)) {
-        Log(kTag, "requested mode %dx%d@%d not accepted (0x%08lx) — falling back to default RGB32",
-            req_width, req_height, req_fps, static_cast<unsigned long>(hr));
-      }
-    }
-    if (FAILED(hr) || req_width <= 0 || req_height <= 0) {
-      hr = SelectRgb32Output(reader);
-    }
-    if (FAILED(hr)) {
-      SetError("camera does not provide RGB32/BGRA output (0x%08lx); "
-               "NV12 fallback not implemented yet",
-               static_cast<unsigned long>(hr));
-      SafeRelease(reader);
-      source->Shutdown();
-      SafeRelease(source);
-      goto cleanup_devices;
-    }
-
-    // Read back the media type ACTUALLY negotiated (M2e requirement 5):
-    // size, signed stride (negative = bottom-up rows), subtype, frame rate.
+    IMFMediaSource* source = nullptr;
+    int used_level = -1;
+    int64_t fail_hr = 0;
+    const char* fail_stage = nullptr;
+    bool opened = false;
+    // Negotiated mode (diisi saat berhasil dibuka; dipakai read loop).
     int width = 0, height = 0;
     int raw_stride = 0;  // SIGNED - sign is diagnosis data, never clamp it away
+    int abs_stride = 0;
     int subtype_data1 = 0, fps_num = 0, fps_den = 0;
-    {
-      IMFMediaType* current = nullptr;
-      if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                                &current))) {
-        UINT32 w = 0, h = 0;
-        MFGetAttributeSize(current, MF_MT_FRAME_SIZE, &w, &h);
-        width = static_cast<int>(w);
-        height = static_cast<int>(h);
-        UINT32 s = 0;
-        if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &s))) {
-          raw_stride = static_cast<int>(s);  // bit pattern = signed value
-        }
-        GUID sub{};
-        if (SUCCEEDED(current->GetGUID(MF_MT_SUBTYPE, &sub))) {
-          subtype_data1 = static_cast<int>(sub.Data1);
-        }
-        UINT64 fr = 0;
-        if (SUCCEEDED(current->GetUINT64(MF_MT_FRAME_RATE, &fr))) {
-          fps_num = static_cast<int>(fr >> 32);
-          fps_den = static_cast<int>(fr & 0xFFFFFFFFu);
-        }
-        current->Release();
+
+    // ---- satu percobaan buka (do{}while(0) pengganti goto) ----
+    do {
+      IMFActivate** devices = nullptr;
+      UINT32 device_count = 0;
+      auto release_devices = [&] {
+        if (!devices) return;
+        for (UINT32 i = 0; i < device_count; ++i) SafeRelease(devices[i]);
+        CoTaskMemFree(devices);
+        devices = nullptr;
+      };
+      const HRESULT hr_enum = EnumerateDevicesRaw(&devices, &device_count);
+      if (FAILED(hr_enum) || device_count == 0 || device_index < 0 ||
+          static_cast<UINT32>(device_index) >= device_count) {
+        // Tidak ada device pada index: HRESULT_FROM_WIN32(ERROR_NOT_FOUND).
+        fail_hr = FAILED(hr_enum)
+                      ? static_cast<int64_t>(static_cast<uint32_t>(hr_enum))
+                      : static_cast<int64_t>(0x80070490);
+        fail_stage = "enumerasi device";
+        release_devices();
+        break;
       }
-    }
-    if (width <= 0 || height <= 0) {
-      SetError("negotiated media type unreadable (GetCurrentMediaType gave %dx%d)",
-               width, height);
-      SafeRelease(reader);
-      source->Shutdown();
-      SafeRelease(source);
-      goto cleanup_devices;
-    }
-    if (raw_stride == 0) raw_stride = width * 4;  // RGB32 default: top-down
-    const int abs_stride = raw_stride < 0 ? -raw_stride : raw_stride;
-    const std::string sub_str = SubtypeToString(subtype_data1);
-    Log(kTag,
-        "capture started (aktual): %dx%d stride=%d (abs=%d,%s) subtype=%s "
-        "(0x%08X) fps=%d/%d RGB32/BGRA | diminta: %dx%d@%d",
-        width, height, raw_stride, abs_stride,
-        raw_stride < 0 ? "bottom-up" : "top-down", sub_str.c_str(),
-        static_cast<unsigned>(subtype_data1), fps_num, fps_den, req_width,
-        req_height, req_fps);
-    if (req_width > 0 && (width != req_width || height != req_height)) {
+      HRESULT hr = devices[device_index]->ActivateObject(IID_PPV_ARGS(&source));
+      if (FAILED(hr)) {
+        fail_hr = static_cast<int64_t>(static_cast<uint32_t>(hr));
+        fail_stage = "ActivateObject";
+        release_devices();
+        break;
+      }
+      release_devices();  // source sudah dibawa keluar; activate boleh lepas
+
+      // ---- tangga fallback atribut reader (M2f requirement 1) ----
+      size_t ladder_n = 0;
+      const int* ladder = nullptr;
+      const int plain_only[] = {kReaderPlain};
+      if (plain_attrs_) {
+        ladder = plain_only;  // --capture-plain: langsung tingkat (c)
+        ladder_n = 1;
+      } else {
+        ladder = DefaultReaderLadder(&ladder_n);
+      }
+      used_level = RunReaderFallbackLadder(
+          ladder, ladder_n,
+          [&](int level, int64_t* lhr) -> bool {
+            IMFAttributes* attrs = nullptr;
+            if (level != kReaderPlain) {
+              const HRESULT hr_a =
+                  MFCreateAttributes(&attrs, level == kReaderFull ? 2 : 1);
+              if (FAILED(hr_a)) {
+                *lhr = static_cast<int64_t>(static_cast<uint32_t>(hr_a));
+                return false;
+              }
+              attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+              if (level == kReaderFull) {
+                attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+                                 TRUE);
+              }
+            }
+            const HRESULT hr_r =
+                MFCreateSourceReaderFromMediaSource(source, attrs, &reader);
+            SafeRelease(attrs);
+            *lhr = static_cast<int64_t>(static_cast<uint32_t>(hr_r));
+            return SUCCEEDED(hr_r);
+          },
+          [&](int level, int64_t lhr, bool ok) {
+            Log(kTag, "reader percobaan tingkat %d (%s): hr=0x%08llX %s", level,
+                ReaderLevelName(level), static_cast<unsigned long long>(lhr),
+                ok ? "OK" : "GAGAL");
+          },
+          &fail_hr);
+      if (used_level < 0) {
+        fail_stage = "MFCreateSourceReaderFromMediaSource";  // hr terakhir di fail_hr
+        break;
+      }
+
+      // ---- pilih mode output RGB32 (M2e, tanpa perubahan perilaku) ----
+      if (req_width > 0 && req_height > 0) {
+        hr = SelectRgb32OutputAt(reader, req_width, req_height, req_fps);
+        if (FAILED(hr)) {
+          Log(kTag,
+              "requested mode %dx%d@%d not accepted (0x%08lx) - falling back to default RGB32",
+              req_width, req_height, req_fps, static_cast<unsigned long>(hr));
+        }
+      }
+      if (FAILED(hr) || req_width <= 0 || req_height <= 0) {
+        hr = SelectRgb32Output(reader);
+      }
+      if (FAILED(hr)) {
+        fail_hr = static_cast<int64_t>(static_cast<uint32_t>(hr));
+        fail_stage = "SetCurrentMediaType RGB32";
+        SafeRelease(reader);
+        break;
+      }
+
+      // Read back the media type ACTUALLY negotiated (M2e requirement 5):
+      // size, signed stride (negative = bottom-up rows), subtype, frame rate.
+      {
+        IMFMediaType* current = nullptr;
+        if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                  &current))) {
+          UINT32 w = 0, h = 0;
+          MFGetAttributeSize(current, MF_MT_FRAME_SIZE, &w, &h);
+          width = static_cast<int>(w);
+          height = static_cast<int>(h);
+          UINT32 s = 0;
+          if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &s))) {
+            raw_stride = static_cast<int>(s);  // bit pattern = signed value
+          }
+          GUID sub{};
+          if (SUCCEEDED(current->GetGUID(MF_MT_SUBTYPE, &sub))) {
+            subtype_data1 = static_cast<int>(sub.Data1);
+          }
+          UINT64 fr = 0;
+          if (SUCCEEDED(current->GetUINT64(MF_MT_FRAME_RATE, &fr))) {
+            fps_num = static_cast<int>(fr >> 32);
+            fps_den = static_cast<int>(fr & 0xFFFFFFFFu);
+          }
+          current->Release();
+        }
+      }
+      if (width <= 0 || height <= 0) {
+        fail_hr = static_cast<int64_t>(0x80004005);  // E_FAIL: tipe tak terbaca
+        fail_stage = "GetCurrentMediaType";
+        SafeRelease(reader);
+        break;
+      }
+      if (raw_stride == 0) raw_stride = width * 4;  // RGB32 default: top-down
+      abs_stride = raw_stride < 0 ? -raw_stride : raw_stride;
+      const std::string sub_str = SubtypeToString(subtype_data1);
       Log(kTag,
-          "catatan: permintaan %dx%d tidak dipenuhi - memakai %dx%d (kamera/"
-          "driver menolak scaling; lihat flag advanced processing)",
-          req_width, req_height, width, height);
-    }
-    {
-      std::lock_guard<std::mutex> lock(stats_mutex_);
-      stats_.width = width;
-      stats_.height = height;
-      stats_.stride = raw_stride;
-      stats_.subtype = subtype_data1;
-      stats_.fps_num = fps_num;
-      stats_.fps_den = fps_den;
-      stats_.mode_from_device = true;
+          "capture started (aktual): %dx%d stride=%d (abs=%d,%s) subtype=%s "
+          "(0x%08X) fps=%d/%d RGB32/BGRA | diminta: %dx%d@%d | reader tingkat %d (%s)",
+          width, height, raw_stride, abs_stride,
+          raw_stride < 0 ? "bottom-up" : "top-down", sub_str.c_str(),
+          static_cast<unsigned>(subtype_data1), fps_num, fps_den, req_width,
+          req_height, req_fps, used_level, ReaderLevelName(used_level));
+      if (req_width > 0 && (width != req_width || height != req_height)) {
+        Log(kTag,
+            "catatan: permintaan %dx%d tidak dipenuhi - memakai %dx%d (kamera/"
+            "driver menolak scaling; lihat flag advanced processing)",
+            req_width, req_height, width, height);
+      }
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.width = width;
+        stats_.height = height;
+        stats_.stride = raw_stride;
+        stats_.subtype = subtype_data1;
+        stats_.fps_num = fps_num;
+        stats_.fps_den = fps_den;
+        stats_.mode_from_device = true;
+      }
+      opened = true;
+    } while (false);
+
+    // ---- gagal buka: catat, backoff, ulangi ----
+    if (!opened) {
+      SafeRelease(reader);
+      if (source) {
+        source->Shutdown();
+        SafeRelease(source);
+      }
+      open_failure_count_.fetch_add(1);
+      last_open_hr_.store(fail_hr);
+      const int wait_ms = backoff_ms;
+      SetError("MF capture start: GAGAL (%s) hr=0x%08llX - percobaan %u, mencoba lagi dalam %d ms",
+               fail_stage ? fail_stage : "tidak diketahui",
+               static_cast<unsigned long long>(fail_hr), attempt, wait_ms);
+      for (int w = 0; w < wait_ms && running_.load(); w += 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      backoff_ms = std::min(backoff_ms * 2, 8000);
+      continue;
     }
 
+    Log(kTag,
+        "MF capture start: reader jadi (tingkat %d, %s, percobaan %u) - menunggu frame pertama",
+        used_level, ReaderLevelName(used_level), attempt);
+
+    // ---- read loop (kode M2e; ditambah log OK saat frame pertama) ----
+    bool read_failed = false;
+    int64_t read_hr = 0;
     while (running_.load()) {
       DWORD stream_index = 0, flags = 0;
       LONGLONG timestamp = 0;
       IMFSample* sample = nullptr;
-      hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
-                              &stream_index, &flags, &timestamp, &sample);
+      const HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
+                                            &stream_index, &flags, &timestamp, &sample);
       if (FAILED(hr)) {
+        read_failed = true;
+        read_hr = static_cast<int64_t>(static_cast<uint32_t>(hr));
         SetError("ReadSample failed (0x%08lx)", static_cast<unsigned long>(hr));
         break;
       }
@@ -445,12 +545,12 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
       if (!sample) continue;  // not fatal; keep waiting
 
       IMFMediaBuffer* buffer = nullptr;
-      hr = sample->ConvertToContiguousBuffer(&buffer);
-      if (SUCCEEDED(hr)) {
+      HRESULT hr_buf = sample->ConvertToContiguousBuffer(&buffer);
+      if (SUCCEEDED(hr_buf)) {
         BYTE* data = nullptr;
         DWORD max_len = 0, current_len = 0;
-        hr = buffer->Lock(&data, &max_len, &current_len);
-        if (SUCCEEDED(hr) && data) {
+        hr_buf = buffer->Lock(&data, &max_len, &current_len);
+        if (SUCCEEDED(hr_buf) && data) {
           // Normalise every frame to TOP-DOWN rows with a positive stride:
           // MF negative stride (bottom-up) is flipped during this copy, so
           // everything downstream (pipeline, F4 raw preview, F5 dump) sees a
@@ -494,6 +594,14 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
           }
           frames_captured_.fetch_add(1);
           if (queue_) queue_->Push(std::move(frame));
+          // M2f: OK HANYA setelah reader jadi (di atas) + frame pertama ini.
+          if (!first_frame_seen_.load()) {
+            first_frame_seen_.store(true);
+            Log(kTag,
+                "MF capture start: OK - frame pertama diterima %lld ms setelah thread mulai (tingkat %d, percobaan %u)",
+                static_cast<long long>(NowMs() - thread_start_ms), used_level,
+                attempt);
+          }
         }
         if (data) buffer->Unlock();
         SafeRelease(buffer);
@@ -502,13 +610,25 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
     }
 
     SafeRelease(reader);
-    source->Shutdown();
-    SafeRelease(source);
+    if (source) {
+      source->Shutdown();
+      SafeRelease(source);
+    }
+    if (!running_.load()) break;
+    if (read_failed) {
+      open_failure_count_.fetch_add(1);
+      last_open_hr_.store(read_hr);
+      const int wait_ms = backoff_ms;
+      SetError("MF capture start: GAGAL (ReadSample) hr=0x%08llX - percobaan %u, mencoba lagi dalam %d ms",
+               static_cast<unsigned long long>(read_hr), attempt, wait_ms);
+      for (int w = 0; w < wait_ms && running_.load(); w += 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      backoff_ms = std::min(backoff_ms * 2, 8000);
+      continue;
+    }
   }
 
-cleanup_devices:
-  for (UINT32 i = 0; i < device_count; ++i) SafeRelease(devices[i]);
-  CoTaskMemFree(devices);
   running_.store(false);
 }
 }  // namespace kgcore
