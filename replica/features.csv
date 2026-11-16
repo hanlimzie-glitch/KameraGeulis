@@ -1,0 +1,35 @@
+id,feature,priority,milestone,notes
+F01,Camera capture webcam (Media Foundation) -> pipeline,must,M1,720p30 baseline
+F02,Live preview window GLFW+ImGui,must,M1,OpenGL blit + ImGui overlay
+F03,Skin smoothing slider (BeautyFaceFilter),must,M2,No landmarks required
+F04,Whitening slider (BeautyFaceFilter),must,M2,No landmarks required
+F05,Face slimming slider (FaceReshapeFilter),must,M2,Landmark-gated (Windows: unavailable by default)
+F06,Big eyes slider (FaceReshapeFilter),must,M2,Landmark-gated
+F07,Lipstick slider,must,M2,Built-in LipstickFilter; landmark-gated
+F08,Blush slider,must,M2,Built-in BlusherFilter; landmark-gated
+F09,Side panel tabs Face/Skin/Makeup/Presets,must,M2,
+F10,Virtual camera output (softcam),must,M3,Admin register 1x; name=KameraGeulis Camera
+F11,Hold-to-compare before/after,must,M2,Hold mouse/Space
+F12,Per-effect reset + global reset,must,M2,
+F13,Camera/resolution/fps selector,must,M2,
+F14,Mirror toggle,must,M2,Default ON
+F15,Snapshot to PNG,must,M2,Saves to snapshots/
+F16,Settings persisted to JSON restored on start,must,M2,nlohmann/json
+F17,Indonesian default locale + English,must,M2/M4,String table C++
+F18,Presets (Natural/Soft/Glam/ClearSkin),must,M4,
+F19,Chin shorten/lengthen (custom warp),should,M4,Landmark-gated; SDF/warp filter
+F20,Nose slimming (custom warp),should,M4,Landmark-gated
+F21,Eye brighten,should,M4,Landmark-gated
+F22,Eyebrow tint,should,M4,Landmark-gated
+F23,Eyeshadow,should,M4,Landmark-gated
+F24,Eyeliner,should,M4,Landmark-gated
+F25,Foundation / skin-tone evening,should,M4,Landmark-gated; flatten + tint
+F26,Lip color with finish matte/gloss,should,M4,Landmark-gated; gloss = specular term
+F27,Landmark jitter smoothing (OneEuro),must,M4,Unit-tested
+F28,Face lost -> fade out, no flicker,must,M4,Envelope gain
+F29,1024/1080p capture stretch goal,could,M5,
+F30,Recording to MP4,could,M5,Out of scope if time runs short - honest in STATUS
+F31,Hotkeys,could,M5,
+F32,FPS/GPU stats overlay,could,M5,
+F33,Installer (Inno Setup notes),should,M5,BUILD.md documented; actual .iss draft
+F34,MF virtual camera (Windows 11 only),could,M5,Documented future option
