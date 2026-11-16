@@ -96,6 +96,12 @@ TEST_CASE("mask_layers: diff amplifikasi untuk diff PNG") {
   REQUIRE(rgba.size() == static_cast<size_t>(w) * h * 4);
   REQUIRE(rgba[0] == 80);
   REQUIRE(rgba[3] == 255);
+
+  // M2l: diff grayscale downsampled 1920x1080 -> 960x540
+  std::vector<uint8_t> r2(1920 * 1080 * 4, 40), o2(1920 * 1080 * 4, 45), gray;
+  WriteDiffAmplifiedGray(r2.data(), o2.data(), 1920, 1080, 8.0f, 960, 540, &gray);
+  REQUIRE(gray.size() == 960u * 540u);
+  REQUIRE(gray[0] == 40);
 }
 
 TEST_CASE("mask_layers: di luar <8/255 hasil byte-identik raw; mix di dalam linear") {

@@ -6,8 +6,10 @@
 // an honest status string — the app never crashes and landmark effects stay
 // disabled.
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 #include "face_tracker.h"
 #include "kgcore/landmark.h"
 #include "kgcore/roi_align.h"
@@ -29,6 +31,8 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   const char* Name() const override { return "ort-cpu"; }
   LandmarkSet Track(const Frame& frame) override;
   bool GetStageTimings(StageTimings* out) const override;
+  bool GetDebugRoi(std::vector<uint8_t>* rgba_out, int* w, int* h,
+                   AlignedRoi* roi_out) const override;
 
   // Human-readable reason when Available()==false ("models missing",
   // "download failed (…)", "hash mismatch …", "session error …", "ok").
@@ -36,19 +40,11 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   const std::string& LastError() const { return last_error_; }
 
  private:
-  // Detector cadence (docs/ARCHITECTURE.md §5.1): BlazeFace runs on the
-  // first frame and whenever the tracked face is lost; while a face is
-  // tracked, the mesh ROI is carried forward (previous-frame ROI tracking)
-  // using the eye-center delta and the eye-axis angle from the previous
-  // frame's landmarks. A long safety re-detection fires after
-  // kSafetyRedetectFrames tracked frames.
-  static constexpr int kSafetyRedetectFrames = 300;  // ~10 s @ 30 fps
-
   LandmarkSet TrackImpl_(const Frame& frame);  // Track() = wrapper ber-timing
   bool DetectionStage_(const Frame& frame, AlignedRoi* roi_out, float* face_score_out);
-  AlignedRoi TrackRoiFromPreviousLandmarks_(int src_w, int src_h) const;
-  void NoteMeshOutcome_(const LandmarkSet& result, const AlignedRoi& roi_used,
-                        int src_w, int src_h);
+  bool RunMeshOnRoi_(const Frame& frame, const AlignedRoi& roi,
+                     std::array<Vec2, kLandmarkCount>* canvas_pts,
+                     float* face_flag_out, std::vector<uint8_t>* roi_rgba_out);
   bool EnsureModelsLoaded_();          // locate/download/verify/load; idempotent
   bool LoadSessions_(const std::wstring& dir);  // actually creates the sessions
   bool EnsureModelFile_(const std::wstring& dir, const wchar_t* file_name,
@@ -64,16 +60,24 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   bool logged_failure_ = false;
   std::string last_error_ = "model belum dimuat";
 
-  // Previous-frame tracking state (ROI carry-over). Landmarks are stored in
-  // normalized [0,1] frame coordinates (the same space as LandmarkSet::pts).
+  // State tracking antar-frame (M2l: ROI dihitung langsung dari bbox
+  // landmark ter-rotasi + detektor periodik adaptif 10-15 frame + uji sanity).
   bool have_prev_roi_ = false;
   AlignedRoi prev_roi_{};
-  std::array<Vec2, kLandmarkCount> prev_pts_{};
-  Vec2 roi_center_offset_{};  // tracked center = landmark centroid + offset
+  LandmarkSet prev_lm_{};
+  float det_ref_side_px_ = 0.0f;
   float prev_face_score_ = 0.0f;
-  int lost_streak_ = 0;          // consecutive invalid frames (flag<=0 / inference failure)
-  int frames_since_detect_ = 0;  // telemetry: frames tracked without detector
-  bool pending_roi_anchor_ = false;  // true after a detection; offset set on next mesh ok
+  float prev_face_flag_ = 10.0f;
+  float last_roi_shift_frac_ = 0.0f;
+  float last_angle_delta_rad_ = 0.0f;
+  int lost_streak_ = 0;          // frame gagal berurutan
+  int frames_since_detect_ = 0;  // frame sejak detektor terakhir jalan
+  int reset_count_ = 0;
+  std::string last_reset_reason_;
   StageTimings stage_;               // debug-overlay per-stage timings
+
+  // Potongan ROI 192x192 RGBA terakhir yang dikirim ke FaceMesh (untuk F5).
+  std::vector<uint8_t> last_roi_rgba_;
+  AlignedRoi last_roi_used_{};
 };
 }  // namespace kgcore

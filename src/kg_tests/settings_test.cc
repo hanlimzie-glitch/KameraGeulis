@@ -142,3 +142,24 @@ TEST_CASE("M2i: Save menimpa tujuan yang sudah ada + err menyebut penyebab") {
   REQUIRE_FALSE(err2.empty());
   std::remove(path.c_str());
 }
+
+TEST_CASE("M2l: SaveAndVerify melaporkan path lengkap, jumlah byte, dan baca-ulang") {
+  kgcore::Settings a;
+  a.camera_device = 2;
+  a.capture_width = 1920;
+  a.capture_height = 1080;
+  a.capture_fps = 30;
+  const std::string path = "kg_settings_utf8_é_" + TempPath();
+  kgcore::Settings::SaveInfo info;
+  std::string err;
+  REQUIRE(a.SaveAndVerify(path, &info, &err));
+  REQUIRE(err.empty());
+  REQUIRE(info.verified);
+  REQUIRE(info.bytes_written == a.ToJson().size());
+  REQUIRE(info.resolved_path.find("kg_settings_utf8_") != std::string::npos);
+
+  kgcore::Settings b;
+  REQUIRE(b.Load(path, &err));
+  REQUIRE(b == a);
+  std::remove(path.c_str());
+}

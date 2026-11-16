@@ -101,4 +101,9 @@ void ComputeF5DiffReport(const uint8_t* raw, const uint8_t* out,
 void WriteDiffAmplified(const uint8_t* raw, const uint8_t* out, int w, int h,
                         float amplify, std::vector<uint8_t>* rgba_out);
 
+// M2l: versi grayscale + downsample (mis. 960x540) untuk perkecil dump F5.
+void WriteDiffAmplifiedGray(const uint8_t* raw, const uint8_t* out, int src_w,
+                            int src_h, float amplify, int dst_w, int dst_h,
+                            std::vector<uint8_t>* gray_out);
+
 }  // namespace kgcore

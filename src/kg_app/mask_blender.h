@@ -1,22 +1,17 @@
 #pragma once
-// M2h/M2i - tahap blending mask kulit di pipeline aplikasi (GL 3.3 sendiri,
-// TANPA menyentuh source gpupixel). Rantai tetap:
-//   raw -> gpupixel (BeautyFace whole-frame) -> sink
-// lalu di sini:
-//   1) guided smoothing luma pada kandidat beauty (pass statistik 16F:
-//      encode Y,Y^2 -> box blur H -> box blur V);
-//   2) final: mixed = mix(raw, cand, mask*gain);
-//      CbCr_out = lerp(CbCr(mixed), CbCr(raw), chroma_retain)  <- M2i (3a):
-//      cerahkan lewat luma saja, chroma mentah dipertahankan (anti cast
-//      dingin/pink); bila mask*gain == 0 keluaran DIJAMIN byte = raw.
-//
-// Catatan M2i (bug preview hitam): tekstur keluaran HARUS punya
-// TEXTURE_MIN/MAG filter eksplisit - default MIN_FILTER
-// NEAREST_MIPMAP_LINEAR tanpa mipmap membuat tekstur INCOMPLETE dan semua
-// sampling menghasilkan hitam tanpa error GL (glErr tetap 0).
-//
-// Jujur: komponen ini hanya terverifikasi di Windows nyata (GL/GPU); unit
-// test Linux menutupi matematika mask/komposit/metrik (kgcore).
+// M2h/M2i/M2l - tahap blending mask kulit di pipeline aplikasi (GL 3.3 sendiri,
+// TANPA menyentuh source gpupixel).
+// Perbaikan M2l:
+//  - Double-buffered tex_out (tex_out_pair[2]) agar display tidak pernah
+//    membaca tekstur saat FBO sedang dirender atau gagal di tengah jalan.
+//  - Kebersihan state GL penuh (disable GL_SCISSOR_TEST, GL_CULL_FACE,
+//    GL_STENCIL_TEST, GL_BLEND; reset glColorMask, GL_UNPACK_ALIGNMENT, dan
+//    glActiveTexture(GL_TEXTURE0)) karena ImGui meninggalkan scissor/blend aktif.
+//  - Texture completeness eksplisit (BASE_LEVEL/MAX_LEVEL=0, LINEAR, CLAMP) pada
+//    SEMUA tekstur termasuk tex_raw, tex_beauty, tex_mask, tex_out_pair, tex_probe.
+//  - Pass overlay F6 dipisah ke tex_out_debug agar tex_out (dan dump F5) SELALU
+//    bersih dari overlay debug.
+//  - Probe luma 16x16 cepat (1 KB) untuk swa-uji berkelanjutan frame hitam.
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -34,21 +29,31 @@
 
 struct MaskBlender {
   using GetQueryObjectUi64Proc = void (APIENTRYP)(GLuint, GLenum, GLuint64*);
-  static constexpr GLenum kTimeElapsedQuery = 0x88BF;  // GL_TIME_ELAPSED (ARB_timer_query)
+  static constexpr GLenum kTimeElapsedQuery = 0x88BF;  // GL_TIME_ELAPSED
+  static constexpr int kProbeSize = 16;
+
   // state inti
   GLuint prog_final = 0, prog_encode = 0, prog_blur = 0;
   GLuint prog_face = 0, prog_excl = 0, prog_excl_blur = 0, prog_compose_mask = 0;
+  GLuint prog_debug_mask = 0, prog_probe = 0;
   GLuint vao = 0, fbo = 0, mesh_vao = 0, mesh_vbo = 0;
   GLuint tex_raw = 0, tex_beauty = 0, tex_mask = 0, tex_cpu_mask = 0;
-  GLuint tex_face = 0, tex_face_prob = 0, tex_excl = 0, tex_excl_blur = 0, tex_out = 0;
+  GLuint tex_face = 0, tex_face_prob = 0, tex_excl = 0, tex_excl_blur = 0;
+  GLuint tex_out_pair[2] = {0, 0};
+  int out_front_idx = 0;
+  GLuint tex_out = 0;        // selalu menunjuk ke tex_out_pair[out_front_idx]
+  GLuint tex_out_debug = 0;  // tex_out + lapisan merah F6 (hanya untuk display)
+  GLuint tex_probe = 0;      // 16x16 RGBA8 untuk baca-balik luma cepat
   GLuint tex_stat = 0, tex_tmp = 0;
   GLuint mask_timer_query = 0;
   GetQueryObjectUi64Proc get_query_object_ui64 = nullptr;
   bool timer_query_supported = false;
   bool mask_query_pending = false;
   double last_gpu_mask_ms = 0.0;
-  uint64_t mask_gen_frames = 0;  // RGBA16F utk statistik guided
+  uint64_t mask_gen_frames = 0;
   int out_w = 0, out_h = 0;
+  int out_pair_w[2] = {0, 0}, out_pair_h[2] = {0, 0};
+  int debug_w = 0, debug_h = 0;
   int mask_w = 0, mask_h = 0;
   int cpu_mask_w = 0, cpu_mask_h = 0;
   int face_prob_w = 0, face_prob_h = 0;
@@ -57,11 +62,17 @@ struct MaskBlender {
   int stat_w = 0, stat_h = 0, tmp_w = 0, tmp_h = 0;
   double cpu_mask_submit_ms = 0.0;
   bool ready = false;         // tex_out pernah terisi
+  bool debug_ready = false;   // tex_out_debug valid untuk frame terakhir
   bool init_failed = false;   // shader/FBO gagal - pakai jalur lama
   bool has_stats = true;      // RGBA16F bisa dirender (guided aktif)
-  bool disabled = false;      // M2i: dimatikan (flag --no-mask-gl / swa-uji)
+  bool disabled = false;      // M2i/M2l: dimatikan (flag --no-mask-gl / swa-uji)
   bool warned_no_stats = false;
   std::string last_error;
+
+  GLuint DisplayTex(bool debug_mask) const {
+    if (debug_mask && debug_ready && tex_out_debug) return tex_out_debug;
+    return tex_out;
+  }
 
   bool Init() {
     if (init_failed) return false;
@@ -74,7 +85,6 @@ void main() {
   v_uv = pos * 0.5 + 0.5;
   gl_Position = vec4(pos, 0.0, 1.0);
 })";
-    // Encode: RG = (Y, Y^2) dari tekstur beauty (0..1).
     static const char* kFsEncode = R"(#version 330 core
 in vec2 v_uv;
 out vec4 frag;
@@ -84,12 +94,11 @@ void main() {
   float y = dot(c, vec3(0.299, 0.587, 0.114));
   frag = vec4(y, y * y, 0.0, 1.0);
 })";
-    // Box blur 1D (H atau V lewat u_dir), radius integer.
     static const char* kFsBlur = R"(#version 330 core
 in vec2 v_uv;
 out vec4 frag;
 uniform sampler2D u_in;
-uniform vec2 u_dir;      // (1/w,0) atau (0,1/h)
+uniform vec2 u_dir;
 uniform int u_radius;
 void main() {
   float sum_y = 0.0, sum_y2 = 0.0;
@@ -103,24 +112,23 @@ void main() {
   }
   frag = vec4(sum_y / float(n), sum_y2 / float(n), 0.0, 1.0);
 })";
-    // Final: guided smoothing luma + mix mask + retensi chroma (M2i).
+    // Final: bersih TANPA overlay debug F6 (F6 dirender terpisah ke tex_out_debug).
     static const char* kFsFinal = R"(#version 330 core
 in vec2 v_uv;
 out vec4 frag;
 uniform sampler2D u_raw;
 uniform sampler2D u_beauty;
 uniform sampler2D u_mask;
-uniform sampler2D u_stat;   // (meanY, meanY2) - RGBA16F
+uniform sampler2D u_stat;
 uniform float u_gain;
 uniform float u_smooth_amount;
 uniform float u_chroma_retain;
 uniform float u_smooth_eps;
-uniform float u_lift;      // M2j: lift Cerahan dalam mask (0 = mati)
+uniform float u_lift;
 uniform int u_has_stats;
-uniform int u_debug;
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-vec3 ycbcr(float r, float g, float b) {   // skala level 0..255, Cb/Cr basis 128
+vec3 ycbcr(float r, float g, float b) {
   float y = luma(vec3(r, g, b));
   return vec3(y, 128.0 + 0.564 * (b - y), 128.0 + 0.713 * (r - y));
 }
@@ -134,12 +142,8 @@ void main() {
   vec3 raw255 = texture(u_raw, v_uv).rgb * 255.0;
   vec3 beauty255 = texture(u_beauty, v_uv).rgb * 255.0;
   float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
-  // Hard zero the same tiny feather band reported as "outside" by F5.
-  // This prevents lift/guided rounding from changing pixels where mask*gain
-  // is below 8/255; raw passthrough is one source of truth for leak checks.
-  if (m < (8.0 / 255.0)) { frag = texture(u_raw, v_uv); return; }
+  if (m < (8.0 / 255.0)) { frag = vec4(raw255 / 255.0, 1.0); return; }
 
-  // 1) guided smoothing luma pada beauty (M2i 3b)
   float yb = luma(beauty255) / 255.0;
   float ys = yb;
   if (u_has_stats == 1 && u_smooth_amount > 0.0) {
@@ -152,22 +156,34 @@ void main() {
   float dy = (ys - yb) * 255.0;
   vec3 cand255 = clamp(beauty255 + vec3(dy), 0.0, 255.0);
 
-  // 2) mix dgn raw
   vec3 mixed255 = mix(raw255, cand255, m);
-  // 2b) M2j: lift Cerahan proporsional (identik ComposeBeautyRaw CPU)
   if (u_lift > 0.0) mixed255 += (u_lift * m) * (255.0 - mixed255);
-  // 3) retensi chroma MENTAH (M2i 3a) - Y tetap dari hasil mix
   vec3 cm = ycbcr(mixed255.r, mixed255.g, mixed255.b);
   vec3 crw = ycbcr(raw255.r, raw255.g, raw255.b);
   float cb = mix(cm.g, crw.g, u_chroma_retain);
   float cr = mix(cm.b, crw.b, u_chroma_retain);
   vec3 out255 = to_rgb(cm.r, cb, cr);
-
-  if (u_debug == 1) {
-    vec3 red = vec3(255.0, 30.0, 30.0);
-    out255 = mix(out255, red, m * 0.55);
-  }
   frag = vec4(out255 / 255.0, 1.0);
+})";
+    static const char* kFsDebugMask = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_out;
+uniform sampler2D u_mask;
+uniform float u_gain;
+void main() {
+  vec3 c = texture(u_out, v_uv).rgb;
+  float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
+  vec3 red = vec3(1.0, 30.0 / 255.0, 30.0 / 255.0);
+  frag = vec4(mix(c, red, m * 0.55), 1.0);
+})";
+    static const char* kFsProbe = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_tex;
+void main() {
+  vec3 c = texture(u_tex, v_uv).rgb;
+  frag = vec4(c, 1.0);
 })";
     static const char* kVsMesh = R"(#version 330 core
 layout(location=0) in vec2 a_pos;
@@ -203,14 +219,14 @@ uniform sampler2D u_raw;
 uniform int u_has_seg;
 uniform int u_has_color_gate;
 uniform vec2 u_skin_cbcr;
-uniform vec4 u_gate_limits; // cb min/max, cr min/max
-uniform vec2 u_gate_radii;  // fade start/end in chroma units
+uniform vec4 u_gate_limits;
+uniform vec2 u_gate_radii;
 void main() {
   float mesh_coverage = texture(u_face, v_uv).r;
   float mesh = mesh_coverage;
   if (u_has_seg == 1) mesh *= smoothstep(0.30, 0.50, texture(u_face_prob, v_uv).r);
   float body = texture(u_cpu, v_uv).r;
-  if (mesh_coverage >= 0.5) body = 0.0;  // face mesh/p3 is authoritative inside face
+  if (mesh_coverage >= 0.5) body = 0.0;
   if (u_has_color_gate == 1 && mesh_coverage < 0.5) {
     vec3 rgb = texture(u_raw, v_uv).rgb * 255.0;
     float y = dot(rgb, vec3(0.299, 0.587, 0.114));
@@ -237,7 +253,10 @@ void main() {
     prog_excl = Build(GL_FRAGMENT_SHADER, kFsMaskWhite, "mask_gen.exclude");
     prog_excl_blur = Build(GL_FRAGMENT_SHADER, kFsExclBlur, "mask_gen.exclude_blur");
     prog_compose_mask = Build(GL_FRAGMENT_SHADER, kFsComposeMask, "mask_gen.compose");
-    if (!prog_face || !prog_excl || !prog_excl_blur || !prog_compose_mask) {
+    prog_debug_mask = Build(GL_FRAGMENT_SHADER, kFsDebugMask, "mask_blender.debug_mask");
+    prog_probe = Build(GL_FRAGMENT_SHADER, kFsProbe, "mask_blender.probe");
+    if (!prog_face || !prog_excl || !prog_excl_blur || !prog_compose_mask ||
+        !prog_debug_mask || !prog_probe) {
       init_failed = true;
       return false;
     }
@@ -249,13 +268,14 @@ void main() {
       init_failed = true;
       return false;
     }
-    // Link vertex+fragment utk tiap program (vs dipakai bersama).
     GLuint vs = Compile(GL_VERTEX_SHADER, kVs, "mask_blender.vs");
     if (!vs) {
       init_failed = true;
       return false;
     }
-    if (!Link(prog_encode, vs) || !Link(prog_blur, vs) || !Link(prog_final, vs)) {
+    if (!Link(prog_encode, vs) || !Link(prog_blur, vs) ||
+        !Link(prog_final, vs) || !Link(prog_debug_mask, vs) ||
+        !Link(prog_probe, vs)) {
       glDeleteShader(vs);
       init_failed = true;
       return false;
@@ -274,6 +294,7 @@ void main() {
       return false;
     }
     glDeleteShader(vs);
+
     glGenVertexArrays(1, &vao);
     glGenVertexArrays(1, &mesh_vao);
     glGenBuffers(1, &mesh_vbo);
@@ -283,6 +304,7 @@ void main() {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
     glBindVertexArray(0);
     glGenFramebuffers(1, &fbo);
+
     get_query_object_ui64 = reinterpret_cast<GetQueryObjectUi64Proc>(
         glfwGetProcAddress("glGetQueryObjectui64v"));
     const bool arb_timer_query =
@@ -303,8 +325,9 @@ void main() {
     if (timer_query_supported) {
       glGenQueries(1, &mask_timer_query);
     } else {
-      kgcore::Log("mask_gen", "timer query GPU tidak tersedia/terekspos; hanya CPU submit timing yang dilaporkan");
+      kgcore::Log("mask_gen", "timer query GPU tidak tersedia; hanya CPU submit timing yang dilaporkan");
     }
+
     glGenTextures(1, &tex_raw);
     glGenTextures(1, &tex_beauty);
     glGenTextures(1, &tex_mask);
@@ -313,25 +336,41 @@ void main() {
     glGenTextures(1, &tex_face_prob);
     glGenTextures(1, &tex_excl);
     glGenTextures(1, &tex_excl_blur);
-    glGenTextures(1, &tex_out);
+    glGenTextures(2, tex_out_pair);
+    glGenTextures(1, &tex_out_debug);
+    glGenTextures(1, &tex_probe);
     glGenTextures(1, &tex_stat);
     glGenTextures(1, &tex_tmp);
-    // M2i ROOT FIX: parameter sampling eksplisit - termasuk tex_out
-    // (default NEAREST_MIPMAP_LINEAR tanpa mipmap = INCOMPLETE = HITAM
-    // tanpa error GL; itulah penyebab preview 0x0/gelap di M2h).
-    SetLinear(tex_out);
+
+    // Parameter sampling & completeness eksplisit untuk SELURUH tekstur.
+    SetLinear(tex_raw);
+    SetLinear(tex_beauty);
+    SetLinear(tex_mask);
     SetLinear(tex_cpu_mask);
     SetLinear(tex_face);
     SetLinear(tex_face_prob);
     SetLinear(tex_excl);
     SetLinear(tex_excl_blur);
+    SetLinear(tex_out_pair[0]);
+    SetLinear(tex_out_pair[1]);
+    SetLinear(tex_out_debug);
+    SetLinear(tex_probe);
     SetLinear(tex_stat);
     SetLinear(tex_tmp);
+    glBindTexture(GL_TEXTURE_2D, tex_probe);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kProbeSize, kProbeSize, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    out_front_idx = 0;
+    tex_out = tex_out_pair[0];
+
     kgcore::Log("blend",
-                "init OK: prog(final/encode/blur)=%u/%u/%u vao=%u fbo=%u "
-                "tex out=%u stat=%u tmp=%u raw/beauty/mask=%u/%u/%u",
-                prog_final, prog_encode, prog_blur, vao, fbo, tex_out, tex_stat,
-                tex_tmp, tex_raw, tex_beauty, tex_mask);
+                "init OK: prog(final/encode/blur/dbg/probe)=%u/%u/%u/%u/%u vao=%u fbo=%u "
+                "tex out=(%u,%u) dbg=%u stat=%u tmp=%u raw/beauty/mask=%u/%u/%u",
+                prog_final, prog_encode, prog_blur, prog_debug_mask, prog_probe,
+                vao, fbo, tex_out_pair[0], tex_out_pair[1], tex_out_debug,
+                tex_stat, tex_tmp, tex_raw, tex_beauty, tex_mask);
     return true;
   }
 
@@ -343,49 +382,134 @@ void main() {
     if (prog_excl) glDeleteProgram(prog_excl);
     if (prog_excl_blur) glDeleteProgram(prog_excl_blur);
     if (prog_compose_mask) glDeleteProgram(prog_compose_mask);
+    if (prog_debug_mask) glDeleteProgram(prog_debug_mask);
+    if (prog_probe) glDeleteProgram(prog_probe);
     if (vao) glDeleteVertexArrays(1, &vao);
     if (mesh_vao) glDeleteVertexArrays(1, &mesh_vao);
     if (mesh_vbo) glDeleteBuffers(1, &mesh_vbo);
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (mask_timer_query) glDeleteQueries(1, &mask_timer_query);
-    const GLuint texes[] = {tex_raw, tex_beauty, tex_mask, tex_cpu_mask,
-                            tex_face, tex_face_prob, tex_excl, tex_excl_blur,
-                            tex_out, tex_stat, tex_tmp};
-    glDeleteTextures(11, texes);
+    const GLuint texes[] = {
+        tex_raw, tex_beauty, tex_mask, tex_cpu_mask, tex_face, tex_face_prob,
+        tex_excl, tex_excl_blur, tex_out_pair[0], tex_out_pair[1],
+        tex_out_debug, tex_probe, tex_stat, tex_tmp};
+    glDeleteTextures(14, texes);
     prog_final = prog_encode = prog_blur = prog_face = prog_excl =
-        prog_excl_blur = prog_compose_mask = 0;
+        prog_excl_blur = prog_compose_mask = prog_debug_mask = prog_probe = 0;
     vao = mesh_vao = mesh_vbo = fbo = 0;
     tex_raw = tex_beauty = tex_mask = tex_cpu_mask = tex_face = tex_face_prob =
-        tex_excl = tex_excl_blur = tex_out = tex_stat = tex_tmp = 0;
+        tex_excl = tex_excl_blur = tex_out = tex_out_debug = tex_probe =
+        tex_stat = tex_tmp = 0;
+    tex_out_pair[0] = tex_out_pair[1] = 0;
+    out_front_idx = 0;
     out_w = out_h = mask_w = mask_h = 0;
+    out_pair_w[0] = out_pair_w[1] = out_pair_h[0] = out_pair_h[1] = 0;
+    debug_w = debug_h = 0;
     cpu_mask_w = cpu_mask_h = face_prob_w = face_prob_h = 0;
     target_w = target_h = raw_w = raw_h = beauty_w = beauty_h = 0;
     stat_w = stat_h = tmp_w = tmp_h = 0;
     ready = false;
+    debug_ready = false;
     mask_timer_query = 0;
     mask_query_pending = false;
     last_gpu_mask_ms = 0.0;
     mask_gen_frames = 0;
   }
 
-  // Satu frame: upload -> pass statistik -> pass final (3-4 draw call).
-  // F5 capture: read exactly the textures consumed by the final blend pass.
-  // glGetTexImage rows retain upload order (top-down CPU input is y=0 in tex).
+  // F5 selalu membaca tex_out bersih (tidak pernah mengandung overlay F6).
   bool ReadbackOutput(std::vector<uint8_t>* rgba) const {
     if (!rgba || !ready || !tex_out || out_w <= 0 || out_h <= 0) return false;
     rgba->resize(static_cast<size_t>(out_w) * out_h * 4);
+    glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, tex_out);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->data());
+    glBindTexture(GL_TEXTURE_2D, 0);
     return glGetError() == GL_NO_ERROR;
   }
   bool ReadbackMask(std::vector<uint8_t>* mask) const {
     if (!mask || !tex_mask || mask_w <= 0 || mask_h <= 0) return false;
     mask->resize(static_cast<size_t>(mask_w) * mask_h);
+    glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, tex_mask);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, mask->data());
+    glBindTexture(GL_TEXTURE_2D, 0);
     return glGetError() == GL_NO_ERROR;
+  }
+
+  // M2l: probe luma cepat (16x16 = 1 KB) dari tex_out aktif untuk swa-uji
+  // berkelanjutan per iterasi render tanpa stalling baca 8.3 MB.
+  bool ProbeOutputLuma(float* out_y) {
+    if (!out_y || !ready || !tex_out || !tex_probe || out_w <= 0 || out_h <= 0)
+      return false;
+    ResetRenderState();
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           tex_probe, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      RestoreStateAfterPass();
+      return false;
+    }
+    glViewport(0, 0, kProbeSize, kProbeSize);
+    glUseProgram(prog_probe);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_out);
+    glUniform1i(glGetUniformLocation(prog_probe, "u_tex"), 0);
+    glBindVertexArray(vao);
+    Draw();
+
+    uint8_t buf[kProbeSize * kProbeSize * 4]{};
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D, tex_probe);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    RestoreStateAfterPass();
+    if (glGetError() != GL_NO_ERROR) return false;
+    double sum = 0.0;
+    for (int i = 0; i < kProbeSize * kProbeSize; ++i) {
+      const uint8_t* p = buf + i * 4;
+      sum += 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    }
+    *out_y = static_cast<float>(sum / (kProbeSize * kProbeSize));
+    return true;
+  }
+
+  // Render pass overlay F6 terpisah ke tex_out_debug (agar tex_out tetap bersih).
+  bool UpdateDebugTexture(float gain) {
+    if (!ready || !tex_out || !tex_mask || out_w <= 0 || out_h <= 0) {
+      debug_ready = false;
+      return false;
+    }
+    ResetRenderState();
+    glBindTexture(GL_TEXTURE_2D, tex_out_debug);
+    if (debug_w != out_w || debug_h != out_h) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, out_w, out_h, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, nullptr);
+      SetLinear(tex_out_debug);
+      debug_w = out_w;
+      debug_h = out_h;
+    }
+    AttachRGBA(tex_out_debug);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      RestoreStateAfterPass();
+      debug_ready = false;
+      return false;
+    }
+    glViewport(0, 0, out_w, out_h);
+    glUseProgram(prog_debug_mask);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_out);
+    glUniform1i(glGetUniformLocation(prog_debug_mask, "u_out"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tex_mask);
+    glUniform1i(glGetUniformLocation(prog_debug_mask, "u_mask"), 1);
+    glUniform1f(glGetUniformLocation(prog_debug_mask, "u_gain"),
+                std::clamp(gain, 0.0f, 1.0f));
+    glBindVertexArray(vao);
+    Draw();
+    RestoreStateAfterPass();
+    debug_ready = (LogGl("debug_mask pass") == GL_NO_ERROR);
+    return debug_ready;
   }
 
   bool Blend(const kgcore::BeautyComposeConfig& cfg, const uint8_t* raw, int w,
@@ -395,7 +519,8 @@ void main() {
              const uint8_t* face_probability = nullptr,
              bool has_seg_probability = false, float skin_cb0 = 128.0f,
              float skin_cr0 = 128.0f, bool has_color_calibration = false,
-             const kgcore::SkinMaskConfig* skin_cfg = nullptr) {
+             const kgcore::SkinMaskConfig* skin_cfg = nullptr,
+             bool use_gpu_mask_gen = true) {
     if (disabled) return false;
     if (!Init() || !raw || !beauty || !mask || w <= 0 || h <= 0 || mw <= 0 ||
         mh <= 0) {
@@ -403,37 +528,49 @@ void main() {
     }
     const auto cpu_submit_t0 = std::chrono::steady_clock::now();
     GLenum e;
-    while ((e = glGetError()) != GL_NO_ERROR) {}  // bersihkan sisa tahap lalu
+    while ((e = glGetError()) != GL_NO_ERROR) {}
+    ResetRenderState();
+
     UploadRGBA(tex_raw, raw, w, h);
     UploadRGBA(tex_beauty, beauty, w, h);
     UploadCpuMask(mask, mw, mh);
-    if (landmarks_xy && landmark_count >= 468) {
-      GenerateMaskGpu(landmarks_xy, landmark_count, w, h, mw, mh,
-                      face_probability, has_seg_probability, skin_cb0, skin_cr0,
-                      has_color_calibration, skin_cfg);
+
+    bool gpu_mask_ok = false;
+    if (use_gpu_mask_gen && landmarks_xy && landmark_count >= 468) {
+      gpu_mask_ok = GenerateMaskGpu(
+          landmarks_xy, landmark_count, w, h, mw, mh, face_probability,
+          has_seg_probability, skin_cb0, skin_cr0, has_color_calibration,
+          skin_cfg);
       cpu_mask_submit_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - cpu_submit_t0)
                                .count();
-    } else {
-      // Selalu sinkronkan mask final bila landmark tidak valid.
+    }
+    if (!gpu_mask_ok) {
+      // Fallback sinkron ke mask CPU (baik saat landmark kosong, --no-mask-gen-gpu,
+      // maupun saat FBO mask_gen gagal).
       UploadMask(mask, mw, mh);
     }
-    glBindTexture(GL_TEXTURE_2D, tex_out);
-    if (out_w != w || out_h != h) {
+
+    // Double buffer: tulis selalu ke back buffer, swap ke front hanya bila sukses.
+    const int back_idx = ready ? (1 - out_front_idx) : 0;
+    const GLuint back_tex = tex_out_pair[back_idx];
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, back_tex);
+    if (out_pair_w[back_idx] != w || out_pair_h[back_idx] != h) {
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
                    GL_UNSIGNED_BYTE, nullptr);
-      SetLinear(tex_out);
-      out_w = w;
-      out_h = h;
+      SetLinear(back_tex);
+      out_pair_w[back_idx] = w;
+      out_pair_h[back_idx] = h;
     }
+
+    ResetRenderState();
     glBindVertexArray(vao);
-    glDisable(GL_BLEND);
-    glDisable(GL_DEPTH_TEST);
     glViewport(0, 0, w, h);
 
     // ---- pass statistik guided (RGBA16F): encode + box H + box V ----
     if (has_stats && cfg.smooth_amount > 0.0f) {
-      Attach16F(tex_stat, stat_w, stat_h);
+      Attach16F(tex_stat, stat_w, stat_h, w, h);
       if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         has_stats = false;
         if (!warned_no_stats) {
@@ -447,8 +584,7 @@ void main() {
         glBindTexture(GL_TEXTURE_2D, tex_beauty);
         glUniform1i(glGetUniformLocation(prog_encode, "u_beauty"), 0);
         Draw();
-        // box H: tex_stat -> tex_tmp
-        Attach16F(tex_tmp, tmp_w, tmp_h);
+        Attach16F(tex_tmp, tmp_w, tmp_h, w, h);
         glUseProgram(prog_blur);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex_stat);
@@ -458,30 +594,29 @@ void main() {
         glUniform1i(glGetUniformLocation(prog_blur, "u_radius"),
                     std::max(1, cfg.smooth_radius));
         Draw();
-        // box V: tex_tmp -> tex_stat
-        Attach16F(tex_stat, stat_w, stat_h);
+        Attach16F(tex_stat, stat_w, stat_h, w, h);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex_tmp);
         glUniform2f(glGetUniformLocation(prog_blur, "u_dir"), 0.0f,
                     1.0f / static_cast<float>(h));
         Draw();
         if (LogGl("stat pass") != GL_NO_ERROR) {
-          has_stats = false;  // gagal di tengah - pakai jalur tanpa guided
+          has_stats = false;
         }
       }
     }
 
-    // ---- pass final -> tex_out ----
-    AttachRGBA(tex_out);
+    // ---- pass final -> back_tex ----
+    AttachRGBA(back_tex);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      glBindVertexArray(0);
+      RestoreStateAfterPass();
       last_error = "FBO tex_out tidak lengkap";
       kgcore::Log("blend", "GAGAL: FBO tex_out tidak lengkap (fbo=%u %dx%d)",
                   fbo, w, h);
       init_failed = true;
       return false;
     }
+    glViewport(0, 0, w, h);
     glUseProgram(prog_final);
     auto u1 = [&](const char* n, int unit) {
       glActiveTexture(GL_TEXTURE0 + unit);
@@ -496,35 +631,49 @@ void main() {
     u1("u_mask", 2);
     u1("u_stat", 3);
     glUniform1f(glGetUniformLocation(prog_final, "u_gain"),
-                gain < 0.0f ? 0.0f : (gain > 1.0f ? 1.0f : gain));
+                std::clamp(gain, 0.0f, 1.0f));
     glUniform1f(glGetUniformLocation(prog_final, "u_smooth_amount"),
                 cfg.smooth_amount);
     glUniform1f(glGetUniformLocation(prog_final, "u_chroma_retain"),
                 cfg.chroma_retain);
     glUniform1f(glGetUniformLocation(prog_final, "u_smooth_eps"), cfg.smooth_eps);
     glUniform1f(glGetUniformLocation(prog_final, "u_lift"),
-                cfg.lift < 0.0f ? 0.0f : (cfg.lift > 0.95f ? 0.95f : cfg.lift));
+                std::clamp(cfg.lift, 0.0f, 0.95f));
     glUniform1i(glGetUniformLocation(prog_final, "u_has_stats"),
                 (has_stats && cfg.smooth_amount > 0.0f) ? 1 : 0);
-    glUniform1i(glGetUniformLocation(prog_final, "u_debug"), debug_mask ? 1 : 0);
     Draw();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindVertexArray(0);
+    RestoreStateAfterPass();
+
     const GLenum err = LogGl("final pass");
     if (err != GL_NO_ERROR) {
       init_failed = true;
       return false;
     }
+
+    // Swap front buffer hanya setelah final pass sukses 100%.
+    out_front_idx = back_idx;
+    tex_out = back_tex;
+    out_w = w;
+    out_h = h;
     ready = true;
+
+    if (debug_mask) {
+      UpdateDebugTexture(gain);
+    } else {
+      debug_ready = false;
+    }
     return true;
   }
 
   // M2i swa-uji: baca kembali luma rata-rata keluaran (subsample 1/4).
   bool ReadOutputLuma(float* out_y) {
-    if (!ready || out_w <= 0 || out_h <= 0) return false;
+    if (!ready || !tex_out || out_w <= 0 || out_h <= 0) return false;
     std::vector<uint8_t> buf(static_cast<size_t>(out_w) * out_h * 4);
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, tex_out);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
     if (LogGl("selftest glGetTexImage") != GL_NO_ERROR) return false;
     double sum = 0.0;
     long n = 0;
@@ -542,16 +691,48 @@ void main() {
   }
 
  private:
+  // ImGui meninggalkan GL_SCISSOR_TEST, GL_BLEND, dan active texture unit
+  // di state terakhirnya; wajib dibersihkan sebelum/sesudah setiap pass FBO.
+  static void ResetRenderState() {
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_STENCIL_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+  }
+  static void RestoreStateAfterPass() {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+    for (int u = 4; u >= 0; --u) {
+      glActiveTexture(GL_TEXTURE0 + u);
+      glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glDisable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+  }
   static void SetLinear(GLuint tex) {
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
   }
   void UploadRGBA(GLuint tex, const uint8_t* data, int w, int h) {
     int& tex_w = tex == tex_raw ? raw_w : beauty_w;
     int& tex_h = tex == tex_raw ? raw_h : beauty_h;
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glBindTexture(GL_TEXTURE_2D, tex);
     if (tex_w != w || tex_h != h) {
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
@@ -575,6 +756,9 @@ void main() {
   void UploadR8(GLuint tex, const uint8_t* data, int w, int h, int& tex_w,
                 int& tex_h) {
     if (!data || w <= 0 || h <= 0) return;
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glBindTexture(GL_TEXTURE_2D, tex);
     if (tex_w != w || tex_h != h) {
       glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED,
@@ -587,23 +771,31 @@ void main() {
     SetLinear(tex);
   }
   void AllocateMaskTarget(GLuint tex, int w, int h) {
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE,
                  nullptr);
     SetLinear(tex);
   }
-  void AttachMask(GLuint tex, int w, int h) {
+  bool AttachMask(GLuint tex, int w, int h, const char* label) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            tex, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+      kgcore::Log("mask_gen", "GAGAL: FBO %s tidak lengkap (status=0x%04X %dx%d)",
+                  label, static_cast<unsigned>(st), w, h);
+      return false;
+    }
     glViewport(0, 0, w, h);
+    return true;
   }
-  void GenerateMaskGpu(const float* xy_px, int count, int fw, int fh, int mw,
+  bool GenerateMaskGpu(const float* xy_px, int count, int fw, int fh, int mw,
                        int mh, const uint8_t* face_probability,
                        bool has_seg_probability, float skin_cb0,
                        float skin_cr0, bool has_color_calibration,
                        const kgcore::SkinMaskConfig* skin_cfg) {
-    if (!xy_px || count < 468 || fw <= 0 || fh <= 0) return;
+    if (!xy_px || count < 468 || fw <= 0 || fh <= 0) return false;
     if (mask_query_pending) {
       GLint available = GL_FALSE;
       glGetQueryObjectiv(mask_timer_query, GL_QUERY_RESULT_AVAILABLE, &available);
@@ -626,7 +818,14 @@ void main() {
       mask_w = mw;
       mask_h = mh;
     }
-    // 1) FACEMESH_TESSELATION triangles — rasterisasi GPU setiap frame.
+
+    auto abort_gpu_mask = [&]() {
+      if (measure_gpu) glEndQuery(kTimeElapsedQuery);
+      RestoreStateAfterPass();
+      return false;
+    };
+
+    // 1) FACEMESH_TESSELATION triangles
     std::vector<float> verts;
     const kgcore::TessTriangle* tris = kgcore::TessTriangles();
     const int tri_n = kgcore::TessTriangleCount();
@@ -638,9 +837,10 @@ void main() {
     for (int i = 0; i < tri_n; ++i) {
       push_pt(tris[i].a); push_pt(tris[i].b); push_pt(tris[i].c);
     }
-    AttachMask(tex_face, mw, mh);
-    glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
-    glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
+    if (!AttachMask(tex_face, mw, mh, "tex_face")) return abort_gpu_mask();
+    ResetRenderState();
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(prog_face);
     glBindVertexArray(mesh_vao);
     glBindBuffer(GL_ARRAY_BUFFER, mesh_vbo);
@@ -648,8 +848,7 @@ void main() {
                  verts.data(), GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 2));
 
-    // 2) Exclusion fans: mata, alis (dua rantai digabung), bibir luar, lubang
-    // hidung kecil. GL_MAX menyatukan semua kontur tanpa ring tebal.
+    // 2) Exclusion polygons + ellipses
     kgcore::ExclusionShapes shapes = kgcore::BuildExclusionShapes(xy_px);
     std::vector<float> exverts;
     auto add_triangle = [&](float ax, float ay, float bx, float by, float cx,
@@ -661,8 +860,6 @@ void main() {
       exverts.push_back(std::clamp(cx / fw, 0.0f, 1.0f));
       exverts.push_back(std::clamp(cy / fh, 0.0f, 1.0f));
     };
-    // Ear clipping menutup poligon cekung (terutama bibir luar) tanpa
-    // centroid fan yang dapat mengisi area di luar kontur.
     auto triangulate_loop = [&](const std::vector<int>& loop) {
       if (loop.size() < 3) return;
       std::vector<int> polygon = loop;
@@ -738,7 +935,8 @@ void main() {
                      e.cy + e.ry * std::sin(a1));
       }
     }
-    AttachMask(tex_excl, mw, mh);
+    if (!AttachMask(tex_excl, mw, mh, "tex_excl")) return abort_gpu_mask();
+    glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_BLEND); glBlendEquation(GL_MAX); glBlendFunc(GL_ONE, GL_ONE);
     glUseProgram(prog_excl);
@@ -749,23 +947,22 @@ void main() {
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(exverts.size() / 2));
     glDisable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
 
-    // 3) Feather eksklusi di resolusi mask (Gaussian 5x5), lalu 4) union CPU
-    // mask + teselasi → (1−excl) → ambang keras. Mask final inilah yang dipakai
-    // shader blend DAN F5 readback (single source of truth).
-    AttachMask(tex_excl_blur, mw, mh);
+    // 3) Feather eksklusi -> 4) compose tex_mask
+    if (!AttachMask(tex_excl_blur, mw, mh, "tex_excl_blur")) return abort_gpu_mask();
     glUseProgram(prog_excl_blur);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_excl);
     glUniform1i(glGetUniformLocation(prog_excl_blur, "u_in"), 0);
     glUniform2f(glGetUniformLocation(prog_excl_blur, "u_texel"),
                 1.0f / mw, 1.0f / mh);
     glBindVertexArray(vao); Draw();
+
     if (face_probability) {
       UploadFaceProbability(face_probability, mw, mh);
     } else {
       std::vector<uint8_t> full(static_cast<size_t>(mw) * mh, 255);
       UploadFaceProbability(full.data(), mw, mh);
     }
-    AttachMask(tex_mask, mw, mh);
+    if (!AttachMask(tex_mask, mw, mh, "tex_mask")) return abort_gpu_mask();
     glUseProgram(prog_compose_mask);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_cpu_mask);
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_cpu"), 0);
@@ -792,7 +989,7 @@ void main() {
                 gate_cfg.chroma_radius * gate_cfg.chroma_feather,
                 gate_cfg.chroma_radius * gate_cfg.seg_gate_fade);
     Draw();
-    glActiveTexture(GL_TEXTURE0);
+    RestoreStateAfterPass();
     if (measure_gpu) {
       glEndQuery(kTimeElapsedQuery);
       mask_query_pending = true;
@@ -809,20 +1006,22 @@ void main() {
                     static_cast<unsigned long long>(mask_gen_frames));
       }
     }
+    return LogGl("mask_gen") == GL_NO_ERROR;
   }
   void AttachRGBA(GLuint tex) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            tex, 0);
   }
-  void Attach16F(GLuint tex, int& tex_w, int& tex_h) {
+  void Attach16F(GLuint tex, int& tex_w, int& tex_h, int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
-    if (tex_w != out_w || tex_h != out_h) {
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, out_w, out_h, 0, GL_RGBA,
+    if (tex_w != w || tex_h != h) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA,
                    GL_FLOAT, nullptr);
-      tex_w = out_w;
-      tex_h = out_h;
+      tex_w = w;
+      tex_h = h;
       SetLinear(tex);
     }
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
@@ -859,15 +1058,11 @@ void main() {
     return sh;
   }
   GLuint Build(GLenum type, const char* src, const char* label) {
-    // Buat program sementara utk menampung hasil compile awal; link menyusul
-    // dengan vertex shader - cukup simpan shader via program sederhana:
     GLuint sh = Compile(type, src, label);
     if (!sh) return 0;
     GLuint p = glCreateProgram();
     glAttachShader(p, sh);
     glDeleteShader(sh);
-    // Link awal (hanya fs) akan gagal utk vs wajib? Tidak - fs-only program
-    // valid; Link() berikutnya menambah vs dan link ulang.
     return p;
   }
   bool Link(GLuint prog, GLuint vs) {

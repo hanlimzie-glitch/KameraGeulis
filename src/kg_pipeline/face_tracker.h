@@ -6,6 +6,7 @@
 #include "kgcore/frame.h"
 #include "kgcore/landmark.h"
 #include "kgcore/one_euro.h"
+#include "kgcore/roi_align.h"
 
 namespace kgcore {
 // Per-stage timings for the debug overlay (docs/ARCHITECTURE.md §5.1).
@@ -16,6 +17,8 @@ struct StageTimings {
   float track_ms = 0.0f;  // whole provider Track() call (FaceTracker fills it)
   float mask_ms = 0.0f;   // M2h: pembuatan mask kulit (0 bila checkbox mati)
   int frames_since_detect = 0;
+  int reset_count = 0;    // M2l: jumlah ROI reset sejak mulai
+  std::string last_reset_reason;
 };
 
 // Abstraction over face-landmark providers (see docs/ARCHITECTURE.md §5).
@@ -31,6 +34,16 @@ class ILandmarkProvider {
   // Fills `out` with per-stage timings; returns false if unsupported.
   virtual bool GetStageTimings(StageTimings* out) const {
     (void)out;
+    return false;
+  }
+  // M2l: ambil potongan ROI 192x192 RGBA terakhir yang dikirim ke FaceMesh
+  // (untuk dump F5 roi_*.png).
+  virtual bool GetDebugRoi(std::vector<uint8_t>* rgba_out, int* w, int* h,
+                           AlignedRoi* roi_out) const {
+    (void)rgba_out;
+    (void)w;
+    (void)h;
+    (void)roi_out;
     return false;
   }
 };
@@ -61,6 +74,7 @@ class FaceTracker {
   std::array<OneEuroVec2, kLandmarkCount> smoothers_;
   LandmarkFade fade_{300.0f};
   LandmarkSet current_;
+  bool was_valid_ = false;
   float last_track_ms_ = 0.0f;
 };
 }  // namespace kgcore

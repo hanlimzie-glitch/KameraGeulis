@@ -17,6 +17,8 @@ AlignedRoi ComputeAlignedRoi(float box_cx_px, float box_cy_px, float box_w_px,
 }
 
 Vec2 FrameToMeshCanvas(Vec2 pt_px, const AlignedRoi& roi, int frame_w, int frame_h) {
+  (void)frame_w;
+  (void)frame_h;
   // Work in pixel space with a square (aspect-corrected) coordinate system:
   // translate to ROI center, un-rotate by -angle (so the crop axis becomes
   // horizontal), normalize to [0,1] over the square side.

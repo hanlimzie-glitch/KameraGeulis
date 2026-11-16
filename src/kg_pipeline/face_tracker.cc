@@ -14,10 +14,14 @@ void FaceTracker::Track(const Frame& frame) {
   last_track_ms_ = std::chrono::duration<float, std::milli>(t1 - t0).count();
   const int64_t ts = frame.timestamp_ms;
   if (raw.valid) {
+    if (!was_valid_ || raw.roi_reset) {
+      for (auto& s : smoothers_) s.Reset();
+    }
     for (size_t i = 0; i < kLandmarkCount; ++i) {
       raw.pts[i] = smoothers_[i].Filter(raw.pts[i], ts);
     }
   }
+  was_valid_ = raw.valid;
   current_ = raw;
   fade_.Update(raw.valid, ts);
 }

@@ -21,6 +21,7 @@
 #include "kgcore/face_anchors.h"
 #include "kgcore/face_detection_decode.h"
 #include "kgcore/face_mesh_decode.h"
+#include "kgcore/landmark_tracking.h"
 #include "kgcore/log.h"
 #include "kgcore/roi_align.h"
 #include "windows_paths.h"
@@ -34,13 +35,9 @@ constexpr char kTag[] = "landmark";
 // project GitHub Release `models-v1` (or taken from KAMERAGEULIS_MODELS_DIR).
 constexpr wchar_t kDetFile[] = L"face_detection_short_range.onnx";
 constexpr wchar_t kMeshFile[] = L"face_mesh.onnx";
-// M2j (2026-11-14): pin DIPERBARUI dari keluaran CI Models 43590566734
-// (runner image berubah sejak 43179962364 → byte ONNX berbeda, verifikasi
-// I/O tetap lulus; workflow kini menassert pin agar drift terlihat di CI).
 constexpr char kDetSha256[] = "5ff2cd91827ab8a9fff56ed7f95854069d9d66cf5ec32ff4cdf6cd17ef48ef8e";
 constexpr char kMeshSha256[] = "a17115cbad5fdcc7647cc0e4f5cf9178721cc2557bf8feda047f2d8b3832975a";
-constexpr wchar_t kDownloadBase[] =
-    L"github.com";
+constexpr wchar_t kDownloadBase[] = L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =
     L"/hanlimzie-glitch/KameraGeulis/releases/download/models-v1/";
 constexpr wchar_t kUserAgent[] = L"KameraGeulis/0.2 (+https://github.com/hanlimzie-glitch/KameraGeulis)";
@@ -111,6 +108,22 @@ bool FilesEqualHash(const std::wstring& path, const char* sha256_hex) {
   if (!ok) return false;
   return actual == sha256_hex;
 }
+
+float SampleChannel(const Frame& f, float fx, float fy, int channel_bgr_or_rgb) {
+  const int w = f.width, h = f.height;
+  const int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
+  const float ax = fx - x0, ay = fy - y0;
+  auto px = [&](int x, int y) -> float {
+    if (x < 0 || y < 0 || x >= w || y >= h) return 0.0f;
+    const uint8_t* p = f.pixels.data() + static_cast<size_t>(y) * f.stride_bytes + x * 4;
+    const int c = channel_bgr_or_rgb;
+    if (f.format == kFormatRGBA) return static_cast<float>(p[c]);
+    return static_cast<float>(p[c == 0 ? 2 : (c == 1 ? 1 : 0)]);
+  };
+  const float top = px(x0, y0) + (px(x0 + 1, y0) - px(x0, y0)) * ax;
+  const float bot = px(x0, y0 + 1) + (px(x0 + 1, y0 + 1) - px(x0, y0 + 1)) * ax;
+  return top + (bot - top) * ay;
+}
 }  // namespace
 
 OrtLandmarkProvider::OrtLandmarkProvider() { EnsureModelsLoaded_(); }
@@ -119,13 +132,6 @@ OrtLandmarkProvider::~OrtLandmarkProvider() = default;
 
 bool OrtLandmarkProvider::Available() const { return available_; }
 
-// Model search order (shared with the app --selftest via windows_paths.h):
-//   1) KAMERAGEULIS_MODELS_DIR — authoritative (download target if writable)
-//   2) <exe_dir>\models — shipped in the CI artifact (read-only)
-//   3) %LOCALAPPDATA%\KameraGeulis\models — download cache / download target
-// Returns the first directory where BOTH models exist and verify. If none
-// does, returns the directory the app should DOWNLOAD into (env dir if set,
-// else LOCALAPPDATA).
 std::wstring OrtLandmarkProvider::ModelDir_() const {
   const std::wstring env = KgEnvModelsDirW();
   const std::wstring exe = KgExeModelsDirW();
@@ -149,7 +155,7 @@ std::wstring OrtLandmarkProvider::ModelDir_() const {
   }
   if (!env.empty()) {
     Log(kTag, "model dir: %ls (KAMERAGEULIS_MODELS_DIR; download target)", env.c_str());
-    return env;  // env authoritative: download into it
+    return env;
   }
   Log(kTag, "model dir: %ls (tidak ada model terverifikasi - download)", local.c_str());
   return local;
@@ -185,7 +191,6 @@ bool OrtLandmarkProvider::DownloadFile_(const wchar_t* host_path, const std::wst
     WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                         WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
     if (status >= 300 && status < 400) {
-      // Follow redirect: read Location header, re-parse host/path.
       DWORD locSize = 0;
       WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, nullptr,
                           &locSize, WINHTTP_NO_HEADER_INDEX);
@@ -195,9 +200,8 @@ bool OrtLandmarkProvider::DownloadFile_(const wchar_t* host_path, const std::wst
       location.resize(wcslen(location.c_str()));
       WinHttpCloseHandle(hRequest);
       WinHttpCloseHandle(hConnect);
-      // Parse "https://host/path"
       const std::wstring https_prefix = L"https://";
-      if (location.compare(0, https_prefix.size(), https_prefix) != 0) break;  // https only
+      if (location.compare(0, https_prefix.size(), https_prefix) != 0) break;
       const size_t slash = location.find(L'/', https_prefix.size());
       if (slash == std::wstring::npos) break;
       host = location.substr(https_prefix.size(), slash - https_prefix.size());
@@ -242,7 +246,7 @@ bool OrtLandmarkProvider::EnsureModelFile_(const std::wstring& dir, const wchar_
                                            const char* sha256_hex) {
   const std::wstring dest = dir + L"\\" + file_name;
   if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
-    if (FilesEqualHash(dest, sha256_hex)) return true;  // already present & verified
+    if (FilesEqualHash(dest, sha256_hex)) return true;
     Log(kTag, "model %ls exists but SHA-256 mismatch — re-downloading", file_name);
   }
   Log(kTag, "downloading %ls from models-v1 release …", file_name);
@@ -311,25 +315,6 @@ bool OrtLandmarkProvider::EnsureModelsLoaded_() {
   return true;
 }
 
-namespace {
-float SampleChannel(const Frame& f, float fx, float fy, int channel_bgr_or_rgb) {
-  const int w = f.width, h = f.height;
-  const int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
-  const float ax = fx - x0, ay = fy - y0;
-  auto px = [&](int x, int y) -> float {
-    if (x < 0 || y < 0 || x >= w || y >= h) return 0.0f;
-    const uint8_t* p = f.pixels.data() + static_cast<size_t>(y) * f.stride_bytes + x * 4;
-    const int c = channel_bgr_or_rgb;
-    if (f.format == kFormatRGBA) return static_cast<float>(p[c]);
-    // BGRA: R at [2], G at [1], B at [0]
-    return static_cast<float>(p[c == 0 ? 2 : (c == 1 ? 1 : 0)]);
-  };
-  const float top = px(x0, y0) + (px(x0 + 1, y0) - px(x0, y0)) * ax;
-  const float bot = px(x0, y0 + 1) + (px(x0 + 1, y0 + 1) - px(x0, y0 + 1)) * ax;
-  return top + (bot - top) * ay;
-}
-}  // namespace
-
 LandmarkSet OrtLandmarkProvider::Track(const Frame& frame) {
   const auto t0 = std::chrono::steady_clock::now();
   LandmarkSet out = TrackImpl_(frame);
@@ -344,53 +329,23 @@ bool OrtLandmarkProvider::GetStageTimings(StageTimings* out) const {
   return true;
 }
 
-LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
-  LandmarkSet out;
-  out.ts_ms = frame.timestamp_ms;
-  if (!frame.IsValid()) return out;
-  stage_.detect_ms = 0.0f;
-  stage_.mesh_ms = 0.0f;
-  stage_.frames_since_detect = frames_since_detect_;
-  if (!EnsureModelsLoaded_()) {
-    if (!logged_failure_) {
-      Log(kTag, "landmark provider unavailable: %s", last_error_.c_str());
-      logged_failure_ = true;
-    }
-    return out;
-  }
+bool OrtLandmarkProvider::GetDebugRoi(std::vector<uint8_t>* rgba_out, int* w,
+                                      int* h, AlignedRoi* roi_out) const {
+  if (!rgba_out || last_roi_rgba_.empty()) return false;
+  *rgba_out = last_roi_rgba_;
+  if (w) *w = 192;
+  if (h) *h = 192;
+  if (roi_out) *roi_out = last_roi_used_;
+  return true;
+}
 
-  const int src_w = frame.width, src_h = frame.height;
-
-  // ---------- Cadence: detect only when lost / first frame / safety ----------
-  const bool need_detection = !have_prev_roi_ || lost_streak_ >= 2 ||
-                              frames_since_detect_ >= kSafetyRedetectFrames;
-  AlignedRoi roi{};
-  if (need_detection) {
-    const auto det_start = std::chrono::steady_clock::now();
-    const bool det_ok = DetectionStage_(frame, &roi, &out.face_score);
-    stage_.detect_ms = std::chrono::duration<float, std::milli>(
-                           std::chrono::steady_clock::now() - det_start).count();
-    if (det_ok) {
-      pending_roi_anchor_ = true;
-    } else {
-      ++lost_streak_;
-      if (have_prev_roi_ && lost_streak_ < 2) {
-        // Detector failed but we still hold a usable previous ROI: track instead.
-        roi = TrackRoiFromPreviousLandmarks_(src_w, src_h);
-        out.face_score = prev_face_score_;
-      } else {
-        have_prev_roi_ = false;
-        return out;
-      }
-    }
-  } else {
-    roi = TrackRoiFromPreviousLandmarks_(src_w, src_h);
-    out.face_score = prev_face_score_;
-  }
-
-  // ---------- Step 4: rotated square crop 192x192, [0,1] ----------
+bool OrtLandmarkProvider::RunMeshOnRoi_(
+    const Frame& frame, const AlignedRoi& roi,
+    std::array<Vec2, kLandmarkCount>* canvas_pts, float* face_flag_out,
+    std::vector<uint8_t>* roi_rgba_out) {
   const auto mesh_start = std::chrono::steady_clock::now();
   std::vector<float> mesh_input(static_cast<size_t>(192) * 192 * 3, 0.0f);
+  if (roi_rgba_out) roi_rgba_out->resize(static_cast<size_t>(192) * 192 * 4, 255);
   const float ca = std::cos(roi.angle_rad), sa = std::sin(roi.angle_rad);
   for (int ty = 0; ty < 192; ++ty) {
     const float uy = ((ty + 0.5f) / 192.0f - 0.5f) * roi.side_px;
@@ -402,52 +357,212 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
       for (int c = 0; c < 3; ++c) {
         dst[c] = SampleChannel(frame, fx, fy, c) / 255.0f;
       }
+      if (roi_rgba_out) {
+        uint8_t* p = roi_rgba_out->data() + (static_cast<size_t>(ty) * 192 + tx) * 4;
+        p[0] = static_cast<uint8_t>(std::clamp(dst[0] * 255.0f + 0.5f, 0.0f, 255.0f));
+        p[1] = static_cast<uint8_t>(std::clamp(dst[1] * 255.0f + 0.5f, 0.0f, 255.0f));
+        p[2] = static_cast<uint8_t>(std::clamp(dst[2] * 255.0f + 0.5f, 0.0f, 255.0f));
+        p[3] = 255;
+      }
     }
   }
 
-  // ---------- Step 5: mesh inference + face-flag gate ----------
-  std::array<Vec2, kLandmarkCount> canvas_pts{};
-  float face_flag = 0.0f;
   try {
-    Ort::MemoryInfo memInfo =
-        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+    Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
     const int64_t mesh_shape[4] = {1, 192, 192, 3};
-    Ort::Value mesh_tensor = Ort::Value::CreateTensor<float>(memInfo, mesh_input.data(),
-                                                              mesh_input.size(), mesh_shape, 4);
+    Ort::Value mesh_tensor = Ort::Value::CreateTensor<float>(
+        memInfo, mesh_input.data(), mesh_input.size(), mesh_shape, 4);
     const char* input_names[] = {"input_1"};
     const char* output_names[] = {"conv2d_21", "conv2d_31"};
     Ort::RunOptions run_opts;
-    auto mesh_out = mesh_->Run(run_opts, input_names, &mesh_tensor, 1, output_names, 2);
-    DecodeMeshTensor(mesh_out[0].GetTensorData<float>(), &canvas_pts);
-    face_flag = ReadMeshFaceFlag(mesh_out[1].GetTensorData<float>());
+    auto mesh_out =
+        mesh_->Run(run_opts, input_names, &mesh_tensor, 1, output_names, 2);
+    DecodeMeshTensor(mesh_out[0].GetTensorData<float>(), canvas_pts);
+    *face_flag_out = ReadMeshFaceFlag(mesh_out[1].GetTensorData<float>());
   } catch (const Ort::Exception& e) {
-    stage_.mesh_ms = std::chrono::duration<float, std::milli>(
-                         std::chrono::steady_clock::now() - mesh_start).count();
+    stage_.mesh_ms += std::chrono::duration<float, std::milli>(
+                          std::chrono::steady_clock::now() - mesh_start).count();
     Log(kTag, "mesh inference failed: %s", e.what());
-    out = LandmarkSet{};
-    out.ts_ms = frame.timestamp_ms;
-    NoteMeshOutcome_(out, roi, src_w, src_h);
-    stage_.frames_since_detect = frames_since_detect_;
-    return out;
+    return false;
   }
-  stage_.mesh_ms = std::chrono::duration<float, std::milli>(
-                       std::chrono::steady_clock::now() - mesh_start).count();
-  if (face_flag <= 0.0f) {
-    // ROI does not contain a face — count it; re-detect on the next frame.
-    out = LandmarkSet{};
-    out.ts_ms = frame.timestamp_ms;
-    NoteMeshOutcome_(out, roi, src_w, src_h);
-    stage_.frames_since_detect = frames_since_detect_;
+  stage_.mesh_ms += std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - mesh_start).count();
+  return true;
+}
+
+LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
+  LandmarkSet out;
+  out.ts_ms = frame.timestamp_ms;
+  if (!frame.IsValid()) return out;
+  stage_.detect_ms = 0.0f;
+  stage_.mesh_ms = 0.0f;
+  if (!EnsureModelsLoaded_()) {
+    if (!logged_failure_) {
+      Log(kTag, "landmark provider unavailable: %s", last_error_.c_str());
+      logged_failure_ = true;
+    }
     return out;
   }
 
-  // ---------- Step 6: unmap to frame coordinates ----------
-  for (size_t i = 0; i < kLandmarkCount; ++i) {
-    out.pts[i] = MeshCanvasToFrame(canvas_pts[i], roi, src_w, src_h);
+  const int src_w = frame.width, src_h = frame.height;
+  const int detect_interval = AdaptiveDetectInterval(
+      last_roi_shift_frac_, last_angle_delta_rad_, prev_face_flag_);
+  const bool need_detection = !have_prev_roi_ || lost_streak_ >= 2 ||
+                              frames_since_detect_ >= detect_interval;
+
+  AlignedRoi roi{};
+  AlignedRoi det_roi{};
+  bool det_ran = false;
+  bool det_ok = false;
+  float det_score = prev_face_score_;
+  bool roi_reset_this_frame = false;
+  std::string reset_reason;
+
+  auto run_detector = [&](AlignedRoi* out_roi, float* out_score) -> bool {
+    const auto ds = std::chrono::steady_clock::now();
+    const bool ok = DetectionStage_(frame, out_roi, out_score);
+    stage_.detect_ms += std::chrono::duration<float, std::milli>(
+                            std::chrono::steady_clock::now() - ds).count();
+    det_ran = true;
+    return ok;
+  };
+
+  if (have_prev_roi_) {
+    roi = TrackRoiFromLandmarks(prev_lm_, src_w, src_h, det_ref_side_px_);
   }
-  out.valid = true;
-  NoteMeshOutcome_(out, roi, src_w, src_h);
+
+  if (need_detection) {
+    det_ok = run_detector(&det_roi, &det_score);
+    if (det_ok) {
+      if (!have_prev_roi_) {
+        roi = det_roi;
+        det_ref_side_px_ = det_roi.side_px;
+        roi_reset_this_frame = true;
+        reset_reason = "inisialisasi deteksi";
+        Log(kTag, "ROI init: deteksi awal (side=%.1f px, score=%.2f)",
+            det_roi.side_px, det_score);
+      } else {
+        const float iou = RoiBoxIoU(roi, det_roi);
+        if (iou < kTrackingResetIouThreshold) {
+          char buf[128];
+          std::snprintf(buf, sizeof(buf),
+                        "IoU tracking vs deteksi=%.3f (<%.2f)",
+                        iou, kTrackingResetIouThreshold);
+          reset_reason = buf;
+          Log(kTag, "ROI reset: %s, sejak deteksi %d", reset_reason.c_str(),
+              frames_since_detect_);
+          roi = det_roi;
+          det_ref_side_px_ = det_roi.side_px;
+          roi_reset_this_frame = true;
+        } else {
+          // Tracking selaras dengan deteksi: perbarui jangkar skala & reset timer deteksi.
+          det_ref_side_px_ = det_roi.side_px;
+          frames_since_detect_ = 0;
+        }
+      }
+      out.face_score = det_score;
+    } else {
+      ++lost_streak_;
+      if (have_prev_roi_ && lost_streak_ < 2) {
+        out.face_score = prev_face_score_;
+      } else {
+        have_prev_roi_ = false;
+        return out;
+      }
+    }
+  } else {
+    out.face_score = prev_face_score_;
+  }
+
+  auto eval_mesh = [&](const AlignedRoi& use_roi, LandmarkSet* lm_out,
+                       float* flag_out, LandmarkSanityResult* sanity_out,
+                       std::vector<uint8_t>* roi_rgba) -> bool {
+    std::array<Vec2, kLandmarkCount> canvas_pts{};
+    if (!RunMeshOnRoi_(frame, use_roi, &canvas_pts, flag_out, roi_rgba)) {
+      return false;
+    }
+    *lm_out = LandmarkSet{};
+    lm_out->ts_ms = frame.timestamp_ms;
+    lm_out->face_score = out.face_score;
+    for (size_t i = 0; i < kLandmarkCount; ++i) {
+      lm_out->pts[i] = MeshCanvasToFrame(canvas_pts[i], use_roi, src_w, src_h);
+    }
+    lm_out->valid = true;
+    *sanity_out = CheckLandmarkSanity(*lm_out, use_roi, src_w, src_h);
+    return IsFaceFlagValid(*flag_out) && sanity_out->ok;
+  };
+
+  float face_flag = 0.0f;
+  LandmarkSanityResult sanity;
+  std::vector<uint8_t> roi_rgba;
+  bool mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
+
+  if (!mesh_ok) {
+    std::string fail_why;
+    if (!IsFaceFlagValid(face_flag)) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "face_flag=%.3f (<%.2f)", face_flag,
+                    kFaceFlagMinThreshold);
+      fail_why = buf;
+    } else {
+      fail_why = sanity.reason.empty() ? "mesh gagal" : sanity.reason;
+    }
+    Log(kTag, "ROI reset: %s, sejak deteksi %d -> reinisialisasi via detektor",
+        fail_why.c_str(), frames_since_detect_);
+
+    // Coba pulihkan seketika pada frame yang sama lewat detektor wajah.
+    if (!det_ran) det_ok = run_detector(&det_roi, &det_score);
+    if (det_ok) {
+      out.face_score = det_score;
+      roi = det_roi;
+      det_ref_side_px_ = det_roi.side_px;
+      roi_reset_this_frame = true;
+      reset_reason = fail_why;
+      mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
+    }
+    if (!mesh_ok) {
+      ++lost_streak_;
+      if (lost_streak_ >= 2) have_prev_roi_ = false;
+      out.valid = false;
+      stage_.frames_since_detect = frames_since_detect_;
+      return out;
+    }
+  }
+
+  // Sukses — simpan state pelacakan & ROI debug F5.
+  if (have_prev_roi_ && !roi_reset_this_frame && prev_roi_.side_px > 1.0f) {
+    last_roi_shift_frac_ =
+        std::hypot(roi.cx_px - prev_roi_.cx_px, roi.cy_px - prev_roi_.cy_px) /
+        prev_roi_.side_px;
+    last_angle_delta_rad_ = WrapAnglePi(roi.angle_rad - prev_roi_.angle_rad);
+  } else {
+    last_roi_shift_frac_ = 0.0f;
+    last_angle_delta_rad_ = 0.0f;
+  }
+
+  if (roi_reset_this_frame) {
+    ++reset_count_;
+    last_reset_reason_ = reset_reason;
+    frames_since_detect_ = 0;
+    out.roi_reset = true;
+    out.reset_reason = reset_reason;
+  } else if (!det_ran) {
+    ++frames_since_detect_;
+  }
+
+  lost_streak_ = 0;
+  have_prev_roi_ = true;
+  prev_roi_ = roi;
+  prev_lm_ = out;
+  prev_face_score_ = out.face_score;
+  prev_face_flag_ = face_flag;
+  last_roi_rgba_ = std::move(roi_rgba);
+  last_roi_used_ = roi;
+
   stage_.frames_since_detect = frames_since_detect_;
+  stage_.reset_count = reset_count_;
+  stage_.last_reset_reason = last_reset_reason_;
   return out;
 }
 
@@ -471,15 +586,16 @@ bool OrtLandmarkProvider::DetectionStage_(const Frame& frame, AlignedRoi* roi_ou
   std::vector<float> regressors;
   std::vector<float> classificators;
   try {
-    Ort::MemoryInfo memInfo =
-        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+    Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
     const int64_t det_shape[4] = {1, 128, 128, 3};
-    Ort::Value det_tensor = Ort::Value::CreateTensor<float>(memInfo, det_input.data(),
-                                                             det_input.size(), det_shape, 4);
+    Ort::Value det_tensor = Ort::Value::CreateTensor<float>(
+        memInfo, det_input.data(), det_input.size(), det_shape, 4);
     const char* input_names[] = {"input"};
     const char* output_names[] = {"regressors", "classificators"};
     Ort::RunOptions run_opts;
-    auto det_out = det_->Run(run_opts, input_names, &det_tensor, 1, output_names, 2);
+    auto det_out =
+        det_->Run(run_opts, input_names, &det_tensor, 1, output_names, 2);
     const float* reg = det_out[0].GetTensorData<float>();
     const float* cls = det_out[1].GetTensorData<float>();
     regressors.assign(reg, reg + 896 * 16);
@@ -489,72 +605,27 @@ bool OrtLandmarkProvider::DetectionStage_(const Frame& frame, AlignedRoi* roi_ou
     return false;
   }
 
-  // ---------- decode + NMS ----------
-  const std::vector<Detection> dets =
-      DecodeDetections(regressors.data(), classificators.data(), anchors, 0.5f, 0.3f);
-  if (dets.empty()) return false;  // no face in frame
+  const std::vector<Detection> dets = DecodeDetections(
+      regressors.data(), classificators.data(), anchors, 0.5f, 0.3f);
+  if (dets.empty()) return false;
   const Detection& det = dets[0];
   *face_score_out = det.score;
 
-  // ---------- map the detection back to frame pixels ----------
   const Vec2 box_center_norm =
       lb.MapToFrame({det.cx * 128.0f, det.cy * 128.0f});
   const float box_w_px = det.w * 128.0f / lb.scale;
   const float box_h_px = det.h * 128.0f / lb.scale;
   const float box_cx_px = box_center_norm.x * src_w;
   const float box_cy_px = box_center_norm.y * src_h;
-  const Vec2 kp0_norm = lb.MapToFrame({det.keypoints[0].x * 128.0f, det.keypoints[0].y * 128.0f});
-  const Vec2 kp1_norm = lb.MapToFrame({det.keypoints[1].x * 128.0f, det.keypoints[1].y * 128.0f});
+  const Vec2 kp0_norm =
+      lb.MapToFrame({det.keypoints[0].x * 128.0f, det.keypoints[0].y * 128.0f});
+  const Vec2 kp1_norm =
+      lb.MapToFrame({det.keypoints[1].x * 128.0f, det.keypoints[1].y * 128.0f});
   const Vec2 kp0_px{kp0_norm.x * src_w, kp0_norm.y * src_h};
   const Vec2 kp1_px{kp1_norm.x * src_w, kp1_norm.y * src_h};
-  *roi_out = ComputeAlignedRoi(box_cx_px, box_cy_px, box_w_px, box_h_px, kp0_px, kp1_px, 1.5f);
+  *roi_out = ComputeAlignedRoi(box_cx_px, box_cy_px, box_w_px, box_h_px,
+                               kp0_px, kp1_px, 1.5f);
   return true;
 }
 
-AlignedRoi OrtLandmarkProvider::TrackRoiFromPreviousLandmarks_(int src_w, int src_h) const {
-  Vec2 sum{};
-  for (size_t i = 0; i < kLandmarkCount; ++i) sum = sum + prev_pts_[i];
-  const float inv = 1.0f / static_cast<float>(kLandmarkCount);
-  const Vec2 centroid{sum.x * inv, sum.y * inv};  // normalized [0,1]
-  const Vec2 right_mid{(prev_pts_[33].x + prev_pts_[133].x) * 0.5f,
-                       (prev_pts_[33].y + prev_pts_[133].y) * 0.5f};
-  const Vec2 left_mid{(prev_pts_[362].x + prev_pts_[263].x) * 0.5f,
-                      (prev_pts_[362].y + prev_pts_[263].y) * 0.5f};
-  const float dx = (left_mid.x - right_mid.x) * static_cast<float>(src_w);
-  const float dy = (left_mid.y - right_mid.y) * static_cast<float>(src_h);
-  AlignedRoi roi = prev_roi_;  // side_px carried over
-  roi.cx_px = (centroid.x + roi_center_offset_.x) * static_cast<float>(src_w);
-  roi.cy_px = (centroid.y + roi_center_offset_.y) * static_cast<float>(src_h);
-  roi.angle_rad = std::atan2(dy, dx);
-  return roi;
-}
-
-void OrtLandmarkProvider::NoteMeshOutcome_(const LandmarkSet& result, const AlignedRoi& roi_used,
-                                           int src_w, int src_h) {
-  if (!result.valid) {
-    ++lost_streak_;
-    if (lost_streak_ >= 2) {
-      have_prev_roi_ = false;
-      pending_roi_anchor_ = false;
-    }
-    return;
-  }
-  lost_streak_ = 0;
-  prev_pts_ = result.pts;
-  prev_face_score_ = result.face_score;
-  prev_roi_ = roi_used;
-  have_prev_roi_ = true;
-  if (pending_roi_anchor_) {
-    Vec2 sum{};
-    for (size_t i = 0; i < kLandmarkCount; ++i) sum = sum + prev_pts_[i];
-    const float inv = 1.0f / static_cast<float>(kLandmarkCount);
-    const Vec2 centroid{sum.x * inv, sum.y * inv};
-    roi_center_offset_ = Vec2{roi_used.cx_px / static_cast<float>(src_w) - centroid.x,
-                              roi_used.cy_px / static_cast<float>(src_h) - centroid.y};
-    pending_roi_anchor_ = false;
-    frames_since_detect_ = 0;
-  } else {
-    ++frames_since_detect_;
-  }
-}
 }  // namespace kgcore

@@ -68,9 +68,38 @@ TEST_CASE("png: written file has valid signature, IHDR dims and IEND") {
   REQUIRE(Be32(&bytes[n - 4]) == iend_crc);
 
   // IDAT present between IHDR and IEND.
-  // Layout: sig(8) + IHDR[len4 type4 data13 crc4] + IDAT[len4 type4...]
   REQUIRE(std::memcmp(&bytes[8 + 4 + 4 + 13 + 4 + 4], "IDAT", 4) == 0);
 
   std::error_code ec;
   fs::remove(out, ec);
+}
+
+TEST_CASE("png: RGB8 & Gray8 terkompresi DEFLATE jauh lebih kecil dari raw") {
+  const int w = 320, h = 240;
+  std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4, 255);
+  std::vector<uint8_t> gray(static_cast<size_t>(w) * h, 0);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const size_t i = static_cast<size_t>(y) * w + x;
+      rgba[i * 4 + 0] = static_cast<uint8_t>((x / 8) * 6);
+      rgba[i * 4 + 1] = static_cast<uint8_t>((y / 8) * 8);
+      rgba[i * 4 + 2] = 128;
+      gray[i] = static_cast<uint8_t>((x + y) % 64);
+    }
+  }
+  const fs::path p_rgb = fs::temp_directory_path() / "kg_png_rgb_test.png";
+  const fs::path p_gray = fs::temp_directory_path() / "kg_png_gray_test.png";
+  REQUIRE(kgcore::WritePngRgbFromRgba(p_rgb.string().c_str(), rgba.data(), w, h));
+  REQUIRE(kgcore::WritePngGray(p_gray.string().c_str(), gray.data(), w, h));
+
+  const auto b_rgb = ReadAll(p_rgb);
+  const auto b_gray = ReadAll(p_gray);
+  REQUIRE(b_rgb[25] == 2);   // color type RGB8
+  REQUIRE(b_gray[25] == 0);  // color type Gray8
+  REQUIRE(b_rgb.size() < static_cast<size_t>(w) * h * 3 / 4);
+  REQUIRE(b_gray.size() < static_cast<size_t>(w) * h / 4);
+
+  std::error_code ec;
+  fs::remove(p_rgb, ec);
+  fs::remove(p_gray, ec);
 }

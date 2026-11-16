@@ -1,12 +1,14 @@
 #include "kgcore/settings.h"
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 namespace kgcore {
@@ -102,11 +104,13 @@ std::string Settings::ToJson() const {
 
 bool Settings::Load(const std::string& path, std::string* err) {
   if (err) err->clear();
-  std::ifstream in(path, std::ios::binary);
+  namespace fs = std::filesystem;
+  const fs::path p = fs::u8path(path);
+  std::ifstream in(p, std::ios::binary);
   if (!in) {
     if (err) {
       std::error_code exists_ec;
-      const bool exists = std::filesystem::exists(path, exists_ec);
+      const bool exists = fs::exists(p, exists_ec);
       *err = !exists && !exists_ec
                  ? "file tidak ditemukan: " + path
                  : "tidak bisa membuka " + path + " (" +
@@ -131,48 +135,96 @@ bool Settings::Load(const std::string& path, std::string* err) {
 }
 
 bool Settings::Save(const std::string& path, std::string* err) const {
+  SaveInfo info;
+  return SaveAndVerify(path, &info, err);
+}
+
+bool Settings::SaveAndVerify(const std::string& path, SaveInfo* info,
+                             std::string* err) const {
   if (err) err->clear();
+  if (info) *info = SaveInfo{};
   namespace fs = std::filesystem;
   std::error_code ec;
-  // Pastikan direktori tujuan ada (mis. %APPDATA%\KameraGeulis).
-  const fs::path p(path);
+  const fs::path p = fs::u8path(path);
+  const fs::path abs_p = fs::absolute(p, ec);
+  const std::string resolved = ec ? path : abs_p.u8string();
+  ec.clear();
+
   if (p.has_parent_path()) {
     fs::create_directories(p.parent_path(), ec);
     if (ec && !fs::is_directory(p.parent_path())) {
       if (err)
-        *err = "gagal membuat direktori " + p.parent_path().string() + ": " +
+        *err = "gagal membuat direktori " + p.parent_path().u8string() + ": " +
                ec.message();
       return false;
     }
     ec.clear();
   }
-  const std::string tmp = path + ".tmp";
+
+  const std::string json_str = ToJson();
+  const fs::path tmp_p = fs::u8path(path + ".tmp");
   {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    std::ofstream out(tmp_p, std::ios::binary | std::ios::trunc);
     if (!out) {
       if (err)
-        *err = "gagal menulis " + tmp + " (" + std::string(std::strerror(errno)) +
-               ")";
+        *err = "gagal menulis " + tmp_p.u8string() + " (" +
+               std::string(std::strerror(errno)) + ")";
       return false;
     }
-    out << ToJson();
+    out.write(json_str.data(), static_cast<std::streamsize>(json_str.size()));
     out.flush();
     if (!out.good()) {
       if (err)
-        *err = "stream rusak saat menulis " + tmp + " (" +
+        *err = "stream rusak saat menulis " + tmp_p.u8string() + " (" +
                std::string(std::strerror(errno)) + ")";
       out.close();
-      std::remove(tmp.c_str());
+      fs::remove(tmp_p, ec);
       return false;
     }
   }
-  // Rename atomik menimpa tujuan (POSIX + Windows MoveFileEx REPLACE).
-  // std::rename C89 GAGAL bila tujuan sudah ada di Windows - itulah bug M2i.
-  fs::rename(tmp, path, ec);
+
+  // Rename atomik menimpa tujuan (coba ulang singkat bila antivirus/indexer
+  // Windows mengunci tujuan sesaat).
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    ec.clear();
+    fs::rename(tmp_p, p, ec);
+    if (!ec) break;
+    if (attempt < 2) std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
   if (ec) {
-    std::remove(tmp.c_str());
-    if (err) *err = "rename " + tmp + " -> " + path + ": " + ec.message();
+    fs::remove(tmp_p, ec);
+    if (err)
+      *err = "rename " + tmp_p.u8string() + " -> " + resolved + ": " +
+             ec.message();
     return false;
+  }
+
+  // Verifikasi keberadaan, jumlah byte di disk, dan baca-ulang JSON.
+  std::error_code sz_ec;
+  const uintmax_t disk_bytes = fs::file_size(p, sz_ec);
+  if (sz_ec || disk_bytes != json_str.size()) {
+    if (err)
+      *err = "verifikasi ukuran disk gagal di " + resolved +
+             " (expected=" + std::to_string(json_str.size()) + ", got=" +
+             (sz_ec ? std::string("err:") + sz_ec.message()
+                    : std::to_string(disk_bytes)) +
+             ")";
+    return false;
+  }
+
+  Settings verify;
+  std::string verify_err;
+  if (!verify.Load(path, &verify_err)) {
+    if (err)
+      *err = "verifikasi baca-ulang gagal untuk " + resolved + ": " +
+             verify_err;
+    return false;
+  }
+
+  if (info) {
+    info->resolved_path = resolved;
+    info->bytes_written = json_str.size();
+    info->verified = true;
   }
   return true;
 }

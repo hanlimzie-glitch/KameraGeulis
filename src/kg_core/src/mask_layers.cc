@@ -127,4 +127,37 @@ void WriteDiffAmplified(const uint8_t* raw, const uint8_t* out, int w, int h,
   }
 }
 
+void WriteDiffAmplifiedGray(const uint8_t* raw, const uint8_t* out, int src_w,
+                            int src_h, float amplify, int dst_w, int dst_h,
+                            std::vector<uint8_t>* gray_out) {
+  if (!raw || !out || !gray_out || src_w <= 0 || src_h <= 0 || dst_w <= 0 ||
+      dst_h <= 0)
+    return;
+  gray_out->assign(static_cast<size_t>(dst_w) * dst_h, 0);
+  for (int dy = 0; dy < dst_h; ++dy) {
+    const int y0 = (dy * src_h) / dst_h;
+    const int y1 = std::max(y0 + 1, ((dy + 1) * src_h) / dst_h);
+    for (int dx = 0; dx < dst_w; ++dx) {
+      const int x0 = (dx * src_w) / dst_w;
+      const int x1 = std::max(x0 + 1, ((dx + 1) * src_w) / dst_w);
+      double acc = 0.0;
+      int cnt = 0;
+      for (int y = y0; y < y1 && y < src_h; ++y) {
+        for (int x = x0; x < x1 && x < src_w; ++x) {
+          const size_t idx = (static_cast<size_t>(y) * src_w + x) * 4;
+          int d = 0;
+          for (int c = 0; c < 3; ++c)
+            d += std::abs(static_cast<int>(raw[idx + c]) -
+                          static_cast<int>(out[idx + c]));
+          acc += d / 3.0;
+          ++cnt;
+        }
+      }
+      const float g = cnt > 0 ? static_cast<float>(acc / cnt) * amplify : 0.0f;
+      (*gray_out)[static_cast<size_t>(dy) * dst_w + dx] =
+          static_cast<uint8_t>(std::clamp(g + 0.5f, 0.0f, 255.0f));
+    }
+  }
+}
+
 }  // namespace kgcore

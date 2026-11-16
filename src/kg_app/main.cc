@@ -38,6 +38,8 @@
 #include "kgcore/skin_mask.h"  // M2i: BeautyComposeConfig + metrik F5
 #include "kgcore/perf_guard.h"  // M2k: adaptive load guard
 #include "kgcore/mask_layers.h"  // M2k: F5 same-pass diff report
+#include "kgcore/black_frame_guard.h"  // M2l: swa-uji berkelanjutan frame hitam
+#include "kgcore/landmark_tracking.h"  // M2l: overlay landmark ber-indeks F5
 
 // M2j kualitas: parameter komposit per mode. Mode kulit:
 //  * smooth_amount DITINGKATKAN (0.45 + 0.55*slider) - guided benar-benar
@@ -78,16 +80,45 @@ std::string WideToUtf8(const std::wstring& wide) {
 }
 
 
-std::string SettingsPath() {
-  char dir[MAX_PATH];
-  const DWORD n = GetEnvironmentVariableA("APPDATA", dir, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) {
-    std::string base(dir, n);
-    base += "\\KameraGeulis";
-    CreateDirectoryA(base.c_str(), nullptr);  // ok bila sudah ada
-    return base + "\\settings.json";
+std::string SettingsPathFromAppData(const std::wstring& appdata_dir) {
+  if (!appdata_dir.empty()) {
+    return WideToUtf8(appdata_dir) + "\\settings.json";
   }
   return "settings.json";
+}
+
+float ComputeMeanLumaRgba(const uint8_t* rgba, int w, int h) {
+  if (!rgba || w <= 0 || h <= 0) return 0.0f;
+  double sum = 0.0;
+  long n = 0;
+  for (int y = 0; y < h; y += 8) {
+    const uint8_t* row = rgba + static_cast<size_t>(y) * w * 4;
+    for (int x = 0; x < w; x += 8) {
+      const uint8_t* p = row + static_cast<size_t>(x) * 4;
+      sum += 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+      ++n;
+    }
+  }
+  return n > 0 ? static_cast<float>(sum / n) : 0.0f;
+}
+
+float ComputeMeanLumaFrame(const kg::Frame& f) {
+  if (!f.IsValid()) return 0.0f;
+  double sum = 0.0;
+  long n = 0;
+  const bool bgra = (f.format != kg::kFormatRGBA);
+  for (int y = 0; y < f.height; y += 8) {
+    const uint8_t* row = f.pixels.data() + static_cast<size_t>(y) * f.stride_bytes;
+    for (int x = 0; x < f.width; x += 8) {
+      const uint8_t* p = row + static_cast<size_t>(x) * 4;
+      const float r = bgra ? p[2] : p[0];
+      const float g = p[1];
+      const float b = bgra ? p[0] : p[2];
+      sum += 0.299 * r + 0.587 * g + 0.114 * b;
+      ++n;
+    }
+  }
+  return n > 0 ? static_cast<float>(sum / n) : 0.0f;
 }
 
 kg::Settings UiToSettings(const kg::AppUiState& ui) {
@@ -146,27 +177,23 @@ kg::Frame MakeSyntheticFrame(int width, int height, int64_t ts_ms) {
   return f;
 }
 
-// M2e requirement 3 (F5): %APPDATA%\KameraGeulis\debug\ (created on demand).
-std::string DebugDumpDir() {
-  char dir[MAX_PATH] = {};
-  const DWORD n = GetEnvironmentVariableA("APPDATA", dir, MAX_PATH);
-  if (n == 0 || n >= MAX_PATH) return {};
-  std::string base(dir, n);
-  base += "\\KameraGeulis";
-  CreateDirectoryA(base.c_str(), nullptr);  // ok bila sudah ada
-  base += "\\debug";
-  CreateDirectoryA(base.c_str(), nullptr);
-  return base;
+// M2e/M2l (F5): %APPDATA%\KameraGeulis\debug\ (pakai appdata_dir UTF-16 agar konsisten).
+std::string DebugDumpDir(const std::wstring& appdata_dir) {
+  if (appdata_dir.empty()) return {};
+  const std::wstring wdir = appdata_dir + L"\\debug";
+  CreateDirectoryW(wdir.c_str(), nullptr);
+  return WideToUtf8(wdir);
 }
 
-// M2h: simpan pasangan raw_*.png + out_*.png + mask_*.png dan catat selisih
-// rata-rata piksel LUAR mask (harus ~0 saat mode kulit aktif) & DALAM mask.
-// `raw` = salinan frame mentah TERAKHIR (disimpan walau F4 mati - butuh 4).
-void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
-                     MaskBlender* blender, bool blend_current, bool pipeline_ok,
-                     bool skin_only, float smooth_amount, float whitening,
+// M2h/M2l: simpan pasangan raw_*.png + out_*.png + mask_*.png + seg_*.png +
+// diff_*.png (960x540 grayscale) + roi_*.png + landmarks_*.png (ber-indeks).
+// `tex_out` GPU kini DIJAMIN bersih tanpa overlay F6/F3.
+void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
+                     kg::BeautyPipeline* pipeline, MaskBlender* blender,
+                     bool blend_current, bool pipeline_ok, bool skin_only,
+                     float smooth_amount, float whitening,
                      float chroma_retain) {
-  const std::string dir = DebugDumpDir();
+  const std::string dir = DebugDumpDir(appdata_dir);
   if (dir.empty()) {
     kgcore::Log("app", "F5: APPDATA tidak tersedia - PNG TIDAK disimpan");
     return;
@@ -196,8 +223,8 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
                                  /*src_is_bgra=*/raw->format != kg::kFormatRGBA,
                                  raw_rgba.data());
     const std::string path = dir + "\\raw_" + stamp + ".png";
-    if (kgcore::WritePngRgba(path.c_str(), raw_rgba.data(), raw_w, raw_h)) {
-      kgcore::Log("app", "F5: frame mentah -> %s (%dx%d, BGRA->RGBA, alpha=255)",
+    if (kgcore::WritePngRgbFromRgba(path.c_str(), raw_rgba.data(), raw_w, raw_h)) {
+      kgcore::Log("app", "F5: frame mentah -> %s (%dx%d, RGB terkompresi)",
                   path.c_str(), raw_w, raw_h);
     } else {
       kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
@@ -208,6 +235,35 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
   if (!pipeline_ok || !pipeline) {
     kgcore::Log("app", "F5: pipeline nonaktif - tidak ada frame keluaran");
     return;
+  }
+  // --- M2l: roi_*.png (potongan 192x192 yang dikirim ke FaceMesh) & landmarks_*.png ---
+  {
+    std::vector<uint8_t> roi_rgba;
+    int roi_w = 0, roi_h = 0;
+    kgcore::AlignedRoi roi_used{};
+    const bool have_roi = pipeline->Tracker().Provider()->GetDebugRoi(
+        &roi_rgba, &roi_w, &roi_h, &roi_used);
+    if (have_roi && !roi_rgba.empty()) {
+      const std::string path = dir + "\\roi_" + stamp + ".png";
+      if (kgcore::WritePngRgbFromRgba(path.c_str(), roi_rgba.data(), roi_w, roi_h)) {
+        kgcore::Log("app", "F5: potongan ROI FaceMesh -> %s (%dx%d, cx=%.1f cy=%.1f side=%.1f rot=%.1f deg)",
+                    path.c_str(), roi_w, roi_h, roi_used.cx_px, roi_used.cy_px,
+                    roi_used.side_px, roi_used.angle_rad * 57.29578f);
+      }
+    }
+    const auto& lm = pipeline->Tracker().Current();
+    if (!raw_rgba.empty() && (lm.valid || have_roi)) {
+      std::vector<uint8_t> lm_rgba;
+      if (kgcore::RenderLandmarkDebugOverlayRgba(
+              raw_rgba.data(), raw_w, raw_h, lm,
+              have_roi ? &roi_used : nullptr, &lm_rgba)) {
+        const std::string path = dir + "\\landmarks_" + stamp + ".png";
+        if (kgcore::WritePngRgbFromRgba(path.c_str(), lm_rgba.data(), raw_w, raw_h)) {
+          kgcore::Log("app", "F5: overlay landmark ber-indeks -> %s (%dx%d)",
+                      path.c_str(), raw_w, raw_h);
+        }
+      }
+    }
   }
   const uint8_t* out = pipeline->OutputRGBA();
   const int w = pipeline->OutputWidth();
@@ -227,15 +283,17 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
   const uint8_t* mask_data = have_gpu_mask ? gpu_mask.data() : mb.mask().data();
   const bool mask_ok = mb.configured() &&
       mb.mask().size() == static_cast<size_t>(mb.w()) * static_cast<size_t>(mb.h());
-  // --- mask_*.png (grayscale diperbesar ke ukuran frame) ---
+  // --- mask_*.png (grayscale 8-bit terkompresi ukuran frame) ---
   if (mask_ok) {
-    std::vector<uint8_t> gray(static_cast<size_t>(w) * h * 4);
+    std::vector<uint8_t> gray_rgba(static_cast<size_t>(w) * h * 4);
     kgcore::UpsampleMaskToGrayRgba(mask_data, mb.w(), mb.h(), w, h,
-                                   gray.data());
+                                   gray_rgba.data());
+    std::vector<uint8_t> gray(static_cast<size_t>(w) * h);
+    for (size_t i = 0; i < gray.size(); ++i) gray[i] = gray_rgba[i * 4];
     const std::string path = dir + "\\mask_" + stamp + ".png";
-    if (kgcore::WritePngRgba(path.c_str(), gray.data(), w, h)) {
+    if (kgcore::WritePngGray(path.c_str(), gray.data(), w, h)) {
       kgcore::Log("app",
-                  "F5: mask blend aktual -> %s (sumber=%s, mask %dx%d, gray %dx%d)",
+                  "F5: mask blend aktual -> %s (sumber=%s, mask %dx%d, gray8 %dx%d)",
                   path.c_str(), have_gpu_mask ? "tex_mask GPU" : "CPU upload buffer",
                   mb.w(), mb.h(), w, h);
     } else {
@@ -258,8 +316,6 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
       const int sw = kgcore::kSegInputSize, sh = kgcore::kSegInputSize;
       std::vector<uint8_t> am(static_cast<size_t>(sw) * sh);
       kgcore::SegArgmax(probs.data(), sw * sh, am.data());
-      // Kelas dikonversi dengan letterbox + gerak anchor yang sama dengan
-      // fusion seg di builder, supaya statistik per-kelas cocok dengan frame.
       argmax_full.resize(static_cast<size_t>(w) * h);
       kgcore::SegProbabilitiesToFrameArgmax(
           probs.data(), pipeline->SegUsedLetterbox(), w, h, argmax_full.data(),
@@ -272,7 +328,7 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
         d[0] = col[0]; d[1] = col[1]; d[2] = col[2]; d[3] = 255;
       }
       const std::string path = dir + "\\seg_" + stamp + ".png";
-      if (kgcore::WritePngRgba(path.c_str(), up.data(), w, h)) {
+      if (kgcore::WritePngRgbFromRgba(path.c_str(), up.data(), w, h)) {
         kgcore::Log("app", "F5: peta kelas seg -> %s (%dx%d)", path.c_str(), w, h);
       } else {
         kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
@@ -295,7 +351,7 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
                   pipeline->Seg().LastError().c_str());
     }
   }
-  // --- statistik selisih raw vs out (untuk out yang dibandingkan) ---
+  // --- statistik selisih raw vs out (SELALU dari output bersih tanpa overlay F6/F3) ---
   auto log_stats = [&](const uint8_t* cmp_raw, const uint8_t* cmp_out,
                        const char* mode) {
     if (raw_rgba.empty() || raw_w != w || raw_h != h) {
@@ -310,7 +366,6 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
                 "F5: selisih rata-rata LUAR mask = %.3f (harus mendekati 0), "
                 "DALAM mask = %.3f | gain=%.2f | mode=%s | mask %dx%d",
                 outside, inside, gain, mode, mb.w(), mb.h());
-    // M2i (4): metrik tambahan di mask INTI (ter-erosi) + pita tepi.
     kgcore::InMaskMetrics met;
     kgcore::ComputeInMaskMetrics(cmp_raw, cmp_out, mask_data, mb.w(),
                                  mb.h(), w, h, gain, &met);
@@ -339,32 +394,33 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
     }
     kgcore::Log("app", "F5 outside-mask (mask*gain < 8/255): mean=%.3f n=%ld "
                        "[target <=0.1 levels]", rep.outside_mean, rep.outside_n);
-    std::vector<uint8_t> diff_rgba;
-    kgcore::WriteDiffAmplified(cmp_raw, cmp_out, w, h, 8.0f, &diff_rgba);
+    const int dw = w > 960 ? 960 : w;
+    const int dh = h > 540 ? 540 : h;
+    std::vector<uint8_t> diff_gray;
+    kgcore::WriteDiffAmplifiedGray(cmp_raw, cmp_out, w, h, 8.0f, dw, dh,
+                                    &diff_gray);
     const std::string diff_path = dir + "\\diff_" + stamp + ".png";
-    if (kgcore::WritePngRgba(diff_path.c_str(), diff_rgba.data(), w, h))
-      kgcore::Log("app", "F5: diff amplified x8 -> %s", diff_path.c_str());
+    if (kgcore::WritePngGray(diff_path.c_str(), diff_gray.data(), dw, dh))
+      kgcore::Log("app", "F5: diff amplified x8 -> %s (grayscale %dx%d)",
+                  diff_path.c_str(), dw, dh);
   };
   // --- out_*.png ---
   if (have_gpu_out) {
     const std::string path = dir + "\\out_" + stamp + ".png";
-    if (kgcore::WritePngRgba(path.c_str(), gpu_out.data(), w, h))
-      kgcore::Log("app", "F5: output aktual dari tex_out GPU -> %s (%dx%d)",
+    if (kgcore::WritePngRgbFromRgba(path.c_str(), gpu_out.data(), w, h))
+      kgcore::Log("app", "F5: output bersih dari tex_out GPU -> %s (%dx%d)",
                   path.c_str(), w, h);
     else
       kgcore::Log("app", "F5: GAGAL menulis output GPU %s", path.c_str());
-    log_stats(raw_rgba.data(), gpu_out.data(), "tex_out GPU (same pass)");
+    log_stats(raw_rgba.data(), gpu_out.data(), "tex_out GPU (same pass, bersih)");
   } else if (skin_only && mask_ok && !raw_rgba.empty() && raw_w == w && raw_h == h) {
-    // Komposit CPU dengan rumus identik shader GPU (tampilan di layar).
     std::vector<uint8_t> mixed(raw_rgba.size());
-    // M2i (3)+(4): komposit CPU dgn rumus identik shader GPU - guided
-    // smoothing luma + retensi chroma mentah (anti cast) + mix mask.
     const kgcore::BeautyComposeConfig bcfg =
         MakeComposeConfig(skin_only, smooth_amount, whitening, chroma_retain);
     kgcore::ComposeBeautyRaw(raw_rgba.data(), out, mb.mask().data(), mb.w(),
                              mb.h(), w, h, gain, bcfg, mixed.data());
     const std::string path = dir + "\\out_" + stamp + ".png";
-    if (kgcore::WritePngRgba(path.c_str(), mixed.data(), w, h)) {
+    if (kgcore::WritePngRgbFromRgba(path.c_str(), mixed.data(), w, h)) {
       kgcore::Log("app",
                   "F5: frame keluaran (komposit raw+beauty x mask) -> %s (%dx%d)",
                   path.c_str(), w, h);
@@ -374,7 +430,7 @@ void DumpDebugFrames(const kg::Frame* raw, kg::BeautyPipeline* pipeline,
     log_stats(raw_rgba.data(), mixed.data(), "skin-only");
   } else {
     const std::string path = dir + "\\out_" + stamp + ".png";
-    if (kgcore::WritePngRgba(path.c_str(), out, w, h)) {
+    if (kgcore::WritePngRgbFromRgba(path.c_str(), out, w, h)) {
       kgcore::Log("app", "F5: frame keluaran pipeline -> %s (%dx%d)", path.c_str(),
                   w, h);
     } else {
@@ -393,10 +449,19 @@ struct PreviewTexture {
   int w = 0, h = 0;
   void Upload(const uint8_t* src, int width, int height, bool mirror,
               bool src_is_bgra) {
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glBindTexture(GL_TEXTURE_2D, tex);
     if (w != width || h != height) {
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
                    GL_UNSIGNED_BYTE, nullptr);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
       w = width; h = height;
     }
     if (!mirror && !src_is_bgra) {
@@ -522,7 +587,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   ImGui_ImplOpenGL3_Init(glsl_version);
 
   const std::string exe_dir = WideToUtf8(paths.exe_dir);
-  const std::string settings_path = SettingsPath();
+  const std::string settings_path = SettingsPathFromAppData(paths.appdata_dir);
+  const std::wstring settings_wpath = paths.appdata_dir + L"\\settings.json";
   if (safe) {
     kgcore::Log("app", "SAFE MODE: onnxruntime & GPUPixel TIDAK dimuat (objek pipeline tidak "
                        "dibuat sama sekali); kamera TIDAK dibuka; menampilkan gradien sintetis.");
@@ -558,26 +624,25 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   ui.safe_mode = safe;
   ui.vsync = true;
   kg::Settings settings;
-  const DWORD settings_attr_before = GetFileAttributesA(settings_path.c_str());
+  const DWORD settings_attr_before = GetFileAttributesW(settings_wpath.c_str());
   const bool settings_file_existed = settings_attr_before != INVALID_FILE_ATTRIBUTES;
   std::string settings_load_error;
   const bool settings_loaded = settings.Load(settings_path, &settings_load_error);
   if (settings_loaded) {
     ApplySettingsToUi(settings, ui);
   } else if (settings_file_existed) {
-    const std::string bad_path = settings_path + ".bad";
-    if (GetFileAttributesA(bad_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-      if (MoveFileA(settings_path.c_str(), bad_path.c_str())) {
-        kg::Log("app", "settings: berkas rusak dipindah ke %s", bad_path.c_str());
+    const std::wstring bad_wpath = settings_wpath + L".bad";
+    if (GetFileAttributesW(bad_wpath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+      if (MoveFileW(settings_wpath.c_str(), bad_wpath.c_str())) {
+        kg::Log("app", "settings: berkas rusak dipindah ke %ls", bad_wpath.c_str());
       } else {
         const DWORD backup_error = GetLastError();
-        kg::Log("app", "settings: berkas rusak dipertahankan di %s (backup %s gagal, Win32=%lu)",
-                settings_path.c_str(), bad_path.c_str(),
-                static_cast<unsigned long>(backup_error));
+        kg::Log("app", "settings: berkas rusak dipertahankan di %s (backup gagal, Win32=%lu)",
+                settings_path.c_str(), static_cast<unsigned long>(backup_error));
       }
     } else {
-      kg::Log("app", "settings: berkas rusak dipertahankan di %s (.bad sudah ada: %s)",
-              settings_path.c_str(), bad_path.c_str());
+      kg::Log("app", "settings: berkas rusak dipertahankan di %s (.bad sudah ada)",
+              settings_path.c_str());
     }
   }
   kg::Log("app", "settings: %s (%s) cause=%s",
@@ -592,21 +657,31 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                    ui.capture_height, ui.capture_fps,
                                    args.capture_plain);
     if (camera_started && !safe) {
-      // M2h butuh 6: buat/pertahankan catatan perangkat terpakai (default
-      // sesi berikutnya). Nilai lain di settings.json tidak diubah.
       kg::Settings dev = settings;
       dev.camera_device = ui.camera_device;
+      dev.capture_width = ui.capture_width;
+      dev.capture_height = ui.capture_height;
+      dev.capture_fps = ui.capture_fps;
       std::string dev_err;
-      // Simpan hanya jika konfigurasi sebelumnya terbaca, atau memang belum
-      // ada file. File parse-fail sudah dipertahankan sebagai .bad dan tak
-      // boleh tertimpa oleh defaults.
-      if (settings_loaded || !settings_file_existed) {
-        if (!dev.Save(settings_path, &dev_err)) {
+      kg::Settings::SaveInfo sinfo;
+      // File corrupt sudah di-backup ke .bad di atas; simpan file baru bila
+      // settings terbaca atau belum ada file (atau sudah dipindah ke .bad).
+      const bool can_write_settings =
+          settings_loaded || !settings_file_existed ||
+          (GetFileAttributesW(settings_wpath.c_str()) == INVALID_FILE_ATTRIBUTES);
+      if (can_write_settings) {
+        if (dev.SaveAndVerify(settings_path, &sinfo, &dev_err)) {
+          kgcore::Log("app",
+                      "settings: perangkat awal tersimpan & terverifikasi (%s, %zu byte, device=%d %dx%d@%d)",
+                      sinfo.resolved_path.c_str(), sinfo.bytes_written,
+                      dev.camera_device, dev.capture_width, dev.capture_height,
+                      dev.capture_fps);
+        } else {
           kgcore::Log("app", "settings: GAGAL menyimpan perangkat awal - %s",
                       dev_err.c_str());
         }
       } else {
-        kgcore::Log("app", "settings: perangkat awal tidak disimpan karena file lama gagal dibaca");
+        kgcore::Log("app", "settings: perangkat awal tidak disimpan karena file lama gagal dibaca dan masih ada");
       }
     }
     // M2f: "OK" TIDAK dicetak di sini - hanya setelah reader jadi + frame
@@ -627,6 +702,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   glBindTexture(GL_TEXTURE_2D, preview.tex);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+  glBindTexture(GL_TEXTURE_2D, 0);
 
   if (!safe && !pipeline_ok && pipeline) {
     ui.notice = pipeline->LastResourceError().empty()
@@ -667,18 +747,25 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   uint64_t gl_err_count = 0;      // total GL errors seen after uploads
   uint64_t debug_req_seen = 0;    // last consumed ui.debug_frame_requests
 
-  // ---- M2h state (mask kulit + penghitung jujur + deteksi frame gelap) ----
+  // ---- M2h/M2l state (mask kulit + swa-uji berkelanjutan frame hitam) ----
   MaskBlender blender;             // stage mix(raw, beauty, mask*gain) GPU
-  kg::Frame last_camera_raw;       // salinan frame mentah TERAKHIR utk F5
+  kg::Frame last_camera_raw;       // salinan frame mentah TERAKHIR utk F5 & fallback
   bool last_camera_raw_valid = false;
+  int64_t last_frame_ts_ms = 0;
   bool frame_is_synthetic = false; // frame iterasi ini bukan dari kamera
-  bool preview_show_blend = false; // preview menampilkan tex_out blender
-  bool blender_warned = false;     // warning shader sudah sekali
-  // M2i (1): swa-uji blend GL (sekali per sesi) + flag jalur lama.
+  bool preview_show_blend = false; // dipertahankan antar iterasi !have_frame
+  bool blender_warned = false;
   bool s_selftest_done = false;
   int s_blend_frames = 0;
   bool s_blend_logged_first = false;
   const bool force_no_mask_gl = args.no_mask_gl;
+  bool gpu_mask_gen_disabled = args.no_mask_gen_gpu;
+  kgcore::BlackFrameGuard black_guard;
+  float last_raw_luma = 0.0f;
+  float last_blend_out_luma = 0.0f;
+  float last_nonblend_out_luma = 0.0f;
+  bool compare_uploaded_nonframe = false;
+  bool prev_show_mask = ui.show_mask;
   int dark_streak = 0;             // detik berturut gambar nyaris hitam
   bool dark_hint_shown = false;
 
@@ -736,9 +823,15 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     if (ui.request_save_settings) {
       settings = UiToSettings(ui);
       std::string save_err;
-      if (settings.Save(settings_path, &save_err)) {
+      kg::Settings::SaveInfo sinfo;
+      if (settings.SaveAndVerify(settings_path, &sinfo, &save_err)) {
         ui.notice = kg::Strings::Instance().Get("presets.saved");
         ui.notice_is_error = false;
+        kgcore::Log("app",
+                    "settings: tersimpan & terverifikasi (%s, %zu byte, device=%d %dx%d@%d)",
+                    sinfo.resolved_path.c_str(), sinfo.bytes_written,
+                    settings.camera_device, settings.capture_width,
+                    settings.capture_height, settings.capture_fps);
       } else {
         ui.notice = kg::Strings::Instance().Get("presets.save_failed");
         ui.notice_is_error = true;
@@ -802,18 +895,20 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         synthetic = !camera_started;
         ui.frames_captured = 0;
         if (camera_started && !safe) {
-          // M2h butuh 6: simpan perangkat yang terakhir DIPAKAI sebagai
-          // default sesi berikutnya (settings.json) - indeks 0 bawaan
-          // ("DroidCam Video") bisa memberi frame hitam di PC pengguna.
           kg::Settings dev;
           dev.Load(settings_path);  // pertahankan nilai lain; default bila hilang
           dev.camera_device = ui.camera_device;
+          dev.capture_width = ui.capture_width;
+          dev.capture_height = ui.capture_height;
+          dev.capture_fps = ui.capture_fps;
           std::string save_err;
-          if (dev.Save(settings_path, &save_err)) {
+          kg::Settings::SaveInfo sinfo;
+          if (dev.SaveAndVerify(settings_path, &sinfo, &save_err)) {
             kgcore::Log("app",
-                        "settings: perangkat kamera terakhir (index %d) disimpan sebagai default",
-                        ui.camera_device);
-            // M2i (2): perangkat BERUBAH -> notifikasi "nyaris hitam" dicabut.
+                        "settings: perangkat kamera tersimpan & terverifikasi (%s, %zu byte, index %d %dx%d@%d)",
+                        sinfo.resolved_path.c_str(), sinfo.bytes_written,
+                        dev.camera_device, dev.capture_width,
+                        dev.capture_height, dev.capture_fps);
             if (ui.notice == kg::Strings::Instance().Get("camera.black_frames"))
               ui.notice.clear();
           } else {
@@ -857,6 +952,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // menulis raw_*.png walau F4 tidak pernah dinyalakan.
       last_camera_raw = frame;
       last_camera_raw_valid = true;
+      last_frame_ts_ms = frame.timestamp_ms;
+      last_raw_luma = ComputeMeanLumaFrame(frame);
     }
     ui.capture_ms = duration_cast<std::chrono::microseconds>(clock_type::now() - cap_start)
                         .count() /
@@ -868,6 +965,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       frame = MakeSyntheticFrame(synthetic_w, synthetic_h, now_ms);
       have_frame = true;
       frame_is_synthetic = true;
+      last_frame_ts_ms = frame.timestamp_ms;
     }
 
     // ---- M2f/M2g: status kamera jujur; M2g: kode AWAL + TERAKHIR siklus ----
@@ -938,17 +1036,44 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       cam_stream_h = frame.height;
     }
 
-    preview_show_blend = false;  // hanya true jika Blend berhasil pada frame ini
+    // M2l ROOT FIX: JANGAN reset preview_show_blend = false di setiap iterasi
+    // render! Kamera (~30 fps) lebih jarang dari loop render (~85+ iter/s);
+    // mereset preview_show_blend pada iterasi !have_frame membuat ImGui
+    // menggambar preview.tex yang 0x0 (hitam) -> kedipan 67-87% di M2k.
     int out_w = 0, out_h = 0;  // dims of THIS iteration's pipeline output
     const bool want_raw = ui.raw_preview;  // F4: tampilkan kamera mentah
     bool pipeline_frame_ok = false;
+    const bool blend_mode_allowed =
+        ui.skin_only && !want_raw && pipeline_ok && !force_no_mask_gl &&
+        !blender.disabled && !blender.init_failed;
+    if (!blend_mode_allowed) {
+      preview_show_blend = false;
+      if (!have_frame && preview.w == 0) {
+        if (!want_raw && pipeline_ok && pipeline && pipeline->OutputRGBA() &&
+            pipeline->OutputWidth() > 0 && pipeline->OutputHeight() > 0) {
+          const uint8_t* prev_out = pipeline->OutputRGBA();
+          const int pw = pipeline->OutputWidth(), ph = pipeline->OutputHeight();
+          preview.Upload(prev_out, pw, ph, ui.mirror, /*src_is_bgra=*/false);
+          last_nonblend_out_luma = ComputeMeanLumaRgba(prev_out, pw, ph);
+          shown_w = pw;
+          shown_h = ph;
+        } else if (last_camera_raw_valid) {
+          preview.Upload(last_camera_raw.pixels.data(), last_camera_raw.width,
+                         last_camera_raw.height, ui.mirror,
+                         /*src_is_bgra=*/last_camera_raw.format == kg::kFormatBGRA);
+          last_nonblend_out_luma = last_raw_luma;
+          shown_w = last_camera_raw.width;
+          shown_h = last_camera_raw.height;
+        }
+      }
+    }
     if (have_frame && pipeline_ok && !want_raw) {
       // Live-apply the two global beauty parameters (cheap; idempotent).
       pipeline->SetBeautyStrength(ui.smoothing, ui.whitening);
       const bool mask_gl_ready = ui.skin_only && blender.Init();
       pipeline->SetSkinMaskEnabled(ui.skin_only);  // M2h: mask hanya bila aktif
       pipeline->SetGpuMaskMode(mask_gl_ready && !force_no_mask_gl &&
-                               !blender.disabled);
+                               !blender.disabled && !gpu_mask_gen_disabled);
       pipeline->SetSkinCoverage(perf_guard.ForceFaceOnly() ||
                                 (ui.skin_only && ui.skin_coverage == 1));
       pipeline->Seg().SetPeriodMs(perf_guard.SegPeriodMs());
@@ -975,8 +1100,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         // mask*gain); tanpa wajah gain->0 (fade ke raw, bukan frame penuh).
         bool blended = false;
         const kg::SkinMaskBuilder& mb = pipeline->MaskBuilder();
-        // M2i (1): `--no-mask-gl` / swa-uji gagal (blender.disabled) -> jalur
-        // blend dimatikan; F4 tetap mentah (lihat blok want_raw).
+        // M2i/M2l: `--no-mask-gl` / swa-uji gagal (blender.disabled) -> jalur
+        // blend dimatikan; `--no-mask-gen-gpu` / tahap-1 -> mask CPU M2j.
         if (ui.skin_only && out_w == frame.width && out_h == frame.height &&
             !blender.init_failed && !force_no_mask_gl && !blender.disabled) {
           const kgcore::BeautyComposeConfig bcfg = MakeComposeConfig(
@@ -1000,7 +1125,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                                                 : mb.face_probability().data(),
                                   pipeline->SegActive(), mb.skin_cb0(),
                                   mb.skin_cr0(), mb.has_color_calibration(),
-                                  &mb.config());
+                                  &mb.config(), !gpu_mask_gen_disabled);
           if (!blended && blender.init_failed && !blender_warned) {
             blender_warned = true;
             kgcore::Log("app",
@@ -1012,23 +1137,25 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
           }
         }
         if (blended) {
-          preview_show_blend = true;  // digambar dari tex_out blender (F6 juga)
+          preview_show_blend = true;  // digambar dari tex_out blender
           ++s_blend_frames;
+          if (!blender.ProbeOutputLuma(&last_blend_out_luma)) {
+            last_blend_out_luma = 0.0f;
+          }
           if (!s_blend_logged_first) {
             s_blend_logged_first = true;
             kgcore::Log("blend",
-                        "aktif pertama: tex_out=%u %dx%d has_stats=%d",
+                        "aktif pertama: tex_out=%u %dx%d has_stats=%d gpu_mask=%d",
                         blender.tex_out, blender.out_w, blender.out_h,
-                        blender.has_stats ? 1 : 0);
+                        blender.has_stats ? 1 : 0,
+                        gpu_mask_gen_disabled ? 0 : 1);
           }
-          // M2i (1) swa-uji: setelah ~30 frame, luma keluaran vs mentah.
+          // M2i (1) swa-uji awal: setelah ~30 frame, luma keluaran vs mentah.
           if (!s_selftest_done && s_blend_frames >= 30) {
             s_selftest_done = true;
             float out_y = 0.0f;
             double raw_sum = 0.0;
             long raw_n = 0;
-            // InputRGBA() = buffer RGBA mentah (row-packed w*4); dimensi sama
-            // dengan out_* (syarat blend: out_w == frame.width).
             const uint8_t* raw_rgba_ptr = pipeline->InputRGBA();
             if (raw_rgba_ptr) {
               for (int yy = 0; yy < out_h; yy += 4) {
@@ -1046,6 +1173,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             if (blender.ReadOutputLuma(&out_y)) {
               if (raw_y >= 40.0f && out_y < raw_y * 0.10f) {
                 blender.disabled = true;
+                preview_show_blend = false;
                 kgcore::Log("blend",
                             "SWA-UJI GAGAL: luma keluaran %.1f jauh di bawah mentah %.1f -> kembali ke jalur sebelum M2h",
                             out_y, raw_y);
@@ -1062,6 +1190,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
           }
         } else {
           preview.Upload(out, out_w, out_h, ui.mirror, /*src_is_bgra=*/false);
+          last_nonblend_out_luma = ComputeMeanLumaRgba(out, out_w, out_h);
           preview_show_blend = false;
         }
         pipeline_frame_ok = true;
@@ -1077,13 +1206,17 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.cam_width = frame.width;
       ui.cam_height = frame.height;
       ui.frames_captured = capture.FramesCaptured();
+    } else if (!have_frame && preview_show_blend && ui.show_mask != prev_show_mask &&
+               blender.ready && pipeline) {
+      // F6 toggled di antara dua frame kamera: segarkan tex_out_debug segera.
+      if (ui.show_mask) blender.UpdateDebugTexture(pipeline->Tracker().Gain());
+      else blender.debug_ready = false;
     }
+    prev_show_mask = ui.show_mask;
     if (have_frame && (want_raw || !pipeline_frame_ok)) {
-      // Raw path: F4 toggle, OR GPUPixel off/init failed, OR pipeline
-      // produced no output this frame. Upload the capture frame as-is
-      // (BGRA handled, stride tight, rows top-down, alpha forced 255).
       preview.Upload(frame.pixels.data(), frame.width, frame.height, ui.mirror,
                      /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
+      last_nonblend_out_luma = ComputeMeanLumaFrame(frame);
       preview_show_blend = false;
       shown_w = frame.width;
       shown_h = frame.height;
@@ -1096,22 +1229,32 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     // Before/after: hold the compare button to see the raw frame instead of
     // the processed one (pipeline still runs; only the preview changes).
     const uint8_t* raw = have_frame ? frame.pixels.data() : nullptr;
-    if (ui.compare_held && raw) {
-      preview.Upload(raw, frame.width, frame.height, ui.mirror,
-                     /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
-      shown_w = frame.width;
-      shown_h = frame.height;
-      if (!frame_is_synthetic) ++uploaded_raw;
+    if (ui.compare_held) {
+      if (raw) {
+        preview.Upload(raw, frame.width, frame.height, ui.mirror,
+                       /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
+        shown_w = frame.width;
+        shown_h = frame.height;
+        if (!frame_is_synthetic) ++uploaded_raw;
+      } else if (!compare_uploaded_nonframe && last_camera_raw_valid) {
+        preview.Upload(last_camera_raw.pixels.data(), last_camera_raw.width,
+                       last_camera_raw.height, ui.mirror,
+                       /*src_is_bgra=*/last_camera_raw.format == kg::kFormatBGRA);
+        shown_w = last_camera_raw.width;
+        shown_h = last_camera_raw.height;
+        compare_uploaded_nonframe = true;
+      }
+    } else {
+      compare_uploaded_nonframe = false;
     }
     // M2e requirement 1: glGetError after every preview upload operation.
     drain_gl_errors();
 
-    // M2e requirement 3 (F5): dump raw + pipeline frames as PNG.
+    // M2e/M2l (F5): dump PNG + metrik bersih.
     if (ui.debug_frame_requests != debug_req_seen) {
       debug_req_seen = ui.debug_frame_requests;
-      // M2h: pakai salinan frame mentah TERAKHIR (walau F4 mati / frame ini
-      // sintetis), dan komposit out lewat mask + statistik luar/dalam mask.
-      DumpDebugFrames(last_camera_raw_valid ? &last_camera_raw : nullptr,
+      DumpDebugFrames(paths.appdata_dir,
+                      last_camera_raw_valid ? &last_camera_raw : nullptr,
                       pipeline.get(), &blender, preview_show_blend,
                       pipeline_ok, ui.skin_only, ui.smoothing,
                       ui.whitening, ui.chroma_retain);
@@ -1128,68 +1271,6 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                       cst.stride < 0 ? " (bottom-up)" : "", static_cast<unsigned>(cst.subtype),
                       cst.mean_luma, cst.center_alpha);
         ui.camera_mode_line = mline;
-      }
-    }
-
-    // M2e requirement 1: diagnosis ringkas tiap detik (semua tahap).
-    const int64_t diag_now_ms = duration_cast<std::chrono::milliseconds>(
-                                    clock_type::now().time_since_epoch())
-                                    .count();
-    if (diag_now_ms - diag_last_ms >= 1000) {
-      diag_last_ms = diag_now_ms;
-      if (!safe) {
-        const kg::CameraStats cst = capture.GetStats();
-        // M2h butuh 6: gambar nyaris hitam beberapa detik -> petunjuk sekali
-        // (reset saat gambar pulih). Bukti: DroidCam index 0 luma=0.3 ~7 dtk.
-        {
-          const kg::CameraCapture::CaptureStatus cstat = capture.GetStatus();
-          const bool dark =
-              cstat.streaming && cst.width > 0 && cst.mean_luma >= 0.0f &&
-              cst.mean_luma < 8.0f;
-          if (dark) {
-            if (++dark_streak >= 3 && !dark_hint_shown) {
-              dark_hint_shown = true;
-              ui.notice = kg::Strings::Instance().Get("camera.black_frames");
-              ui.notice_is_error = true;
-              kgcore::Log("app",
-                          "kamera: gambar nyaris hitam (luma %.1f) ~%d dtk - petunjuk ditampilkan",
-                          cst.mean_luma, dark_streak);
-            }
-          } else {
-            if (dark_streak >= 3) {
-              // M2i (2): luma pulih -> notifikasi "nyaris hitam" dicabut.
-              if (ui.notice == kg::Strings::Instance().Get("camera.black_frames"))
-                ui.notice.clear();
-            }
-            dark_streak = 0;
-            dark_hint_shown = false;
-          }
-        }
-        kgcore::Log(
-            "diag",
-            "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
-            "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
-            "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
-            "blend=%u %dx%d%s",
-            static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
-            static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
-            cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
-            static_cast<unsigned long long>(pipe_out),
-            static_cast<unsigned long long>(pipe_err_count),
-            static_cast<unsigned long long>(uploaded_out),
-            static_cast<unsigned long long>(uploaded_raw), static_cast<unsigned>(last_gl_err),
-            static_cast<unsigned>(gl_err_count), preview.tex, preview.w, preview.h,
-            static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
-            pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
-            blender.disabled ? " (OFF)" : "");
-      } else {
-        kgcore::Log("diag",
-                    "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
-                    "glErr(last=0x%X) tex=%u %dx%d | ctx=%p",
-                    static_cast<unsigned long long>(uploaded_out),
-                    static_cast<unsigned long long>(uploaded_raw),
-                    static_cast<unsigned>(last_gl_err), preview.tex, preview.w, preview.h,
-                    static_cast<void*>(glfwGetCurrentContext()));
       }
     }
 
@@ -1213,6 +1294,111 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.notice_is_error = false;
     }
     if (pipeline) ui.landmark_available = pipeline->Tracker().ProviderAvailable();
+
+    // M2l: diagnosis per-iterasi render + swa-uji berkelanjutan frame hitam.
+    const bool showing_blend_frame =
+        preview_show_blend && !want_raw && !ui.compare_held &&
+        shown_w > 0 && shown_h > 0;
+    const float iter_out_luma =
+        showing_blend_frame
+            ? ((blender.ready && blender.DisplayTex(ui.show_mask) != 0 &&
+                blender.out_w > 0 && blender.out_h > 0)
+                   ? last_blend_out_luma
+                   : 0.0f)
+            : ((preview.w > 0 && preview.h > 0 && preview.tex != 0)
+                   ? last_nonblend_out_luma
+                   : 0.0f);
+    const bool guard_active =
+        !safe && ui.skin_only && !want_raw && !ui.compare_held &&
+        !frame_is_synthetic && pipeline_ok && !force_no_mask_gl &&
+        !blender.disabled && last_camera_raw_valid;
+    black_guard.RecordSample(perf_now_ms, last_raw_luma, iter_out_luma,
+                             guard_active);
+    if (guard_active && black_guard.ShouldFallback(perf_now_ms)) {
+      const double ratio_pct = black_guard.WindowDarkRatio(perf_now_ms) * 100.0;
+      if (!gpu_mask_gen_disabled) {
+        gpu_mask_gen_disabled = true;
+        black_guard.ResetWindow();
+        kgcore::Log("blend",
+                    "SWA-UJI BERKELANJUTAN GAGAL: frame gelap %.1f%% (>5%% selama 1 dtk) -> fallback ke mask CPU M2j",
+                    ratio_pct);
+        ui.notice =
+            "Kedipan hitam terdeteksi pada mask GPU - beralih otomatis ke mask CPU.";
+        ui.notice_is_error = true;
+      } else {
+        blender.disabled = true;
+        preview_show_blend = false;
+        black_guard.ResetWindow();
+        kgcore::Log("blend",
+                    "SWA-UJI BERKELANJUTAN GAGAL: frame gelap %.1f%% (>5%% selama 1 dtk) -> fallback ke jalur seluruh-frame",
+                    ratio_pct);
+        ui.notice =
+            "Preview blend GL hitam berulang - beralih otomatis ke seluruh frame.";
+        ui.notice_is_error = true;
+      }
+    }
+
+    // M2e/M2l: diagnosis ringkas tiap detik (semua tahap + frame gelap blend).
+    const int64_t diag_now_ms = duration_cast<std::chrono::milliseconds>(
+                                    now.time_since_epoch())
+                                    .count();
+    if (diag_now_ms - diag_last_ms >= 1000) {
+      diag_last_ms = diag_now_ms;
+      const auto bsum = black_guard.TakeSecondSummary(perf_now_ms);
+      if (!safe) {
+        const kg::CameraStats cst = capture.GetStats();
+        {
+          const kg::CameraCapture::CaptureStatus cstat = capture.GetStatus();
+          const bool dark =
+              cstat.streaming && cst.width > 0 && cst.mean_luma >= 0.0f &&
+              cst.mean_luma < 8.0f;
+          if (dark) {
+            if (++dark_streak >= 3 && !dark_hint_shown) {
+              dark_hint_shown = true;
+              ui.notice = kg::Strings::Instance().Get("camera.black_frames");
+              ui.notice_is_error = true;
+              kgcore::Log("app",
+                          "kamera: gambar nyaris hitam (luma %.1f) ~%d dtk - petunjuk ditampilkan",
+                          cst.mean_luma, dark_streak);
+            }
+          } else {
+            if (dark_streak >= 3) {
+              if (ui.notice == kg::Strings::Instance().Get("camera.black_frames"))
+                ui.notice.clear();
+            }
+            dark_streak = 0;
+            dark_hint_shown = false;
+          }
+        }
+        kgcore::Log(
+            "diag",
+            "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
+            "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
+            "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
+            "blend=%u %dx%d%s gpu_mask=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f",
+            static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
+            static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
+            cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
+            static_cast<unsigned long long>(pipe_out),
+            static_cast<unsigned long long>(pipe_err_count),
+            static_cast<unsigned long long>(uploaded_out),
+            static_cast<unsigned long long>(uploaded_raw), static_cast<unsigned>(last_gl_err),
+            static_cast<unsigned>(gl_err_count), preview.tex, preview.w, preview.h,
+            static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
+            pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
+            blender.disabled ? " (OFF)" : "", gpu_mask_gen_disabled ? 0 : 1,
+            bsum.dark, bsum.total, bsum.window_dark_ratio * 100.0,
+            last_raw_luma, iter_out_luma);
+      } else {
+        kgcore::Log("diag",
+                    "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
+                    "glErr(last=0x%X) tex=%u %dx%d | ctx=%p",
+                    static_cast<unsigned long long>(uploaded_out),
+                    static_cast<unsigned long long>(uploaded_raw),
+                    static_cast<unsigned>(last_gl_err), preview.tex, preview.w, preview.h,
+                    static_cast<void*>(glfwGetCurrentContext()));
+      }
+    }
 
     // ---------- Render ----------
     const auto render_start = clock_type::now();
@@ -1261,11 +1447,9 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         // pipeline, sintetis) sudah baris atas-dibawah - tanpa flip (M2e).
         // M2h: tex blend disimpan TANPA mirror (ruang frame) - mirror saat
         // gambar lewat pembalikan U; overlay landmark sudah mirror-aware.
-        const bool showing_blend =
-            preview_show_blend && !want_raw && !ui.compare_held &&
-            shown_w > 0 && shown_h > 0;
-        if (showing_blend) {
-          ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(blender.tex_out)),
+        if (showing_blend_frame) {
+          ImGui::Image(static_cast<ImTextureID>(
+                           static_cast<uintptr_t>(blender.DisplayTex(ui.show_mask))),
                        image_size, ui.mirror ? ImVec2(1, 0) : ImVec2(0, 0),
                        ui.mirror ? ImVec2(0, 1) : ImVec2(1, 1));
         } else {
@@ -1345,8 +1529,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                       "sejak deteksi %d | landmark age %.1f fr | frame #%llu",
                       ui.fps, ui.capture_ms, ui.detect_ms, ui.mesh_ms, ui.track_ms,
                       ui.mask_ms, seg_part, ui.render_ms, ui.frames_since_detect,
-                      (lm.valid && frame.timestamp_ms >= lm.ts_ms)
-                          ? static_cast<float>(frame.timestamp_ms - lm.ts_ms) / 33.333f
+                      (lm.valid && last_frame_ts_ms >= lm.ts_ms)
+                          ? static_cast<float>(last_frame_ts_ms - lm.ts_ms) / 33.333f
                           : -1.0f,
                       static_cast<unsigned long long>(ui.frames_captured));
         const ImVec2 hud_pos(image_pos.x + 8.0f, image_pos.y + 8.0f);

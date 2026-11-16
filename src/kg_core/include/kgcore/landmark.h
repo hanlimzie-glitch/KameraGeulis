@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "kgcore/geometry.h"
 
@@ -15,6 +16,8 @@ struct LandmarkSet {
   bool valid = false;        // false when no face / model unavailable
   float face_score = 0.0f;   // detector/face-flag confidence proxy [0,1]
   int64_t ts_ms = 0;         // capture timestamp (monotonic)
+  bool roi_reset = false;    // M2l: true saat ROI di-reset pada frame ini
+  std::string reset_reason;  // alasan reset ROI (kosong bila tidak reset)
 };
 
 // Flatten to [x0,y0,...,x467,y467] in normalized [0,1] coordinates —

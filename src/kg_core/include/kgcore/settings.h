@@ -30,11 +30,16 @@ struct Settings {
   // Loads from `path`; on any error returns false and *this stays default.
   // M2i: `err` (opsional) menerima penyebab pasti (path + IO/JSON).
   bool Load(const std::string& path, std::string* err = nullptr);
-  // Saves atomically: tulis tmp -> rename menimpa tujuan (std::filesystem,
-  // di Windows memakai MoveFileEx REPLACE - rename C89 GAGAL bila tujuan
-  // sudah ada, itulah bug "GAGAL menyimpan perangkat" di PC pengguna).
-  // Directori tujuan dibuat bila belum ada. `err` menerima penyebab pasti.
+  // Saves atomically: tulis tmp -> rename menimpa tujuan -> verifikasi ukuran
+  // dan baca ulang dari disk. Directori tujuan dibuat bila belum ada.
+  struct SaveInfo {
+    std::string resolved_path;
+    size_t bytes_written = 0;
+    bool verified = false;
+  };
   bool Save(const std::string& path, std::string* err = nullptr) const;
+  bool SaveAndVerify(const std::string& path, SaveInfo* info,
+                     std::string* err = nullptr) const;
   std::string ToJson() const;
   bool FromJson(const std::string& json);
 };
