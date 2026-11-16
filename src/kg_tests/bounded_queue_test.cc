@@ -52,3 +52,17 @@ TEST_CASE("clear empties the queue") {
   REQUIRE(q.Empty());
   REQUIRE(q.Size() == 0);
 }
+
+TEST_CASE("M2m: TryPopLatest selalu mengembalikan frame terbaru dan membuang yang lama") {
+  BoundedQueue<int> q(2);
+  q.Push(10);
+  q.Push(20);
+  int v = 0;
+  size_t discarded = 99;
+  REQUIRE(q.TryPopLatest(v, &discarded));
+  REQUIRE(v == 20);
+  REQUIRE(discarded == 1);
+  REQUIRE(q.Empty());
+  REQUIRE_FALSE(q.TryPopLatest(v, &discarded));
+  REQUIRE(discarded == 0);
+}

@@ -26,6 +26,26 @@ struct ExclusionShapes {
   std::vector<ExclusionEllipse> ellipses;  // lubang hidung R, L
 };
 
+// M2m: basis koordinat wajah ternormalisasi (asal = tengah garis mata,
+// sumbu u sejajar garis mata ke kiri subjek, sumbu v tegak lurus ke bawah,
+// satuan = jarak antar-mata / IOD). false bila mata belum valid.
+struct FaceEyeBasis {
+  float eye_mid_x = 0.0f, eye_mid_y = 0.0f;
+  float ux = 1.0f, uy = 0.0f;
+  float vx = 0.0f, vy = 1.0f;
+  float iod = 0.0f;
+  bool valid = false;
+};
+FaceEyeBasis ComputeFaceEyeBasis(const float* xy);
+bool ToFaceNormalizedCoords(const FaceEyeBasis& basis, float x, float y,
+                            float* norm_x, float* norm_y);
+
+// Konstanta geometri lubang hidung kanonik MediaPipe (dalam satuan IOD):
+// pusat sekitar (±0.15, +0.64) * IOD, radius inti 0.035 * IOD.
+inline constexpr float kCanonicalNostrilNormX = 0.15f;
+inline constexpr float kCanonicalNostrilNormY = 0.64f;
+inline constexpr float kNostrilRadiusIodScale = 0.035f;
+
 // Satu loop per bentuk: [right_eye, left_eye, right_brow, left_brow, lips_outer].
 // Urutan loops[] tetap di atas; bila loop gagal dibentuk, loop tersebut dilewati
 // (kosong) supaya rasterisasi tetap aman.

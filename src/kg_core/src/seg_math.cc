@@ -1,4 +1,5 @@
 #include "kgcore/seg_math.h"
+#include "kgcore/face_mesh_topology.h"
 
 #include <algorithm>
 #include <cmath>
@@ -162,6 +163,203 @@ inline float BilinearGuide(const uint8_t* guide, int gw, int gh, float x,
   return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
 }
 }  // namespace
+
+SegPoseAnchor ComputeSegPoseAnchor(const LandmarkSet& lm, int w, int h) {
+  SegPoseAnchor out;
+  if (!lm.valid || w <= 0 || h <= 0) return out;
+  float xy[kLandmarkCount * 2];
+  for (size_t i = 0; i < kLandmarkCount; ++i) {
+    xy[i * 2] = lm.pts[i].x * static_cast<float>(w);
+    xy[i * 2 + 1] = lm.pts[i].y * static_cast<float>(h);
+  }
+  const FaceEyeBasis b = ComputeFaceEyeBasis(xy);
+  if (b.valid && b.iod > 1.0f) {
+    out.cx_px = b.eye_mid_x;
+    out.cy_px = b.eye_mid_y;
+    out.iod_px = b.iod;
+    out.angle_rad = std::atan2(b.uy, b.ux);
+    out.valid = true;
+    return out;
+  }
+  // Fallback ke centroid apabila mata belum terisi.
+  double sx = 0.0, sy = 0.0;
+  for (const auto& p : lm.pts) { sx += p.x; sy += p.y; }
+  out.cx_px = static_cast<float>(sx / kLandmarkCount * w);
+  out.cy_px = static_cast<float>(sy / kLandmarkCount * h);
+  out.iod_px = 0.0f;
+  out.angle_rad = 0.0f;
+  out.valid = true;
+  return out;
+}
+
+SegSimilarity ComputeSegSimilarity(const SegPoseAnchor& anchor,
+                                   const SegPoseAnchor& curr) {
+  SegSimilarity sim;
+  if (!anchor.valid || !curr.valid) return sim;
+  sim.curr_cx = curr.cx_px;
+  sim.curr_cy = curr.cy_px;
+  sim.anchor_cx = anchor.cx_px;
+  sim.anchor_cy = anchor.cy_px;
+  if (anchor.iod_px > 4.0f && curr.iod_px > 4.0f) {
+    const float scale = std::clamp(anchor.iod_px / curr.iod_px, 0.5f, 2.0f);
+    const float dtheta = anchor.angle_rad - curr.angle_rad;
+    sim.c = scale * std::cos(dtheta);
+    sim.s = scale * std::sin(dtheta);
+  } else {
+    sim.c = 1.0f;
+    sim.s = 0.0f;
+  }
+  sim.valid = true;
+  return sim;
+}
+
+float ComputeSegMotionAttenuation(float seg_age_frames,
+                                  float head_speed_px_per_frame) {
+  if (seg_age_frames <= 1.0f || head_speed_px_per_frame <= 2.0f) return 1.0f;
+  const float age_factor = std::clamp((seg_age_frames - 1.0f) / 8.0f, 0.0f, 1.0f);
+  const float speed_factor =
+      std::clamp((head_speed_px_per_frame - 2.0f) / 18.0f, 0.0f, 1.0f);
+  return std::clamp(1.0f - age_factor * speed_factor, 0.0f, 1.0f);
+}
+
+namespace {
+inline void ApplySimilarityToFramePx(const SegSimilarity& sim, float x, float y,
+                                     float* sx, float* sy) {
+  if (!sim.valid) {
+    *sx = x;
+    *sy = y;
+    return;
+  }
+  const float dx = x - sim.curr_cx;
+  const float dy = y - sim.curr_cy;
+  *sx = sim.anchor_cx + sim.c * dx - sim.s * dy;
+  *sy = sim.anchor_cy + sim.s * dx + sim.c * dy;
+}
+}  // namespace
+
+void SegProbsToMaskSkinSimilarity(const float* probs, const LetterboxInfo& lb,
+                                  int mw, int mh, float* skin_out,
+                                  const SegSimilarity& sim, int dst) {
+  if (!probs || !skin_out || mw <= 0 || mh <= 0 || dst <= 0) return;
+  for (int y = 0; y < mh; ++y) {
+    const float fy = (static_cast<float>(y) + 0.5f) / mh * lb.src_h;
+    for (int x = 0; x < mw; ++x) {
+      const float fx = (static_cast<float>(x) + 0.5f) / mw * lb.src_w;
+      float sx = fx, sy = fy;
+      ApplySimilarityToFramePx(sim, fx, fy, &sx, &sy);
+      const float mx = sx * lb.scale + lb.pad_x;
+      const float my = sy * lb.scale + lb.pad_y;
+      const float px = std::clamp(mx - 0.5f, 0.0f, static_cast<float>(dst) - 1.001f);
+      const float py = std::clamp(my - 0.5f, 0.0f, static_cast<float>(dst) - 1.001f);
+      const int x0 = static_cast<int>(px), y0 = static_cast<int>(py);
+      const int x1 = std::min(x0 + 1, dst - 1), y1 = std::min(y0 + 1, dst - 1);
+      const float ax = px - x0, ay = py - y0;
+      auto skin_at = [&](int xx, int yy) {
+        const float* p = probs + (static_cast<size_t>(yy) * dst + xx) * kSegClasses;
+        const float v = p[kSegClassBodySkin] + p[kSegClassFaceSkin];
+        return v > 1.0f ? 1.0f : v;
+      };
+      skin_out[static_cast<size_t>(y) * mw + x] =
+          (skin_at(x0, y0) * (1 - ax) + skin_at(x1, y0) * ax) * (1 - ay) +
+          (skin_at(x0, y1) * (1 - ax) + skin_at(x1, y1) * ax) * ay;
+    }
+  }
+}
+
+void SegProbsToMaskClassSimilarity(const float* probs, const LetterboxInfo& lb,
+                                   int class_id, int mw, int mh, float* out,
+                                   const SegSimilarity& sim, int dst) {
+  if (!probs || !out || class_id < 0 || class_id >= kSegClasses || mw <= 0 ||
+      mh <= 0 || dst <= 0) return;
+  for (int y = 0; y < mh; ++y) {
+    const float fy = (static_cast<float>(y) + 0.5f) / mh * lb.src_h;
+    for (int x = 0; x < mw; ++x) {
+      const float fx = (static_cast<float>(x) + 0.5f) / mw * lb.src_w;
+      float sx = fx, sy = fy;
+      ApplySimilarityToFramePx(sim, fx, fy, &sx, &sy);
+      const float px = std::clamp(sx * lb.scale + lb.pad_x - 0.5f,
+                                  0.0f, static_cast<float>(dst) - 1.001f);
+      const float py = std::clamp(sy * lb.scale + lb.pad_y - 0.5f,
+                                  0.0f, static_cast<float>(dst) - 1.001f);
+      const int x0 = static_cast<int>(px), y0 = static_cast<int>(py);
+      const int x1 = std::min(x0 + 1, dst - 1), y1 = std::min(y0 + 1, dst - 1);
+      const float ax = px - x0, ay = py - y0;
+      auto at = [&](int xx, int yy) {
+        return probs[(static_cast<size_t>(yy) * dst + xx) * kSegClasses + class_id];
+      };
+      out[static_cast<size_t>(y) * mw + x] =
+          (at(x0, y0) * (1 - ax) + at(x1, y0) * ax) * (1 - ay) +
+          (at(x0, y1) * (1 - ax) + at(x1, y1) * ax) * ay;
+    }
+  }
+}
+
+void SegProbsToMaskSkinAndFaceSimilarity(const float* probs,
+                                         const LetterboxInfo& lb, int mw,
+                                         int mh, float* skin_out,
+                                         float* face_out,
+                                         const SegSimilarity& sim, int dst) {
+  if (!probs || !skin_out || !face_out || mw <= 0 || mh <= 0 || dst <= 0) return;
+  for (int y = 0; y < mh; ++y) {
+    const float fy = (static_cast<float>(y) + 0.5f) / mh * lb.src_h;
+    for (int x = 0; x < mw; ++x) {
+      const float fx = (static_cast<float>(x) + 0.5f) / mw * lb.src_w;
+      float sx = fx, sy = fy;
+      ApplySimilarityToFramePx(sim, fx, fy, &sx, &sy);
+      const float px = std::clamp(sx * lb.scale + lb.pad_x - 0.5f,
+                                  0.0f, static_cast<float>(dst) - 1.001f);
+      const float py = std::clamp(sy * lb.scale + lb.pad_y - 0.5f,
+                                  0.0f, static_cast<float>(dst) - 1.001f);
+      const int x0 = static_cast<int>(px), y0 = static_cast<int>(py);
+      const int x1 = std::min(x0 + 1, dst - 1), y1 = std::min(y0 + 1, dst - 1);
+      const float ax = px - x0, ay = py - y0;
+      auto at = [&](int xx, int yy, int cls) {
+        return probs[(static_cast<size_t>(yy) * dst + xx) * kSegClasses + cls];
+      };
+      const float f00 = at(x0, y0, kSegClassFaceSkin), f10 = at(x1, y0, kSegClassFaceSkin);
+      const float f01 = at(x0, y1, kSegClassFaceSkin), f11 = at(x1, y1, kSegClassFaceSkin);
+      const float b00 = at(x0, y0, kSegClassBodySkin) + f00;
+      const float b10 = at(x1, y0, kSegClassBodySkin) + f10;
+      const float b01 = at(x0, y1, kSegClassBodySkin) + f01;
+      const float b11 = at(x1, y1, kSegClassBodySkin) + f11;
+      const float face = (f00 * (1 - ax) + f10 * ax) * (1 - ay) +
+                         (f01 * (1 - ax) + f11 * ax) * ay;
+      const float skin = (b00 * (1 - ax) + b10 * ax) * (1 - ay) +
+                         (b01 * (1 - ax) + b11 * ax) * ay;
+      skin_out[static_cast<size_t>(y) * mw + x] = std::min(1.0f, skin);
+      face_out[static_cast<size_t>(y) * mw + x] = face;
+    }
+  }
+}
+
+void SegProbabilitiesToFrameArgmaxSimilarity(const float* probs,
+                                             const LetterboxInfo& lb, int w,
+                                             int h, uint8_t* classes,
+                                             const SegSimilarity& sim,
+                                             int dst) {
+  if (!probs || !classes || w <= 0 || h <= 0 || dst <= 0) return;
+  for (int y = 0; y < h; ++y) {
+    const float fy = static_cast<float>(y) + 0.5f;
+    for (int x = 0; x < w; ++x) {
+      const float fx = static_cast<float>(x) + 0.5f;
+      float sx = fx, sy = fy;
+      ApplySimilarityToFramePx(sim, fx, fy, &sx, &sy);
+      const float mx = sx * lb.scale + lb.pad_x;
+      const float my = sy * lb.scale + lb.pad_y;
+      if (mx < 0.0f || my < 0.0f || mx >= dst || my >= dst) {
+        classes[static_cast<size_t>(y) * w + x] = 0;
+        continue;
+      }
+      const int ix = std::clamp(static_cast<int>(mx), 0, dst - 1);
+      const int iy = std::clamp(static_cast<int>(my), 0, dst - 1);
+      const float* p = probs + (static_cast<size_t>(iy) * dst + ix) * kSegClasses;
+      int best = 0;
+      for (int c = 1; c < kSegClasses; ++c)
+        if (p[c] > p[best]) best = c;
+      classes[static_cast<size_t>(y) * w + x] = static_cast<uint8_t>(best);
+    }
+  }
+}
 
 void SegProbsToMaskSkin(const float* probs, const LetterboxInfo& lb, int mw,
                         int mh, float* skin_out, int dst, float shift_x_px,

@@ -30,6 +30,9 @@ struct SegMaskInput {
   const LetterboxInfo* letterbox = nullptr;
   int64_t frame_serial = 0;      // serial frame saat inferensi (utk lag)
   float shift_x = 0.0f, shift_y = 0.0f;  // gerak anchor wajah sejak Submit
+  SegSimilarity similarity{};    // M2m: kompensasi kemiripan penuh (T+R+S)
+  float seg_age_frames = 0.0f;   // M2m: umur seg dalam frame
+  float head_speed_px = 0.0f;    // M2m: kecepatan kepala (px/frame)
   bool valid = false;
 };
 
@@ -245,6 +248,7 @@ class SkinMaskBuilder {
   bool has_face() const { return face_valid_; }
   // M2j: alpha temporal terakhir (utk log latensi/gerak).
   float LastTemporalAlpha() const { return last_alpha_; }
+  float LastSegAttenuation() const { return last_seg_attenuation_; }
   const SkinMaskStageTimings& StageTimings() const { return stage_timings_; }
 
  private:
@@ -258,6 +262,7 @@ class SkinMaskBuilder {
   float color_cb0_ = 0.0f, color_cr0_ = 0.0f;
   bool color_calibration_valid_ = false;
   float last_alpha_ = 0.0f;
+  float last_seg_attenuation_ = 1.0f;
   SkinMaskStageTimings stage_timings_{};
 };
 

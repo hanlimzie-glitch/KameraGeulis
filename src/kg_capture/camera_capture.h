@@ -75,6 +75,7 @@ class CameraCapture {
 
   // Copies the newest frame into `out` (returns false if none yet).
   bool LatestFrame(Frame& out);
+  size_t QueueSize() const { return queue_ ? queue_->Size() : 0; }
 
   uint64_t FramesCaptured() const { return frames_captured_.load(); }
   // Snapshot of the M2e diagnosis counters (thread-safe copy).

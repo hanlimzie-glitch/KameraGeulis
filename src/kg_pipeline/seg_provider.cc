@@ -38,6 +38,7 @@ constexpr char kTag[] = "seg";
 // Tanpa manifest: file diterima dengan PERINGATAN + SHA dicatat; gerbang
 // semantik tetap ada (ORT load + cek bentuk keluaran [1,256,256,6]).
 constexpr wchar_t kSegFile[] = L"selfie_multiclass_256x256.onnx";
+constexpr wchar_t kSegInt8File[] = L"selfie_multiclass_256x256.int8.onnx";
 constexpr wchar_t kSegManifestFile[] = L"selfie_multiclass_256x256.onnx.sha256";
 constexpr wchar_t kDownloadBase[] = L"github.com";
 constexpr wchar_t kDownloadPathPrefix[] =
@@ -167,8 +168,8 @@ std::string SegProvider::LastError() const {
 
 void SegProvider::SubmitFrame(const uint8_t* pixels, int w, int h,
                               int stride_bytes, bool bgra,
-                              uint64_t frame_serial, float face_anchor_x,
-                              float face_anchor_y) {
+                              uint64_t frame_serial,
+                              const SegPoseAnchor& pose) {
   if (dead_.load()) return;  // gagal permanen: hemat, pemanggil pakai wajah
   if (!pixels || w <= 0 || h <= 0) return;
   LetterboxInfo lb = ComputeSegLetterbox(w, h, kSegInputSize);
@@ -181,23 +182,37 @@ void SegProvider::SubmitFrame(const uint8_t* pixels, int w, int h,
   slot_input_ = std::move(input);
   slot_lb_ = lb;
   slot_serial_ = frame_serial;
-  slot_anchor_x_ = face_anchor_x;
-  slot_anchor_y_ = face_anchor_y;
+  slot_pose_ = pose;
   slot_pending_ = true;
   cv_.notify_one();
 }
 
 bool SegProvider::GetResult(std::vector<float>* probs, LetterboxInfo* lb,
                             uint64_t* frame_serial, double* infer_ms,
-                            float* face_anchor_x, float* face_anchor_y) const {
+                            SegPoseAnchor* pose) const {
   std::lock_guard<std::mutex> lk(mu_);
   if (!res_valid_) return false;
   if (probs) *probs = res_probs_;
   if (lb) *lb = res_lb_;
   if (frame_serial) *frame_serial = res_serial_;
   if (infer_ms) *infer_ms = res_ms_;
-  if (face_anchor_x) *face_anchor_x = res_anchor_x_;
-  if (face_anchor_y) *face_anchor_y = res_anchor_y_;
+  if (pose) *pose = res_pose_;
+  return true;
+}
+
+bool SegProvider::GetResultIfNewer(uint64_t last_seen_serial,
+                                   std::vector<float>* probs, LetterboxInfo* lb,
+                                   uint64_t* frame_serial, double* infer_ms,
+                                   SegPoseAnchor* pose) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!res_valid_) return false;
+  if (lb) *lb = res_lb_;
+  if (frame_serial) *frame_serial = res_serial_;
+  if (infer_ms) *infer_ms = res_ms_;
+  if (pose) *pose = res_pose_;
+  if (probs && res_serial_ != last_seen_serial) {
+    *probs = res_probs_;
+  }
   return true;
 }
 
@@ -221,7 +236,7 @@ void SegProvider::ThreadMain_() {
   std::vector<float> input;
   LetterboxInfo lb{};
   uint64_t serial = 0;
-  float anchor_x = -1.0f, anchor_y = -1.0f;
+  SegPoseAnchor pose{};
   double infer_sum_ms = 0.0;
   uint64_t infer_n = 0;
   while (true) {
@@ -232,8 +247,7 @@ void SegProvider::ThreadMain_() {
       input = std::move(slot_input_);
       lb = slot_lb_;
       serial = slot_serial_;
-      anchor_x = slot_anchor_x_;
-      anchor_y = slot_anchor_y_;
+      pose = slot_pose_;
       slot_pending_ = false;
     }
 
@@ -282,8 +296,7 @@ void SegProvider::ThreadMain_() {
         res_lb_ = lb;
         res_serial_ = serial;
         res_ms_ = ms;
-        res_anchor_x_ = anchor_x;
-        res_anchor_y_ = anchor_y;
+        res_pose_ = pose;
         res_valid_ = true;
       }
       last_ms_.store(ms);
@@ -292,16 +305,21 @@ void SegProvider::ThreadMain_() {
       average_ms_.store(infer_sum_ms / static_cast<double>(infer_n));
       inferred_.fetch_add(1);
       if ((infer_n % 90) == 0) {
-        Log(kTag, "ep=cpu threads=3 infer last=%.1fms avg=%.1fms period=%dms n=%llu",
+        Log(kTag,
+            "ep=%s precision=%s hw_cores=%u intra_op=%d infer last=%.1fms avg=%.1fms "
+            "period=%dms n=%llu",
+            ep_name_, precision_name_, hw_cores_.load(), intra_threads_.load(),
             ms, average_ms_.load(), requested_period_ms_.load(),
             static_cast<unsigned long long>(infer_n));
       }
-      // M2k: interval adaptif = 3× inferensi, dijepit 200–333 ms (3–5 Hz),
-      // atau periode lebih lambat yang diminta perf guard. Inferensi tetap di
-      // thread sendiri; slot input hanya menyimpan frame terbaru.
-      const int adaptive_ms = std::clamp(static_cast<int>(std::ceil(ms * 3.0)),
-                                         200, 333);
-      const int period_ms = std::max(adaptive_ms, requested_period_ms_.load());
+      // M2m: interval adaptif ~2x waktu inferensi (100..333 ms) saat beban
+      // normal agar seg_age tetap rendah (~2-3 frame bila infer <= 60 ms),
+      // namun tetap menghormati perlambatan PerfGuard (>250 ms).
+      const int adaptive_ms = std::clamp(static_cast<int>(std::ceil(ms * 2.0)),
+                                         100, 333);
+      const int req_ms = requested_period_ms_.load();
+      const int period_ms = (req_ms <= 250) ? adaptive_ms
+                                            : std::max(adaptive_ms, req_ms);
       const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - t0)
                                .count();
@@ -356,23 +374,54 @@ bool SegProvider::EnsureModelLoaded_() {
       dead_.store(true);  // last_error_ sudah diisi
       return false;
     }
-    // Paket resmi yang diunduh repo adalah onnxruntime-win-x64 CPU. Periksa
-    // kemampuan DML secara eksplisit, tetapi jangan mengklaim/mencoba EP yang
-    // tidak ada: API provider DML bukan bagian dari paket CPU ini.
+    // Pilih model INT8 bila tersedia lokal bersama model FP32; jika tidak,
+    // pakai FP32 terverifikasi dari rilis models-v1.
+    std::wstring model_path = dir + L"\\" + kSegFile;
+    precision_name_ = "fp32";
+    const std::wstring int8_path = dir + L"\\" + kSegInt8File;
+    if (GetFileAttributesW(int8_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      model_path = int8_path;
+      precision_name_ = "int8";
+    }
+
+    const unsigned hw_cores = std::thread::hardware_concurrency();
+    const int intra_threads = std::clamp(
+        hw_cores > 0 ? static_cast<int>((hw_cores + 1) / 2) : 2, 2, 6);
+    hw_cores_.store(hw_cores);
+    intra_threads_.store(intra_threads);
+
+    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "KameraGeulisSeg");
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(intra_threads);
+    opts.SetInterOpNumThreads(1);
+    opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
     HMODULE ort_module = GetModuleHandleW(L"onnxruntime.dll");
     FARPROC dml_symbol = ort_module
         ? GetProcAddress(ort_module, "OrtSessionOptionsAppendExecutionProvider_DML")
         : nullptr;
-    Log(kTag, "EP probe: DML symbol=%s; runtime yang dipakai=CPU (DML tidak "
-              "diaktifkan oleh paket CPU-only ini)", dml_symbol ? "ada" : "tidak ada");
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "KameraGeulisSeg");
-    Ort::SessionOptions opts;
-    opts.SetIntraOpNumThreads(1);
-    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    session_ = std::make_unique<Ort::Session>(*env_,
-                                              (dir + L"\\" + kSegFile).c_str(),
-                                              opts);
-    Log(kTag, "ORT seg siap (%ls)", dir.c_str());
+    ep_name_ = "cpu";
+    if (dml_symbol) {
+      using AppendDmlFn = OrtStatus* (ORT_API_CALL*)(OrtSessionOptions*, int);
+      auto append_dml = reinterpret_cast<AppendDmlFn>(dml_symbol);
+      OrtStatus* st = append_dml(opts, 0);
+      if (st == nullptr) {
+        ep_name_ = "dml";
+      } else {
+        const char* msg = Ort::GetApi().GetErrorMessage(st);
+        Log(kTag, "EP probe: DML symbol ada namun gagal inisialisasi (%s) -> fallback CPU",
+            msg ? msg : "?");
+        Ort::GetApi().ReleaseStatus(st);
+      }
+    }
+    Log(kTag,
+        "EP probe: hw_cores=%u intra_op=%d dml_symbol=%s -> ep=%s precision=%s",
+        hw_cores, intra_threads, dml_symbol ? "ada" : "tidak ada", ep_name_,
+        precision_name_);
+    session_ = std::make_unique<Ort::Session>(*env_, model_path.c_str(), opts);
+    Log(kTag, "ORT seg siap (%ls, ep=%s, precision=%s, intra_op=%d)",
+        model_path.c_str(), ep_name_, precision_name_, intra_threads);
     return true;
   } catch (const Ort::Exception& e) {
     std::lock_guard<std::mutex> lk(err_mu_);

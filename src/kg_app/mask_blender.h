@@ -215,18 +215,23 @@ uniform sampler2D u_cpu;
 uniform sampler2D u_face;
 uniform sampler2D u_face_prob;
 uniform sampler2D u_excl;
+uniform sampler2D u_excl_core;
 uniform sampler2D u_raw;
 uniform int u_has_seg;
 uniform int u_has_color_gate;
 uniform vec2 u_skin_cbcr;
 uniform vec4 u_gate_limits;
 uniform vec2 u_gate_radii;
+uniform float u_seg_body_gain;
 void main() {
   float mesh_coverage = texture(u_face, v_uv).r;
+  // M2m (3b): di dalam jaring wajah, mask HANYA bergantung pada landmark frame
+  // saat ini (tidak dipotong oleh u_face_prob seg yang bisa tertinggal).
   float mesh = mesh_coverage;
-  if (u_has_seg == 1) mesh *= smoothstep(0.30, 0.50, texture(u_face_prob, v_uv).r);
-  float body = texture(u_cpu, v_uv).r;
-  if (mesh_coverage >= 0.5) body = 0.0;
+  float body = texture(u_cpu, v_uv).r * u_seg_body_gain;
+  // Di sekitar batas wajah, pengaruh seg dibatasi & di-feather ke batas mesh.
+  float near_face_fade = 1.0 - smoothstep(0.0, 0.5, mesh_coverage);
+  body *= near_face_fade;
   if (u_has_color_gate == 1 && mesh_coverage < 0.5) {
     vec3 rgb = texture(u_raw, v_uv).rgb * 255.0;
     float y = dot(rgb, vec3(0.299, 0.587, 0.114));
@@ -244,7 +249,10 @@ void main() {
     }
   }
   float v = max(body, mesh);
-  v *= 1.0 - clamp(texture(u_excl, v_uv).r, 0.0, 1.0);
+  // M2m: pertahankan inti eksklusi >= 0.95 (1.0 di dalam core) sekaligus
+  // feather halus di luar core dari tex_excl_blur.
+  float excl = max(texture(u_excl_core, v_uv).r, texture(u_excl, v_uv).r);
+  v *= 1.0 - clamp(excl, 0.0, 1.0);
   if (v < 0.02) v = 0.0;
   frag = vec4(v, 0.0, 0.0, 1.0);
 }
@@ -520,7 +528,7 @@ void main() {
              bool has_seg_probability = false, float skin_cb0 = 128.0f,
              float skin_cr0 = 128.0f, bool has_color_calibration = false,
              const kgcore::SkinMaskConfig* skin_cfg = nullptr,
-             bool use_gpu_mask_gen = true) {
+             bool use_gpu_mask_gen = true, float seg_body_gain = 1.0f) {
     if (disabled) return false;
     if (!Init() || !raw || !beauty || !mask || w <= 0 || h <= 0 || mw <= 0 ||
         mh <= 0) {
@@ -540,7 +548,7 @@ void main() {
       gpu_mask_ok = GenerateMaskGpu(
           landmarks_xy, landmark_count, w, h, mw, mh, face_probability,
           has_seg_probability, skin_cb0, skin_cr0, has_color_calibration,
-          skin_cfg);
+          skin_cfg, seg_body_gain);
       cpu_mask_submit_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - cpu_submit_t0)
                                .count();
@@ -711,7 +719,7 @@ void main() {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
-    for (int u = 4; u >= 0; --u) {
+    for (int u = 5; u >= 0; --u) {
       glActiveTexture(GL_TEXTURE0 + u);
       glBindTexture(GL_TEXTURE_2D, 0);
     }
@@ -794,7 +802,8 @@ void main() {
                        int mh, const uint8_t* face_probability,
                        bool has_seg_probability, float skin_cb0,
                        float skin_cr0, bool has_color_calibration,
-                       const kgcore::SkinMaskConfig* skin_cfg) {
+                       const kgcore::SkinMaskConfig* skin_cfg,
+                       float seg_body_gain) {
     if (!xy_px || count < 468 || fw <= 0 || fh <= 0) return false;
     if (mask_query_pending) {
       GLint available = GL_FALSE;
@@ -926,13 +935,15 @@ void main() {
     for (const auto& loop : shapes.loops) triangulate_loop(loop);
     for (const auto& e : shapes.ellipses) {
       constexpr int kSteps = 24;
+      const float rx_eff = std::max(e.rx, 0.80f * static_cast<float>(fw) / mw);
+      const float ry_eff = std::max(e.ry, 0.80f * static_cast<float>(fh) / mh);
       for (int i = 0; i < kSteps; ++i) {
         const float a0 = 6.28318530718f * i / kSteps;
         const float a1 = 6.28318530718f * (i + 1) / kSteps;
-        add_triangle(e.cx, e.cy, e.cx + e.rx * std::cos(a0),
-                     e.cy + e.ry * std::sin(a0),
-                     e.cx + e.rx * std::cos(a1),
-                     e.cy + e.ry * std::sin(a1));
+        add_triangle(e.cx, e.cy, e.cx + rx_eff * std::cos(a0),
+                     e.cy + ry_eff * std::sin(a0),
+                     e.cx + rx_eff * std::cos(a1),
+                     e.cy + ry_eff * std::sin(a1));
       }
     }
     if (!AttachMask(tex_excl, mw, mh, "tex_excl")) return abort_gpu_mask();
@@ -974,6 +985,8 @@ void main() {
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_face_prob"), 3);
     glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tex_raw);
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_raw"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, tex_excl);
+    glUniform1i(glGetUniformLocation(prog_compose_mask, "u_excl_core"), 5);
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_has_seg"),
                 has_seg_probability ? 1 : 0);
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_has_color_gate"),
@@ -988,6 +1001,8 @@ void main() {
     glUniform2f(glGetUniformLocation(prog_compose_mask, "u_gate_radii"),
                 gate_cfg.chroma_radius * gate_cfg.chroma_feather,
                 gate_cfg.chroma_radius * gate_cfg.seg_gate_fade);
+    glUniform1f(glGetUniformLocation(prog_compose_mask, "u_seg_body_gain"),
+                std::clamp(seg_body_gain, 0.0f, 1.0f));
     Draw();
     RestoreStateAfterPass();
     if (measure_gpu) {

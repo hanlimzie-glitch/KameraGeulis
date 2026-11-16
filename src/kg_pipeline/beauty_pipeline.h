@@ -70,6 +70,9 @@ class BeautyPipeline {
   const LetterboxInfo& SegUsedLetterbox() const { return seg_used_lb_; }
   float SegUsedShiftX() const { return seg_used_shift_x_; }
   float SegUsedShiftY() const { return seg_used_shift_y_; }
+  const SegSimilarity& SegUsedSimilarity() const { return seg_used_similarity_; }
+  float HeadSpeedPx() const { return head_speed_px_; }
+  float SegAttenuation() const { return mask_builder_.LastSegAttenuation(); }
   // RGBA penuh frame input terakhir (setara OutputRGBA - untuk komposit M2h).
   const uint8_t* InputRGBA() const { return convert_buf_.empty() ? nullptr : convert_buf_.data(); }
 
@@ -122,6 +125,9 @@ class BeautyPipeline {
   double seg_used_ms_ = 0.0;
   LetterboxInfo seg_used_lb_{};
   float seg_used_shift_x_ = 0.0f, seg_used_shift_y_ = 0.0f;
+  SegSimilarity seg_used_similarity_{};
+  SegPoseAnchor prev_pose_anchor_{};
+  float head_speed_px_ = 0.0f;
   bool seg_start_logged_ = false;
   bool seg_fail_logged_ = false;
   uint64_t frame_serial_ = 0;

@@ -317,9 +317,16 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
       std::vector<uint8_t> am(static_cast<size_t>(sw) * sh);
       kgcore::SegArgmax(probs.data(), sw * sh, am.data());
       argmax_full.resize(static_cast<size_t>(w) * h);
-      kgcore::SegProbabilitiesToFrameArgmax(
-          probs.data(), pipeline->SegUsedLetterbox(), w, h, argmax_full.data(),
-          sw, pipeline->SegUsedShiftX(), pipeline->SegUsedShiftY());
+      if (pipeline->SegUsedSimilarity().valid) {
+        kgcore::SegProbabilitiesToFrameArgmaxSimilarity(
+            probs.data(), pipeline->SegUsedLetterbox(), w, h,
+            argmax_full.data(), pipeline->SegUsedSimilarity(), sw);
+      } else {
+        kgcore::SegProbabilitiesToFrameArgmax(
+            probs.data(), pipeline->SegUsedLetterbox(), w, h,
+            argmax_full.data(), sw, pipeline->SegUsedShiftX(),
+            pipeline->SegUsedShiftY());
+      }
       std::vector<uint8_t> up(static_cast<size_t>(w) * h * 4);
       for (int i = 0; i < w * h; ++i) {
         uint8_t col[4];
@@ -768,6 +775,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   bool prev_show_mask = ui.show_mask;
   int dark_streak = 0;             // detik berturut gambar nyaris hitam
   bool dark_hint_shown = false;
+  // M2m: akumulator telemetri lag pelacakan & latensi kamera-ke-layar per detik.
+  std::vector<float> win_oneeuro_mean_px;
+  std::vector<float> win_oneeuro_p95_px;
+  std::vector<float> win_mask_feat_diff_px;
+  std::vector<float> win_cam2screen_ms;
+  int64_t pending_cam_ts_ms = -1;
+  float last_mask_feat_diff_px = 0.0f;
 
   // glGetError must run on the context that owns preview.tex (= this thread).
   auto drain_gl_errors = [&] {
@@ -953,6 +967,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       last_camera_raw = frame;
       last_camera_raw_valid = true;
       last_frame_ts_ms = frame.timestamp_ms;
+      pending_cam_ts_ms = frame.timestamp_ms;
       last_raw_luma = ComputeMeanLumaFrame(frame);
     }
     ui.capture_ms = duration_cast<std::chrono::microseconds>(clock_type::now() - cap_start)
@@ -1106,14 +1121,26 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             !blender.init_failed && !force_no_mask_gl && !blender.disabled) {
           const kgcore::BeautyComposeConfig bcfg = MakeComposeConfig(
               ui.skin_only, ui.smoothing, ui.whitening, ui.chroma_retain);
-          const auto& current_lm = pipeline->Tracker().Current();
+          // M2m (3a): kontur mask memakai landmark mentah frame ini (0 lag
+          // OneEuro; feather menyembunyikan jitter mikro).
+          const auto& raw_lm = pipeline->Tracker().CurrentRaw();
+          const auto& flt_lm = pipeline->Tracker().Current();
+          const auto& mask_lm = raw_lm.valid ? raw_lm : flt_lm;
           std::vector<float> mask_landmarks;
-          if (current_lm.valid) {
+          if (mask_lm.valid) {
             mask_landmarks.resize(kgcore::kLandmarkCount * 2);
+            double diff_sum = 0.0;
             for (size_t i = 0; i < kgcore::kLandmarkCount; ++i) {
-              mask_landmarks[i * 2] = current_lm.pts[i].x * frame.width;
-              mask_landmarks[i * 2 + 1] = current_lm.pts[i].y * frame.height;
+              mask_landmarks[i * 2] = mask_lm.pts[i].x * frame.width;
+              mask_landmarks[i * 2 + 1] = mask_lm.pts[i].y * frame.height;
+              if (raw_lm.valid) {
+                diff_sum += std::hypot(
+                    (mask_lm.pts[i].x - raw_lm.pts[i].x) * frame.width,
+                    (mask_lm.pts[i].y - raw_lm.pts[i].y) * frame.height);
+              }
             }
+            last_mask_feat_diff_px =
+                static_cast<float>(diff_sum / kgcore::kLandmarkCount);
           }
           blended = blender.Blend(bcfg, pipeline->InputRGBA(), frame.width,
                                   frame.height, out, mb.mask().data(), mb.w(),
@@ -1125,7 +1152,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                                                 : mb.face_probability().data(),
                                   pipeline->SegActive(), mb.skin_cb0(),
                                   mb.skin_cr0(), mb.has_color_calibration(),
-                                  &mb.config(), !gpu_mask_gen_disabled);
+                                  &mb.config(), !gpu_mask_gen_disabled,
+                                  pipeline->SegAttenuation());
           if (!blended && blender.init_failed && !blender_warned) {
             blender_warned = true;
             kgcore::Log("app",
@@ -1206,6 +1234,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.cam_width = frame.width;
       ui.cam_height = frame.height;
       ui.frames_captured = capture.FramesCaptured();
+      if (!frame_is_synthetic && pipeline->Tracker().CurrentRaw().valid) {
+        win_oneeuro_mean_px.push_back(pipeline->Tracker().LastFilterLagMeanPx());
+        win_oneeuro_p95_px.push_back(pipeline->Tracker().LastFilterLagP95Px());
+        win_mask_feat_diff_px.push_back(last_mask_feat_diff_px);
+      }
     } else if (!have_frame && preview_show_blend && ui.show_mask != prev_show_mask &&
                blender.ready && pipeline) {
       // F6 toggled di antara dua frame kamera: segarkan tex_out_debug segera.
@@ -1370,12 +1403,42 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             dark_hint_shown = false;
           }
         }
+        auto mean_of = [](const std::vector<float>& v) {
+          if (v.empty()) return 0.0f;
+          double s = 0.0;
+          for (float x : v) s += x;
+          return static_cast<float>(s / v.size());
+        };
+        auto pct_of = [](std::vector<float> v, float q) {
+          if (v.empty()) return 0.0f;
+          std::sort(v.begin(), v.end());
+          const size_t idx = static_cast<size_t>(
+              std::clamp(q, 0.0f, 1.0f) * static_cast<float>(v.size() - 1));
+          return v[idx];
+        };
+        const float oe_mean = mean_of(win_oneeuro_mean_px);
+        const float oe_p95 = pct_of(win_oneeuro_p95_px, 0.95f);
+        const float mask_diff = mean_of(win_mask_feat_diff_px);
+        const float c2s_med = pct_of(win_cam2screen_ms, 0.50f);
+        const float c2s_p95 = pct_of(win_cam2screen_ms, 0.95f);
+        win_oneeuro_mean_px.clear();
+        win_oneeuro_p95_px.clear();
+        win_mask_feat_diff_px.clear();
+        win_cam2screen_ms.clear();
+        kg::StageTimings diag_st{};
+        if (pipeline) pipeline->GetStageTimings(&diag_st);
+        const float seg_age_fr = pipeline ? pipeline->SegLagFrames() : -1.0f;
+        const float seg_ms_cur = pipeline ? pipeline->SegMs() : 0.0f;
+        const size_t qlen = capture.QueueSize();
+
         kgcore::Log(
             "diag",
             "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
             "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
             "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
-            "blend=%u %dx%d%s gpu_mask=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f",
+            "blend=%u %dx%d%s gpu_mask=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f | "
+            "lag: oneeuro(mean=%.2f p95=%.2f px) mask_feat_diff=%.2f px seg_age=%.0f fr (%.1fms) "
+            "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu roi_resets=%d (%.1f/m)",
             static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
             static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
             cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
@@ -1388,7 +1451,9 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
             blender.disabled ? " (OFF)" : "", gpu_mask_gen_disabled ? 0 : 1,
             bsum.dark, bsum.total, bsum.window_dark_ratio * 100.0,
-            last_raw_luma, iter_out_luma);
+            last_raw_luma, iter_out_luma,
+            oe_mean, oe_p95, mask_diff, seg_age_fr, seg_ms_cur,
+            c2s_med, c2s_p95, qlen, diag_st.reset_count, diag_st.resets_per_min);
       } else {
         kgcore::Log("diag",
                     "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
@@ -1546,7 +1611,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // landmark yang sama dengan rasterizer mask.
       if (ui.show_mask && pipeline_ok && pipeline && image_size.x > 1.0f &&
           image_size.y > 1.0f) {
-        const auto& lm = pipeline->Tracker().Current();
+        const auto& raw_lm = pipeline->Tracker().CurrentRaw();
+        const auto& lm = raw_lm.valid ? raw_lm : pipeline->Tracker().Current();
         if (lm.valid) {
           std::vector<float> xy(kgcore::kLandmarkCount * 2);
           for (size_t i = 0; i < kgcore::kLandmarkCount; ++i) {
@@ -1604,8 +1670,18 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(window);
+    const auto present_done = clock_type::now();
+    if (pending_cam_ts_ms > 0 && !frame_is_synthetic) {
+      const int64_t present_ms =
+          duration_cast<std::chrono::milliseconds>(present_done.time_since_epoch())
+              .count();
+      const float c2s = static_cast<float>(
+          std::max<int64_t>(0, present_ms - pending_cam_ts_ms));
+      win_cam2screen_ms.push_back(c2s);
+      pending_cam_ts_ms = -1;
+    }
     ui.render_ms =
-        duration_cast<std::chrono::microseconds>(clock_type::now() - render_start).count() /
+        duration_cast<std::chrono::microseconds>(present_done - render_start).count() /
         1000.0f;
   }
 

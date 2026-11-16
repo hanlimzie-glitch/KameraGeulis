@@ -1,4 +1,5 @@
 #include "kgcore/skin_mask.h"
+#include "kgcore/face_mesh_topology.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -703,20 +704,23 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   for (int c = 0; c < 4; ++c) {
     StrokeChain(topology::kBrowChains[c], 5, lm, w, h, brow_r, feat.data(), 255);
   }
-  const float face_w = [&] {
-    float mn = 1e9f, mx = -1e9f;
-    for (int i = 0; i < 36; ++i) {
-      mn = std::min(mn, lm.pts[topology::kFaceOvalRing[i]].x);
-      mx = std::max(mx, lm.pts[topology::kFaceOvalRing[i]].x);
+  // M2m: lubang hidung diturunkan dari geometri kanonik/lubang hidung resmi
+  // (bukan sayap hidung 48/278), radius ~0.035 * IOD + feather.
+  {
+    float xy_px[kLandmarkCount * 2];
+    for (size_t i = 0; i < kLandmarkCount; ++i) {
+      xy_px[i * 2] = lm.pts[i].x * static_cast<float>(fw);
+      xy_px[i * 2 + 1] = lm.pts[i].y * static_cast<float>(fh);
     }
-    return mx - mn;
-  }();
-  // Jari-jari lubang hidung ~1.5% lebar oval; minimal 2.5 px di ruang mask
-  // agar tetap terukir setelah feather (mask resolusi rendah).
-  const float nostril_r =
-      std::max(2.5f / static_cast<float>(w), face_w * 0.015f);
-  FillDiscN(lm.pts[topology::kNostrilPts[0]], nostril_r, w, h, feat.data(), 255);
-  FillDiscN(lm.pts[topology::kNostrilPts[1]], nostril_r, w, h, feat.data(), 255);
+    const ExclusionShapes shapes = BuildExclusionShapes(xy_px);
+    for (const auto& e : shapes.ellipses) {
+      const Vec2 c_norm(e.cx / static_cast<float>(fw),
+                        e.cy / static_cast<float>(fh));
+      const float r_norm = std::max(0.8f / static_cast<float>(w),
+                                    e.rx / static_cast<float>(fw));
+      FillDiscN(c_norm, r_norm, w, h, feat.data(), 255);
+    }
+  }
 
   stage_timings_.feature_ms = ms_since(feature_t0);
   // 3) Kalibrasi warna kulit adaptif (3 sampel: dahi + 2 pipi).
@@ -780,12 +784,22 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   //    -> union dgn mask wajah -> ramp fitur (fsoft) -> inti fitur nol.
   const bool use_seg = cfg_.coverage == SkinCoverage::kAllSkin && seg &&
                        seg->valid && seg->probs && seg->letterbox;
+  last_seg_attenuation_ =
+      use_seg ? ComputeSegMotionAttenuation(seg->seg_age_frames,
+                                            seg->head_speed_px)
+              : 1.0f;
   if (use_seg) {
-    // 5a) unletterbox bilinear -> kasar di resolusi mask.
+    // 5a) unletterbox bilinear -> kasar di resolusi mask (kompensasi kemiripan penuh T+R+S).
     std::vector<float> skin0(static_cast<size_t>(n));
     auto stage_t0 = MaskClock::now();
-    SegProbsToMaskSkin(seg->probs, *seg->letterbox, w, h, skin0.data(),
-                       kSegInputSize, seg->shift_x, seg->shift_y);
+    if (seg->similarity.valid) {
+      SegProbsToMaskSkinSimilarity(seg->probs, *seg->letterbox, w, h,
+                                   skin0.data(), seg->similarity,
+                                   kSegInputSize);
+    } else {
+      SegProbsToMaskSkin(seg->probs, *seg->letterbox, w, h, skin0.data(),
+                         kSegInputSize, seg->shift_x, seg->shift_y);
+    }
     stage_timings_.upsample_ms = ms_since(stage_t0);
     // 5b) Jalur fallback CPU RINGAN pada resolusi mask saja. Versi lama
     // membangun guide full-res lalu menghitung JointBilateralUpsample dengan
@@ -863,7 +877,7 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
             }
           }
         }
-        v *= cfg_.body_strength;
+        v *= cfg_.body_strength * last_seg_attenuation_;
         skin1[idx] = v;
       }
     }
@@ -964,25 +978,40 @@ bool SkinMaskBuilder::UpdateSegmentationOnly(const LandmarkSet& lm,
   std::fill(face_probability_.begin(), face_probability_.end(), 255);
   face_valid_ = lm.valid;
   if (!seg || !seg->valid || !seg->probs || !seg->letterbox) {
+    last_seg_attenuation_ = 1.0f;
     return false;  // GPU membentuk domain wajah; tanpa seg trim dinonaktifkan.
   }
   const int w = mask_w_, h = mask_h_, n = w * h;
+  last_seg_attenuation_ =
+      ComputeSegMotionAttenuation(seg->seg_age_frames, seg->head_speed_px);
   if (cfg_.coverage == SkinCoverage::kFaceOnly) {
     std::vector<float> p_face(static_cast<size_t>(n));
     const auto t0 = MaskClock::now();
-    SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassFaceSkin, w, h,
-                        p_face.data(), kSegInputSize, seg->shift_x, seg->shift_y);
+    if (seg->similarity.valid) {
+      SegProbsToMaskClassSimilarity(seg->probs, *seg->letterbox, kSegClassFaceSkin,
+                                    w, h, p_face.data(), seg->similarity,
+                                    kSegInputSize);
+    } else {
+      SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassFaceSkin, w, h,
+                          p_face.data(), kSegInputSize, seg->shift_x, seg->shift_y);
+    }
     for (size_t i = 0; i < p_face.size(); ++i)
       face_probability_[i] = static_cast<uint8_t>(std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
     stage_timings_.upsample_ms = ms_since(t0);
-    return false;  // mesh GPU saja, tetapi tepi tetap ditrim p_wajah.
+    return false;  // mesh GPU saja.
   }
   std::vector<float> skin(static_cast<size_t>(n));
   std::vector<float> p_face(static_cast<size_t>(n));
   auto t0 = MaskClock::now();
-  SegProbsToMaskSkinAndFace(seg->probs, *seg->letterbox, w, h, skin.data(),
-                            p_face.data(), kSegInputSize, seg->shift_x,
-                            seg->shift_y);
+  if (seg->similarity.valid) {
+    SegProbsToMaskSkinAndFaceSimilarity(seg->probs, *seg->letterbox, w, h,
+                                        skin.data(), p_face.data(),
+                                        seg->similarity, kSegInputSize);
+  } else {
+    SegProbsToMaskSkinAndFace(seg->probs, *seg->letterbox, w, h, skin.data(),
+                              p_face.data(), kSegInputSize, seg->shift_x,
+                              seg->shift_y);
+  }
   for (size_t i = 0; i < p_face.size(); ++i)
     face_probability_[i] = static_cast<uint8_t>(std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
   stage_timings_.upsample_ms = ms_since(t0);
@@ -1019,11 +1048,11 @@ bool SkinMaskBuilder::UpdateSegmentationOnly(const LandmarkSet& lm,
     }
   }
   t0 = MaskClock::now();
-  // Hanya upsample/strength yang dikirim ke texture R8; edge color gate
-  // dilakukan GPU pada half-resolution pass composition.
+  // Hanya upsample/strength (plus redaman seg saat gerak cepat & seg tua)
+  // dikirim ke texture R8; edge color gate dilakukan GPU pada pass komposisi.
+  const float gain = cfg_.body_strength * last_seg_attenuation_;
   for (int i = 0; i < n; ++i) {
-    const float v = std::clamp(skin[static_cast<size_t>(i)] * cfg_.body_strength,
-                               0.0f, 1.0f);
+    const float v = std::clamp(skin[static_cast<size_t>(i)] * gain, 0.0f, 1.0f);
     mask_[static_cast<size_t>(i)] =
         static_cast<uint8_t>(v * 255.0f + 0.5f);
   }

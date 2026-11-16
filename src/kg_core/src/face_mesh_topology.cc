@@ -214,18 +214,87 @@ void RasterizeExclusionMaskCpu(const float* xy_px, int fw, int fh, int mw,
     }
   }
   for (const auto& e : shapes.ellipses) {
-    const int x0 = std::clamp(static_cast<int>((e.cx - e.rx) * mw / fw), 0, mw - 1);
-    const int x1 = std::clamp(static_cast<int>((e.cx + e.rx) * mw / fw), 0, mw - 1);
-    const int y0 = std::clamp(static_cast<int>((e.cy - e.ry) * mh / fh), 0, mh - 1);
-    const int y1 = std::clamp(static_cast<int>((e.cy + e.ry) * mh / fh), 0, mh - 1);
+    const float rx_eff = std::max(e.rx, 0.6f * static_cast<float>(fw) / mw);
+    const float ry_eff = std::max(e.ry, 0.6f * static_cast<float>(fh) / mh);
+    const int x0 = std::clamp(static_cast<int>(std::floor((e.cx - rx_eff) * mw / fw)), 0, mw - 1);
+    const int x1 = std::clamp(static_cast<int>(std::ceil((e.cx + rx_eff) * mw / fw)), 0, mw - 1);
+    const int y0 = std::clamp(static_cast<int>(std::floor((e.cy - ry_eff) * mh / fh)), 0, mh - 1);
+    const int y1 = std::clamp(static_cast<int>(std::ceil((e.cy + ry_eff) * mh / fh)), 0, mh - 1);
     for (int py = y0; py <= y1; ++py) for (int px = x0; px <= x1; ++px) {
       const float fx = (px + 0.5f) * fw / mw, fy = (py + 0.5f) * fh / mh;
-      const float dx = (fx - e.cx) / std::max(e.rx, 1e-3f);
-      const float dy = (fy - e.cy) / std::max(e.ry, 1e-3f);
+      const float dx = (fx - e.cx) / std::max(rx_eff, 1e-3f);
+      const float dy = (fy - e.cy) / std::max(ry_eff, 1e-3f);
       if (dx * dx + dy * dy <= 1.0f)
         (*exclusion)[static_cast<size_t>(py) * mw + px] = 255;
     }
   }
+}
+
+FaceEyeBasis ComputeFaceEyeBasis(const float* xy) {
+  FaceEyeBasis b;
+  if (!xy) return b;
+  auto pt = [&](int idx) { return std::pair<float, float>{xy[idx * 2], xy[idx * 2 + 1]}; };
+  auto edge_centroid = [&](const Edge* edges, int n) {
+    double sx = 0.0, sy = 0.0;
+    int cnt = 0;
+    auto accum = [&](int id) {
+      const float x = xy[id * 2], y = xy[id * 2 + 1];
+      if (std::fabs(x) + std::fabs(y) > 1e-4f) {
+        sx += x;
+        sy += y;
+        ++cnt;
+      }
+    };
+    for (int i = 0; i < n; ++i) {
+      accum(edges[i].a);
+      accum(edges[i].b);
+    }
+    return std::pair<float, float>{cnt ? static_cast<float>(sx / cnt) : 0.0f,
+                                   cnt ? static_cast<float>(sy / cnt) : 0.0f};
+  };
+
+  const auto p33 = pt(33), p133 = pt(133), p362 = pt(362), p263 = pt(263);
+  const float d_outer = std::hypot(p263.first - p33.first, p263.second - p33.second);
+  const float d_inner = std::hypot(p362.first - p133.first, p362.second - p133.second);
+  std::pair<float, float> right_c, left_c;
+  if (d_outer > 2.0f && d_inner > 0.5f && d_inner < d_outer * 0.9f) {
+    right_c = {0.5f * (p33.first + p133.first), 0.5f * (p33.second + p133.second)};
+    left_c = {0.5f * (p362.first + p263.first), 0.5f * (p362.second + p263.second)};
+  } else {
+    right_c = edge_centroid(topology::kRightEyeEdges, topology::kRightEyeEdges_N);
+    left_c = edge_centroid(topology::kLeftEyeEdges, topology::kLeftEyeEdges_N);
+  }
+  const float dx = left_c.first - right_c.first;
+  const float dy = left_c.second - right_c.second;
+  const float iod = std::hypot(dx, dy);
+  if (iod <= 1e-3f) return b;
+  b.eye_mid_x = 0.5f * (right_c.first + left_c.first);
+  b.eye_mid_y = 0.5f * (right_c.second + left_c.second);
+  b.ux = dx / iod;
+  b.uy = dy / iod;
+  b.vx = -b.uy;
+  b.vy = b.ux;
+  // Pastikan sumbu v mengarah ke bawah wajah (ke arah mulut/bibir) meski cermin.
+  const auto lip_c = edge_centroid(topology::kLipsEdges, topology::kLipsEdges_N);
+  const float dot_lip =
+      (lip_c.first - b.eye_mid_x) * b.vx + (lip_c.second - b.eye_mid_y) * b.vy;
+  if (dot_lip < -1.0f) {
+    b.vx = -b.vx;
+    b.vy = -b.vy;
+  }
+  b.iod = iod;
+  b.valid = true;
+  return b;
+}
+
+bool ToFaceNormalizedCoords(const FaceEyeBasis& basis, float x, float y,
+                            float* norm_x, float* norm_y) {
+  if (!basis.valid || basis.iod <= 1e-3f) return false;
+  const float dx = x - basis.eye_mid_x;
+  const float dy = y - basis.eye_mid_y;
+  if (norm_x) *norm_x = (dx * basis.ux + dy * basis.uy) / basis.iod;
+  if (norm_y) *norm_y = (dx * basis.vx + dy * basis.vy) / basis.iod;
+  return true;
 }
 
 ExclusionShapes BuildExclusionShapes(const float* xy) {
@@ -253,23 +322,64 @@ ExclusionShapes BuildExclusionShapes(const float* xy) {
     out.loops.push_back(
         OrderLoopGeneric(outer.data(), static_cast<int>(outer.size())));
   }
-  // Lubang hidung: elips kecil di antara titik sayap hidung resmi (48/49
-  // dan 278/279). FaceMesh 468 tidak memberi kontur lubang hidung tertutup,
-  // jadi elips mengambil lebar dari jarak sayap-ke-titik dalam; bentuknya
-  // kecil (bukan cakram 75% yang dulu membuat ring besar).
+  // M2m: lubang hidung diturunkan dari titik-titik pembuka lubang hidung
+  // resmi di kTessTris ({20,60,99,242} kanan, {250,290,328,462} kiri — bukan
+  // sayap hidung 48/278 yang terlalu luar/tinggi), dengan fallback ke model
+  // kanonik MediaPipe (±0.15, +0.64) * IOD dalam basis mata bila landmark
+  // lubang belum terisi; radius inti ~ 0.035 * IOD.
   {
-    const std::pair<int, int> nostril_pairs[2] = {{48, 49}, {278, 279}};
-    for (const auto& pair : nostril_pairs) {
-      const float* a = xy + pair.first * 2;
-      const float* b = xy + pair.second * 2;
-      ExclusionEllipse e;
-      e.cx = 0.5f * (a[0] + b[0]);
-      e.cy = 0.5f * (a[1] + b[1]);
-      const float width = std::hypot(a[0] - b[0], a[1] - b[1]);
-      e.rx = std::max(1.5f, 0.65f * width);
-      e.ry = std::max(1.2f, 0.55f * e.rx);
-      out.ellipses.push_back(e);
-    }
+    const FaceEyeBasis basis = ComputeFaceEyeBasis(xy);
+    constexpr int kRightNostrilRing[4] = {20, 60, 99, 242};
+    constexpr int kLeftNostrilRing[4] = {250, 290, 328, 462};
+    auto try_nostril_center = [&](const int idx[4], float sign_x,
+                                  float* cx_out, float* cy_out) {
+      if (basis.valid) {
+        double sx = 0.0, sy = 0.0;
+        for (int i = 0; i < 4; ++i) {
+          sx += xy[idx[i] * 2];
+          sy += xy[idx[i] * 2 + 1];
+        }
+        const float cx = static_cast<float>(sx * 0.25);
+        const float cy = static_cast<float>(sy * 0.25);
+        float nx = 0.0f, ny = 0.0f;
+        float max_spread = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+          max_spread = std::max(
+              max_spread, std::hypot(xy[idx[i] * 2] - cx, xy[idx[i] * 2 + 1] - cy));
+        }
+        if (ToFaceNormalizedCoords(basis, cx, cy, &nx, &ny) &&
+            nx * sign_x >= 0.06f && nx * sign_x <= 0.24f &&
+            ny >= 0.48f && ny <= 0.80f && max_spread <= 0.16f * basis.iod) {
+          *cx_out = cx;
+          *cy_out = cy;
+          return;
+        }
+        *cx_out = basis.eye_mid_x +
+                  (sign_x * kCanonicalNostrilNormX * basis.ux +
+                   kCanonicalNostrilNormY * basis.vx) *
+                      basis.iod;
+        *cy_out = basis.eye_mid_y +
+                  (sign_x * kCanonicalNostrilNormX * basis.uy +
+                   kCanonicalNostrilNormY * basis.vy) *
+                      basis.iod;
+        return;
+      }
+      // Fallback darurat bila basis mata tak valid (seharusnya tidak terjadi).
+      *cx_out = xy[idx[0] * 2];
+      *cy_out = xy[idx[0] * 2 + 1];
+    };
+
+    const float r = basis.valid ? std::max(1.5f, kNostrilRadiusIodScale * basis.iod)
+                                : 1.5f;
+    ExclusionEllipse er, el;
+    try_nostril_center(kRightNostrilRing, -1.0f, &er.cx, &er.cy);
+    er.rx = r;
+    er.ry = r;
+    try_nostril_center(kLeftNostrilRing, +1.0f, &el.cx, &el.cy);
+    el.rx = r;
+    el.ry = r;
+    out.ellipses.push_back(er);
+    out.ellipses.push_back(el);
   }
   return out;
 }

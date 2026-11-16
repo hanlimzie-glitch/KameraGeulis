@@ -9,6 +9,7 @@
 // Softmax (bila keluaran belum berjumlah 1) dilakukan DI LUAR model.
 #include <cstdint>
 #include "kgcore/face_detection_decode.h"  // LetterboxInfo bersama (BlazeFace)
+#include "kgcore/landmark.h"
 
 namespace kgcore {
 
@@ -57,6 +58,52 @@ void SegComputeStats(const uint8_t* argmax_map, int n_pix, SegClassStats* out);
 // Warna kelas utk PNG seg_ (RGBA): latar hitam, rambut biru, kulit tubuh
 // hijau, kulit wajah oranye-merah, pakaian ungu, aksesori kuning.
 void SegClassColor(uint8_t cls, uint8_t rgba[4]);
+
+// ---- M2m: kompensasi gerak kemiripan penuh (translasi + rotasi + skala) ----
+struct SegPoseAnchor {
+  float cx_px = 0.0f;
+  float cy_px = 0.0f;
+  float iod_px = 0.0f;
+  float angle_rad = 0.0f;
+  bool valid = false;
+};
+
+// Memetakan piksel frame saat ini (x,y) -> piksel frame saat seg disubmit:
+//   x' = anchor.cx_px + c * (x - curr.cx_px) - s * (y - curr.cy_px)
+//   y' = anchor.cy_px + s * (x - curr.cx_px) + c * (y - curr.cy_px)
+struct SegSimilarity {
+  float c = 1.0f;
+  float s = 0.0f;
+  float curr_cx = 0.0f, curr_cy = 0.0f;
+  float anchor_cx = 0.0f, anchor_cy = 0.0f;
+  bool valid = false;
+};
+
+SegPoseAnchor ComputeSegPoseAnchor(const LandmarkSet& lm, int w, int h);
+SegSimilarity ComputeSegSimilarity(const SegPoseAnchor& anchor,
+                                   const SegPoseAnchor& curr);
+float ComputeSegMotionAttenuation(float seg_age_frames,
+                                  float head_speed_px_per_frame);
+
+void SegProbsToMaskSkinSimilarity(const float* probs, const LetterboxInfo& lb,
+                                  int mw, int mh, float* skin_out,
+                                  const SegSimilarity& sim,
+                                  int dst = kSegInputSize);
+void SegProbsToMaskClassSimilarity(const float* probs, const LetterboxInfo& lb,
+                                   int class_id, int mw, int mh, float* out,
+                                   const SegSimilarity& sim,
+                                   int dst = kSegInputSize);
+void SegProbsToMaskSkinAndFaceSimilarity(const float* probs,
+                                         const LetterboxInfo& lb, int mw,
+                                         int mh, float* skin_out,
+                                         float* face_out,
+                                         const SegSimilarity& sim,
+                                         int dst = kSegInputSize);
+void SegProbabilitiesToFrameArgmaxSimilarity(const float* probs,
+                                             const LetterboxInfo& lb, int w,
+                                             int h, uint8_t* classes,
+                                             const SegSimilarity& sim,
+                                             int dst = kSegInputSize);
 
 // ---- Unletterbox peta probabilitas -> kulit di resolusi mask ----
 // probs: [dst*dst*6] (model), hasilkan skin [mw*mh] dgn bilinear + potong

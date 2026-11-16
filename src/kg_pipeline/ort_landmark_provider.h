@@ -6,6 +6,7 @@
 // an honest status string — the app never crashes and landmark effects stay
 // disabled.
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -73,6 +74,7 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   int lost_streak_ = 0;          // frame gagal berurutan
   int frames_since_detect_ = 0;  // frame sejak detektor terakhir jalan
   int reset_count_ = 0;
+  std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
   std::string last_reset_reason_;
   StageTimings stage_;               // debug-overlay per-stage timings
 

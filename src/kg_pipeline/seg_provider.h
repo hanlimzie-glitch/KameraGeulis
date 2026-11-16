@@ -48,21 +48,29 @@ class SegProvider {
   // Serahkan frame terbaru (RGBA/BGRA). MENYALIN + letterbox 256 di sini
   // (murah, ~0.1 ms) lalu membangunkan thread — tidak pernah menunggu ORT.
   void SubmitFrame(const uint8_t* pixels, int w, int h, int stride_bytes,
-                   bool bgra, uint64_t frame_serial, float face_anchor_x = -1.0f,
-                   float face_anchor_y = -1.0f);
+                   bool bgra, uint64_t frame_serial,
+                   const SegPoseAnchor& pose = {});
 
   // Salin hasil terakhir (peta probabilitas 256x256x6 + letterbox + serial
   // frame sumber + ms inferensi). false bila belum pernah ada hasil.
   bool GetResult(std::vector<float>* probs, LetterboxInfo* lb,
                  uint64_t* frame_serial, double* infer_ms,
-                 float* face_anchor_x = nullptr,
-                 float* face_anchor_y = nullptr) const;
+                 SegPoseAnchor* pose = nullptr) const;
+
+  // M2m: salin hanya bila res_serial > last_seen_serial (hemat memcpy 1.57 MB/frame).
+  bool GetResultIfNewer(uint64_t last_seen_serial, std::vector<float>* probs,
+                        LetterboxInfo* lb, uint64_t* frame_serial,
+                        double* infer_ms, SegPoseAnchor* pose = nullptr) const;
 
   // Telemetri (atomik, aman dari thread mana pun).
   double LastInferMs() const { return last_ms_.load(); }
   double AverageInferMs() const { return average_ms_.load(); }
   uint64_t InferredFrames() const { return inferred_.load(); }
   uint64_t DroppedFrames() const { return dropped_.load(); }  // slot tertimpa
+  unsigned HardwareCores() const { return hw_cores_.load(); }
+  int IntraOpThreads() const { return intra_threads_.load(); }
+  const char* ExecutionProviderName() const { return ep_name_; }
+  const char* PrecisionName() const { return precision_name_; }
 
  private:
   void ThreadMain_();
@@ -78,7 +86,7 @@ class SegProvider {
   std::vector<float> slot_input_;  // 256*256*3 (RGB ternormalisasi)
   LetterboxInfo slot_lb_{};
   uint64_t slot_serial_ = 0;
-  float slot_anchor_x_ = -1.0f, slot_anchor_y_ = -1.0f;
+  SegPoseAnchor slot_pose_{};
 
   // ---- hasil terakhir (dibaca render) ----
   bool res_valid_ = false;
@@ -86,7 +94,7 @@ class SegProvider {
   LetterboxInfo res_lb_{};
   uint64_t res_serial_ = 0;
   double res_ms_ = 0.0;
-  float res_anchor_x_ = -1.0f, res_anchor_y_ = -1.0f;
+  SegPoseAnchor res_pose_{};
 
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_{false};
@@ -97,6 +105,10 @@ class SegProvider {
   std::atomic<int> requested_period_ms_{200};
   std::atomic<uint64_t> inferred_{0};
   std::atomic<uint64_t> dropped_{0};
+  std::atomic<unsigned> hw_cores_{0};
+  std::atomic<int> intra_threads_{1};
+  const char* ep_name_ = "cpu";
+  const char* precision_name_ = "fp32";
   std::thread th_;
   mutable std::mutex err_mu_;
   std::string last_error_ = "belum dimuat";

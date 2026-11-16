@@ -238,3 +238,65 @@ TEST_CASE("M2j: unletterbox peta seg -> kulit mask (pad di luar = 0)") {
     REQUIRE(v <= 1.0f);
   }
 }
+
+TEST_CASE("M2m: kompensasi kemiripan penuh (translasi + rotasi + skala) pada seg mask") {
+  constexpr int dst = 256, fw = 256, fh = 256, mw = 64, mh = 64;
+  const LetterboxInfo lb = ComputeSegLetterbox(fw, fh, dst);
+  auto make_pose_lm = [&](float cx, float cy, float iod, float angle_rad) {
+    LandmarkSet lm;
+    lm.valid = true;
+    const float ca = std::cos(angle_rad), sa = std::sin(angle_rad);
+    auto put = [&](int idx, float lx, float ly) {
+      lm.pts[idx] = Vec2((cx + ca * lx - sa * ly) / fw,
+                         (cy + sa * lx + ca * ly) / fh);
+    };
+    put(33, -0.60f * iod, 0.0f);
+    put(133, -0.40f * iod, 0.0f);
+    put(362, 0.40f * iod, 0.0f);
+    put(263, 0.60f * iod, 0.0f);
+    put(17, 0.0f, 0.80f * iod);
+    return lm;
+  };
+
+  // Saat seg disubmit: kepala di (100, 110), IOD=40 px, rotasi=0 rad;
+  // kulit tubuh berada di kanan wajah dalam ruang kepala: offset lokal (+30, 0).
+  const LandmarkSet lm_anchor = make_pose_lm(100.0f, 110.0f, 40.0f, 0.0f);
+  const SegPoseAnchor anchor = ComputeSegPoseAnchor(lm_anchor, fw, fh);
+  REQUIRE(anchor.valid);
+  REQUIRE(std::fabs(anchor.iod_px - 40.0f) < 0.5f);
+
+  std::vector<float> probs(static_cast<size_t>(dst) * dst * kSegClasses, 0.0f);
+  for (int y = 96; y <= 124; ++y) {
+    for (int x = 116; x <= 144; ++x) {
+      probs[(static_cast<size_t>(y) * dst + x) * kSegClasses + kSegClassBodySkin] = 1.0f;
+    }
+  }
+
+  // Frame saat ini: kepala bergeser ke (140, 140), membesar 1.5x (IOD=60), dan
+  // berputar +90 derajat (+pi/2): offset lokal (+30*1.5 = +45) ke kanan kepala
+  // kini berada di BAWAH kepala pada frame (140, 140 + 45) = (140, 185)!
+  const float pi2 = 1.57079632679f;
+  const LandmarkSet lm_curr = make_pose_lm(140.0f, 140.0f, 60.0f, pi2);
+  const SegPoseAnchor curr = ComputeSegPoseAnchor(lm_curr, fw, fh);
+  const SegSimilarity sim = ComputeSegSimilarity(anchor, curr);
+  REQUIRE(sim.valid);
+
+  std::vector<float> skin(mw * mh, 0.0f), face(mw * mh, 0.0f);
+  SegProbsToMaskSkinAndFaceSimilarity(probs.data(), lb, mw, mh, skin.data(),
+                                      face.data(), sim, dst);
+  // Sampel (140, 185) pada grid 64x64: x=35, y=46 -> harus menangkap kulit (>0.9).
+  REQUIRE(skin[46 * mw + 35] > 0.9f);
+  // Titik di kanan-bawah yang bukan target rotasi (185, 140) -> ~0.
+  REQUIRE(skin[35 * mw + 46] < 0.05f);
+}
+
+TEST_CASE("M2m: atenuasi seg saat umur seg tua & kepala bergerak cepat") {
+  REQUIRE(ComputeSegMotionAttenuation(0.0f, 30.0f) == 1.0f);
+  REQUIRE(ComputeSegMotionAttenuation(1.0f, 30.0f) == 1.0f);
+  REQUIRE(ComputeSegMotionAttenuation(8.0f, 1.0f) == 1.0f);
+  const float a_mid = ComputeSegMotionAttenuation(5.0f, 11.0f);
+  const float a_high = ComputeSegMotionAttenuation(9.0f, 20.0f);
+  REQUIRE(a_mid < 1.0f);
+  REQUIRE(a_mid > 0.0f);
+  REQUIRE(a_high == 0.0f);
+}

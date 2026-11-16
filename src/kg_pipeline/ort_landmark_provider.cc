@@ -541,12 +541,24 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
     last_angle_delta_rad_ = 0.0f;
   }
 
+  const double elapsed_sec = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - start_time_)
+                                 .count();
+  const float rpm = elapsed_sec > 1.0
+                        ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec)
+                        : 0.0f;
+
   if (roi_reset_this_frame) {
     ++reset_count_;
     last_reset_reason_ = reset_reason;
     frames_since_detect_ = 0;
     out.roi_reset = true;
     out.reset_reason = reset_reason;
+    const float rpm_now = elapsed_sec > 1.0
+                              ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec)
+                              : 0.0f;
+    Log(kTag, "ROI reset #%d (%.1f/menit): %s", reset_count_, rpm_now,
+        reset_reason.c_str());
   } else if (!det_ran) {
     ++frames_since_detect_;
   }
@@ -562,6 +574,8 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
 
   stage_.frames_since_detect = frames_since_detect_;
   stage_.reset_count = reset_count_;
+  stage_.resets_per_min =
+      elapsed_sec > 1.0 ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec) : rpm;
   stage_.last_reset_reason = last_reset_reason_;
   return out;
 }

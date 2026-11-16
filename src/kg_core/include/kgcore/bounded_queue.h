@@ -35,6 +35,21 @@ class BoundedQueue {
     return true;
   }
 
+  // M2m: pops and returns the NEWEST item in the queue, discarding any older
+  // buffered frames so presentation latency stays minimal.
+  bool TryPopLatest(T& out, size_t* discarded = nullptr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      if (discarded) *discarded = 0;
+      return false;
+    }
+    const size_t n = queue_.size();
+    out = std::move(queue_.back());
+    queue_.clear();
+    if (discarded) *discarded = n - 1;
+    return true;
+  }
+
   size_t Size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return queue_.size();

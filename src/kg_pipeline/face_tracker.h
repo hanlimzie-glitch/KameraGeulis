@@ -18,6 +18,7 @@ struct StageTimings {
   float mask_ms = 0.0f;   // M2h: pembuatan mask kulit (0 bila checkbox mati)
   int frames_since_detect = 0;
   int reset_count = 0;    // M2l: jumlah ROI reset sejak mulai
+  float resets_per_min = 0.0f;  // M2m: laju reset per menit
   std::string last_reset_reason;
 };
 
@@ -59,22 +60,35 @@ class NullLandmarkProvider : public ILandmarkProvider {
 // render thread (no internal locking).
 class FaceTracker {
  public:
+  // Parameter OneEuro untuk koordinat ternormalisasi [0,1]: beta lebih besar
+  // (~12.0) agar responsif saat kepala bergerak cepat tanpa mengorbankan
+  // peredaman getar saat diam.
+  static constexpr float kDefaultMinCutoff = 2.0f;
+  static constexpr float kDefaultBeta = 25.0f;
+  static constexpr float kDefaultDCutoff = 1.0f;
+
   explicit FaceTracker(std::unique_ptr<ILandmarkProvider> provider);
 
   void Track(const Frame& frame);
   const LandmarkSet& Current() const { return current_; }
+  const LandmarkSet& CurrentRaw() const { return current_raw_; }
   float Gain() const { return fade_.Gain(); }  // smooth [0,1] for effect fade
   bool ProviderAvailable() const { return provider_->Available(); }
   const char* ProviderName() const { return provider_->Name(); }
   const ILandmarkProvider* Provider() const { return provider_.get(); }
   float LastTrackMs() const { return last_track_ms_; }
+  float LastFilterLagMeanPx() const { return last_filter_lag_mean_px_; }
+  float LastFilterLagP95Px() const { return last_filter_lag_p95_px_; }
 
  private:
   std::unique_ptr<ILandmarkProvider> provider_;
   std::array<OneEuroVec2, kLandmarkCount> smoothers_;
   LandmarkFade fade_{300.0f};
   LandmarkSet current_;
+  LandmarkSet current_raw_;
   bool was_valid_ = false;
   float last_track_ms_ = 0.0f;
+  float last_filter_lag_mean_px_ = 0.0f;
+  float last_filter_lag_p95_px_ = 0.0f;
 };
 }  // namespace kgcore

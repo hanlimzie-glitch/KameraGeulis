@@ -299,7 +299,7 @@ void CameraCapture::Stop() {
 
 bool CameraCapture::LatestFrame(Frame& out) {
   if (!queue_) return false;
-  return queue_->TryPop(out);
+  return queue_->TryPopLatest(out);
 }
 
 void CameraCapture::SetError(const char* fmt, ...) {

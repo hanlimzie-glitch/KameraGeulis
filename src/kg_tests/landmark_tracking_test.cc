@@ -2,6 +2,7 @@
 #include <cmath>
 #include <vector>
 #include "kgcore/landmark_tracking.h"
+#include "kgcore/one_euro.h"
 
 using namespace kgcore;
 
@@ -138,4 +139,75 @@ TEST_CASE("landmark_tracking: overlay debug landmark ber-indeks & konsistensi mi
   const int px_flipped = (w - 1) - px_raw;
   const int px_mirror_norm = static_cast<int>(std::lround((1.0f - x_norm) * (w - 1)));
   REQUIRE(std::abs(px_flipped - px_mirror_norm) <= 1);
+}
+
+TEST_CASE("M2m landmark_tracking: simulasi gerakan cepat (translasi + rotasi) menjaga ROI & memicu reset saat keluar") {
+  const int fw = 1280, fh = 720;
+  float cx = 0.25f, cy = 0.50f, ang = -0.30f;
+  const float face_w = 0.20f, face_h = 0.36f;
+
+  // Frame 0: inisialisasi ROI dari landmark awal.
+  LandmarkSet lm = MakeSyntheticFace(cx, cy, face_w, face_h, ang);
+  AlignedRoi roi = TrackRoiFromLandmarks(lm, fw, fh);
+  int resets = 0;
+
+  // 1) Gerakan cepat berkelanjutan (~25 px/frame translasi + ~4 deg/frame rotasi):
+  //    ROI selalu diperbarui dari landmark frame sebelumnya -> wajah tetap di dalam ROI.
+  for (int f = 1; f <= 20; ++f) {
+    cx += 0.020f;  // ~25.6 px/frame di 1280p
+    cy += (f % 2 == 0 ? 0.010f : -0.006f);
+    ang += 0.07f;  // ~4 deg/frame
+    const LandmarkSet true_lm = MakeSyntheticFace(cx, cy, face_w, face_h, ang);
+    const AlignedRoi true_roi = TrackRoiFromLandmarks(true_lm, fw, fh);
+    // Jarak pusat wajah ke ROI sebelumnya masih tertangkap ROI (>0.5 side_px),
+    // dan sesudah eval mesh ROI baru selaras (IoU >= 0.6).
+    const float center_dist =
+        std::hypot(true_lm.pts[1].x * fw - roi.cx_px, true_lm.pts[1].y * fh - roi.cy_px);
+    REQUIRE(center_dist < roi.side_px * 0.5f);
+    const auto sanity = CheckLandmarkSanity(true_lm, roi, fw, fh);
+    REQUIRE(sanity.ok);
+    roi = TrackRoiFromLandmarks(true_lm, fw, fh, true_roi.side_px);
+    REQUIRE(RoiBoxIoU(roi, true_roi) >= kTrackingResetIouThreshold);
+  }
+
+  // 2) Lompatan gerak ekstrem mendadak (keluar ROI / rotasi besar):
+  //    harus memicu reset ROI (IoU < ambang atau sanity gagal) & reinisialisasi.
+  const LandmarkSet jumped_lm = MakeSyntheticFace(0.85f, 0.25f, face_w, face_h, ang + 0.9f);
+  const AlignedRoi det_roi = TrackRoiFromLandmarks(jumped_lm, fw, fh);
+  const bool need_reset =
+      !CheckLandmarkSanity(jumped_lm, roi, fw, fh).ok ||
+      RoiBoxIoU(roi, det_roi) < kTrackingResetIouThreshold;
+  REQUIRE(need_reset);
+  if (need_reset) {
+    roi = det_roi;
+    ++resets;
+  }
+  REQUIRE(resets == 1);
+  REQUIRE(CheckLandmarkSanity(jumped_lm, roi, fw, fh).ok);
+}
+
+TEST_CASE("M2m one_euro: beta responsif (25.0) memangkas lag gerak kepala dibanding beta=0.007") {
+  OneEuroVec2 slow_filter(1.0f, 0.007f, 1.0f);
+  OneEuroVec2 fast_filter(2.0f, 25.0f, 1.0f);
+  const float fw = 1920.0f;
+  float slow_lag_sum = 0.0f, fast_lag_sum = 0.0f;
+  int samples = 0;
+  // Gerakan kepala cepat konstan ~576 px/dtk (0.30 norm/dtk) pada 30 fps.
+  for (int f = 0; f < 30; ++f) {
+    const int64_t ts = f * 33;
+    const Vec2 raw(0.20f + 0.010f * f, 0.50f);
+    const Vec2 s = slow_filter.Filter(raw, ts);
+    const Vec2 q = fast_filter.Filter(raw, ts);
+    if (f >= 5) {
+      slow_lag_sum += std::fabs(raw.x - s.x) * fw;
+      fast_lag_sum += std::fabs(raw.x - q.x) * fw;
+      ++samples;
+    }
+  }
+  const float slow_mean = slow_lag_sum / samples;
+  const float fast_mean = fast_lag_sum / samples;
+  INFO("slow_lag_px=" << slow_mean << " fast_lag_px=" << fast_mean);
+  REQUIRE(slow_mean > 40.0f);
+  REQUIRE(fast_mean < 10.0f);
+  REQUIRE(fast_mean < slow_mean * 0.25f);
 }

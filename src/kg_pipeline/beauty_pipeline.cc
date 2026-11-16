@@ -146,64 +146,58 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
       mask_builder_.Configure(mw, mh);
       Log(kTag, "skin mask: dikonfigurasi %dx%d (frame %dx%d)", mw, mh, w, h);
     }
-    // M2j: segmen semua-kulit di thread sendiri (tidak memblokir render).
-    // Hasil dipakai SYNCHRONOUS dgn serial frame yang sedang diproses (bila
-    // seg lebih lambat, lag-nya dicatat dalam satuan frame - jangan bohong).
+    // M2j/M2m: segmen semua-kulit di thread sendiri (tidak memblokir render).
     ++frame_serial_;
     if (!seg_start_logged_) {
       seg_.Start();
       seg_start_logged_ = true;
-      Log(kTag, "seg thread: mulai (target adaptif 3-5 Hz, ORT CPU, intra-op=3)");
+      Log(kTag, "seg thread: mulai (adaptif ~100-333ms, multi-thread sesuai core)");
     }
-    const LandmarkSet& anchor_lm = tracker_->Current();
-    float anchor_x = -1.0f, anchor_y = -1.0f;
-    if (anchor_lm.valid) {
-      double sx = 0.0, sy = 0.0;
-      for (const auto& p : anchor_lm.pts) { sx += p.x; sy += p.y; }
-      anchor_x = static_cast<float>(sx / anchor_lm.pts.size() * w);
-      anchor_y = static_cast<float>(sy / anchor_lm.pts.size() * h);
+    const LandmarkSet& mask_lm =
+        tracker_->CurrentRaw().valid ? tracker_->CurrentRaw() : tracker_->Current();
+    const SegPoseAnchor curr_pose = ComputeSegPoseAnchor(mask_lm, w, h);
+    if (curr_pose.valid && prev_pose_anchor_.valid) {
+      head_speed_px_ = std::hypot(curr_pose.cx_px - prev_pose_anchor_.cx_px,
+                                  curr_pose.cy_px - prev_pose_anchor_.cy_px);
+    } else {
+      head_speed_px_ = 0.0f;
     }
+    prev_pose_anchor_ = curr_pose;
+
     seg_.SubmitFrame(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
-                     /*bgra=*/false, frame_serial_, anchor_x, anchor_y);
-    // Buffer hasil hidup SAMPAI Update() (seg_in.letterbox = &seg_lb).
-    std::vector<float> seg_probs;
+                     /*bgra=*/false, frame_serial_, curr_pose);
     LetterboxInfo seg_lb{};
     uint64_t seg_serial = 0;
     double seg_ms_val = 0.0;
-    float seg_anchor_x = -1.0f, seg_anchor_y = -1.0f;
+    SegPoseAnchor seg_anchor_pose{};
     SegMaskInput seg_in;
     const SegMaskInput* seg_ptr = nullptr;
     if (seg_.Available() &&
-        seg_.GetResult(&seg_probs, &seg_lb, &seg_serial, &seg_ms_val,
-                       &seg_anchor_x, &seg_anchor_y)) {
-      seg_in.probs = seg_probs.data();
+        seg_.GetResultIfNewer(seg_used_serial_, &seg_used_probs_, &seg_lb,
+                              &seg_serial, &seg_ms_val, &seg_anchor_pose) &&
+        !seg_used_probs_.empty()) {
+      seg_used_serial_ = seg_serial;
+      seg_used_ms_ = seg_ms_val;
+      seg_in.probs = seg_used_probs_.data();
       seg_in.letterbox = &seg_lb;
       seg_in.frame_serial = static_cast<int64_t>(seg_serial);
-      if (anchor_lm.valid && seg_anchor_x >= 0.0f && seg_anchor_y >= 0.0f) {
-        double sx = 0.0, sy = 0.0;
-        for (const auto& p : anchor_lm.pts) { sx += p.x; sy += p.y; }
-        const float curr_x = static_cast<float>(sx / anchor_lm.pts.size() * w);
-        const float curr_y = static_cast<float>(sy / anchor_lm.pts.size() * h);
-        seg_in.shift_x = curr_x - seg_anchor_x;
-        seg_in.shift_y = curr_y - seg_anchor_y;
+      if (curr_pose.valid && seg_anchor_pose.valid) {
+        seg_in.shift_x = curr_pose.cx_px - seg_anchor_pose.cx_px;
+        seg_in.shift_y = curr_pose.cy_px - seg_anchor_pose.cy_px;
+        seg_in.similarity = ComputeSegSimilarity(seg_anchor_pose, curr_pose);
       }
+      const int64_t lag = static_cast<int64_t>(frame_serial_) -
+                          static_cast<int64_t>(seg_serial);
+      seg_lag_frames_ = static_cast<float>(std::clamp<int64_t>(lag, 0, 60));
+      seg_in.seg_age_frames = seg_lag_frames_;
+      seg_in.head_speed_px = head_speed_px_;
       seg_in.valid = true;
       seg_used_lb_ = seg_lb;
       seg_used_shift_x_ = seg_in.shift_x;
       seg_used_shift_y_ = seg_in.shift_y;
+      seg_used_similarity_ = seg_in.similarity;
       seg_ptr = &seg_in;
-      // Simpan snapshot hasil seg yang BENAR-BENAR dipakai mask frame ini;
-      // copy hanya saat infer serial berubah (3–5 Hz), agar F5 tak membaca
-      // hasil worker yang tiba sesudah frame blend.
-      if (seg_used_serial_ != seg_serial) {
-        seg_used_probs_ = seg_probs;
-        seg_used_serial_ = seg_serial;
-        seg_used_ms_ = seg_ms_val;
-      }
       seg_ms_ = static_cast<float>(seg_ms_val);
-      const int64_t lag = static_cast<int64_t>(frame_serial_) -
-                          static_cast<int64_t>(seg_serial);
-      seg_lag_frames_ = static_cast<float>(std::clamp<int64_t>(lag, 0, 60));
       seg_result_ok_ = true;
     } else if (seg_.Available()) {
       seg_result_ok_ = false;
@@ -220,12 +214,10 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     if (gpu_mask_mode_) {
-      mask_builder_.UpdateSegmentationOnly(tracker_->Current(),
-                                           convert_buf_.data(), w, h,
+      mask_builder_.UpdateSegmentationOnly(mask_lm, convert_buf_.data(), w, h,
                                            static_cast<int>(row_bytes), seg_ptr);
     } else {
-      mask_builder_.Update(tracker_->Current(), tracker_->Current().valid,
-                           convert_buf_.data(), w, h,
+      mask_builder_.Update(mask_lm, mask_lm.valid, convert_buf_.data(), w, h,
                            static_cast<int>(row_bytes), seg_ptr);
     }
     mask_ms_ = std::chrono::duration<float, std::milli>(

@@ -45,8 +45,17 @@ LandmarkSet MakeSyntheticFace() {
   for (int c = 0; c < 4; ++c)
     for (int i = 0; i < 5; ++i)
       lm.pts[topology::kBrowChains[c][i]] = Vec2(brow_x[c][i], brow_y[c]);
-  lm.pts[topology::kNostrilPts[0]] = Vec2(0.47f, 0.60f);
-  lm.pts[topology::kNostrilPts[1]] = Vec2(0.53f, 0.60f);
+  lm.pts[topology::kNostrilPts[0]] = Vec2(0.40f, 0.60f);  // sayap hidung (lama)
+  lm.pts[topology::kNostrilPts[1]] = Vec2(0.60f, 0.60f);
+  // M2m: titik lubang hidung kanonik (±0.15, +0.64) * IOD (IOD=0.34, eye_mid=(0.50, 0.42))
+  lm.pts[20] = Vec2(0.449f, 0.638f);
+  lm.pts[60] = Vec2(0.447f, 0.641f);
+  lm.pts[99] = Vec2(0.449f, 0.644f);
+  lm.pts[242] = Vec2(0.451f, 0.635f);
+  lm.pts[250] = Vec2(0.551f, 0.638f);
+  lm.pts[290] = Vec2(0.553f, 0.641f);
+  lm.pts[328] = Vec2(0.551f, 0.644f);
+  lm.pts[462] = Vec2(0.549f, 0.635f);
   return lm;
 }
 
@@ -239,8 +248,8 @@ TEST_CASE("skin mask builder E2h: oval berisi, mata/bibir/alis/hitung terbuang, 
   REQUIRE(WindowMean(m, mw, mh, 0.50f, 0.72f, 0.03f) < 80.0f);
   // Alis kiri-layar: terbuang.
   REQUIRE(WindowMean(m, mw, mh, 0.34f, 0.345f, 0.03f) < 120.0f);
-  // Lubang hidung: terbuang (jendela ketat di titik 48).
-  REQUIRE(WindowMean(m, mw, mh, 0.47f, 0.60f, 0.015f) < 100.0f);
+  // Lubang hidung: inti terbuang di posisi kanonik (±0.15, +0.64) * IOD.
+  REQUIRE(WindowMean(m, mw, mh, 0.449f, 0.638f, 0.005f) <= 12.0f);
   // Patch abu-abu (bukan warna kulit) di dalam oval: rendah (inti patch saja).
   REQUIRE(WindowMean(m, mw, mh, 0.50f, 0.83f, 0.015f) < 80.0f);
   // Di luar oval (pojok frame): 0.
@@ -373,4 +382,27 @@ TEST_CASE("M2i: feather per region - inti lubang keras 0, radius fitur melebar")
   // Tepi LUAR (pipi jauh dari fitur) tidak dipengaruhi radius fitur.
   REQUIRE(std::fabs(WindowMean(m1, mw, mh, 0.17f, 0.55f, 0.03f) -
                     WindowMean(m2, mw, mh, 0.17f, 0.55f, 0.03f)) < 1.0f);
+}
+
+TEST_CASE("M2m skin_mask: pusat lubang hidung kanonik dieksklusi >= 0.95 (mask <= 12)") {
+  const int fw = 480, fh = 480;
+  const int mw = 120, mh = 120;
+  LandmarkSet lm = MakeSyntheticFace();
+  std::vector<uint8_t> rgba = MakeFaceRgba(fw, fh);
+
+  SkinMaskBuilder b;
+  b.Configure(mw, mh);
+  REQUIRE(b.Update(lm, true, rgba.data(), fw, fh, fw * 4));
+  const auto& m = b.mask();
+  auto at_uv = [&](float u, float v) {
+    const int x = std::clamp(static_cast<int>(u * mw), 0, mw - 1);
+    const int y = std::clamp(static_cast<int>(v * mh), 0, mh - 1);
+    return m[static_cast<size_t>(y) * mw + x];
+  };
+  // Di pusat kedua lubang hidung (±0.15, +0.64)*IOD = (0.449, 0.638) & (0.551, 0.638):
+  // eksklusi >= 0.95 -> mask <= 12 (sebenarnya 0).
+  REQUIRE(at_uv(0.449f, 0.638f) <= 12);
+  REQUIRE(at_uv(0.551f, 0.638f) <= 12);
+  // Di sayap hidung luar (0.40, 0.60) yang bukan lubang hidung: tetap kulit aktif (> 120).
+  REQUIRE(at_uv(0.40f, 0.60f) > 120);
 }
