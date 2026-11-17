@@ -15,6 +15,8 @@ struct StartupArgs {
   bool capture_plain = false; // --capture-plain: source reader TANPA atribut (tingkat (c) M2f)
   bool no_mask_gl = false; // --no-mask-gl: M2i - paksa jalur blend kulit GL DIMATIKAN (perilaku lama)
   bool no_mask_gen_gpu = false; // --no-mask-gen-gpu: M2l - paksa jalur mask CPU M2j (uji A/B)
+  bool seg_compare = false; // --seg-compare: M2n - jalankan FP32 & INT8 pada frame yang sama + log metrik
+  bool seg_int8 = false;    // --seg-int8: M2n - pakai model segmentasi INT8 bila tersedia
 };
 
 struct StartupPaths {

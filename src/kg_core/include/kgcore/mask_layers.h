@@ -82,6 +82,7 @@ void ComposeMaskCpu(const float* face_a, const float* seg_p, const float* seg_g,
 struct F5RangeStat {
   double sum = 0;
   long n = 0;
+  long ge3_n = 0;  // M2n: jumlah piksel dengan |raw-out| rata-rata kanal >= 3 level
 };
 struct F5DiffReport {
   F5RangeStat per_range[5];  // <0.01, 0.01–0.1, 0.1–0.5, 0.5–0.9, >0.9

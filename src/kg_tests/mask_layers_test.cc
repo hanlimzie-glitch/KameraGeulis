@@ -127,3 +127,26 @@ TEST_CASE("mask_layers: di luar <8/255 hasil byte-identik raw; mix di dalam line
   for (int i = 3; i < w * h; ++i)
     for (int c = 0; c < 3; ++c) REQUIRE(out[i * 4 + c] == raw[i * 4 + c]);
 }
+
+TEST_CASE("M2n mask_layers: ComputeF5DiffReport menghitung piksel rambut >= 3 level") {
+  const int w = 4, h = 1;
+  std::vector<uint8_t> raw(w * h * 4, 50), out(w * h * 4, 50);
+  // Piksel 0,1: kelas rambut (1), diff = 0 & diff = 2 (<3).
+  // Piksel 2: kelas rambut (1), diff = 4 (>=3).
+  // Piksel 3: kelas kulit wajah (3), diff = 10 (>=3).
+  out[1 * 4 + 0] = out[1 * 4 + 1] = out[1 * 4 + 2] = 52;
+  out[2 * 4 + 0] = out[2 * 4 + 1] = out[2 * 4 + 2] = 54;
+  out[3 * 4 + 0] = out[3 * 4 + 1] = out[3 * 4 + 2] = 60;
+  std::vector<uint8_t> mask(w * h, 0);
+  mask[3] = 255;
+  uint8_t cls[4] = {1, 1, 1, 3};
+  F5DiffReport rep;
+  ComputeF5DiffReport(raw.data(), out.data(), mask.data(), w, h, w, h, 1.0f,
+                      cls, &rep);
+  REQUIRE(rep.per_class[1].n == 3);
+  REQUIRE(rep.per_class[1].ge3_n == 1);
+  REQUIRE(std::fabs(rep.per_class[1].sum - 6.0) < 1e-6);
+  REQUIRE(rep.per_class[3].n == 1);
+  REQUIRE(rep.per_class[3].ge3_n == 1);
+}
+

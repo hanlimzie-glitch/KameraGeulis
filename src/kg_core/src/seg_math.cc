@@ -299,6 +299,16 @@ void SegProbsToMaskSkinAndFaceSimilarity(const float* probs,
                                          int mh, float* skin_out,
                                          float* face_out,
                                          const SegSimilarity& sim, int dst) {
+  SegProbsToMaskSkinFaceHairSimilarity(probs, lb, mw, mh, skin_out, face_out,
+                                       nullptr, sim, dst);
+}
+
+void SegProbsToMaskSkinFaceHairSimilarity(const float* probs,
+                                             const LetterboxInfo& lb, int mw,
+                                             int mh, float* skin_out,
+                                             float* face_out, float* hair_out,
+                                             const SegSimilarity& sim,
+                                             int dst) {
   if (!probs || !skin_out || !face_out || mw <= 0 || mh <= 0 || dst <= 0) return;
   for (int y = 0; y < mh; ++y) {
     const float fy = (static_cast<float>(y) + 0.5f) / mh * lb.src_h;
@@ -328,6 +338,13 @@ void SegProbsToMaskSkinAndFaceSimilarity(const float* probs,
                          (b01 * (1 - ax) + b11 * ax) * ay;
       skin_out[static_cast<size_t>(y) * mw + x] = std::min(1.0f, skin);
       face_out[static_cast<size_t>(y) * mw + x] = face;
+      if (hair_out) {
+        const float h00 = at(x0, y0, kSegClassHair), h10 = at(x1, y0, kSegClassHair);
+        const float h01 = at(x0, y1, kSegClassHair), h11 = at(x1, y1, kSegClassHair);
+        const float hair = (h00 * (1 - ax) + h10 * ax) * (1 - ay) +
+                           (h01 * (1 - ax) + h11 * ax) * ay;
+        hair_out[static_cast<size_t>(y) * mw + x] = std::clamp(hair, 0.0f, 1.0f);
+      }
     }
   }
 }
@@ -558,6 +575,48 @@ void UnionAndExclude(const uint8_t* a, const uint8_t* b,
     if (exclude && exclude[i] != 0) v = 0;
     out[i] = v;
   }
+}
+
+void CompareSegOutputs(const float* fp32_probs, const float* int8_probs,
+                       int n_pix, SegCompareStats* out, int n_class) {
+  if (!fp32_probs || !int8_probs || !out || n_pix <= 0 || n_class <= 0) return;
+  *out = SegCompareStats{};
+  out->total_pixels = n_pix;
+  const int nc = std::min(n_class, kSegClasses);
+  int inter[kSegClasses]{};
+  int uni[kSegClasses]{};
+  int match = 0;
+  for (int i = 0; i < n_pix; ++i) {
+    const float* pa = fp32_probs + static_cast<size_t>(i) * n_class;
+    const float* pb = int8_probs + static_cast<size_t>(i) * n_class;
+    int ba = 0, bb = 0;
+    for (int c = 1; c < nc; ++c) {
+      if (pa[c] > pa[ba]) ba = c;
+      if (pb[c] > pb[bb]) bb = c;
+    }
+    if (ba == bb) {
+      ++match;
+      ++inter[ba];
+      ++uni[ba];
+    } else {
+      ++uni[ba];
+      ++uni[bb];
+    }
+  }
+  out->argmax_agreement = static_cast<float>(match) / static_cast<float>(n_pix);
+  double iou_sum = 0.0;
+  int active = 0;
+  for (int c = 0; c < nc; ++c) {
+    if (uni[c] > 0) {
+      out->class_active[c] = true;
+      out->class_iou[c] =
+          static_cast<float>(inter[c]) / static_cast<float>(uni[c]);
+      iou_sum += out->class_iou[c];
+      ++active;
+    }
+  }
+  out->active_classes = active;
+  out->mean_iou = active > 0 ? static_cast<float>(iou_sum / active) : 1.0f;
 }
 
 }  // namespace kgcore

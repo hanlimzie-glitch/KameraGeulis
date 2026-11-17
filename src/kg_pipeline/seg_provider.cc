@@ -166,6 +166,11 @@ std::string SegProvider::LastError() const {
   return last_error_;
 }
 
+SegProvider::CompareTelemetry SegProvider::LatestCompare() const {
+  std::lock_guard<std::mutex> lk(cmp_mu_);
+  return cmp_stats_;
+}
+
 void SegProvider::SubmitFrame(const uint8_t* pixels, int w, int h,
                               int stride_bytes, bool bgra,
                               uint64_t frame_serial,
@@ -230,6 +235,7 @@ void SegProvider::ThreadMain_() {
   available_.store(ok);
 
   Ort::Session* session = ok ? session_.get() : nullptr;
+  Ort::Session* int8_session = ok ? compare_int8_session_.get() : nullptr;
   Ort::MemoryInfo mem =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
@@ -239,6 +245,39 @@ void SegProvider::ThreadMain_() {
   SegPoseAnchor pose{};
   double infer_sum_ms = 0.0;
   uint64_t infer_n = 0;
+  double cmp_fp32_sum = 0.0, cmp_int8_sum = 0.0;
+  double cmp_agree_sum = 0.0, cmp_miou_sum = 0.0;
+  uint64_t cmp_n = 0;
+
+  auto run_session = [&](Ort::Session* s, std::vector<float>* probs_out,
+                         double* model_ms) -> bool {
+    constexpr size_t kIn = static_cast<size_t>(kSegInputSize) *
+                          kSegInputSize * 3;
+    constexpr size_t kOut = static_cast<size_t>(kSegInputSize) *
+                            kSegInputSize * kSegClasses;
+    std::array<int64_t, 4> in_shape{1, kSegInputSize, kSegInputSize, 3};
+    const auto mt0 = std::chrono::steady_clock::now();
+    Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
+        mem, input.data(), kIn, in_shape.data(), 4);
+    Ort::AllocatorWithDefaultOptions alloc;
+    auto in_name = s->GetInputNameAllocated(0, alloc);
+    auto out_name = s->GetOutputNameAllocated(0, alloc);
+    const char* in_names[] = {in_name.get()};
+    const char* out_names[] = {out_name.get()};
+    Ort::RunOptions run_opts;
+    auto out = s->Run(run_opts, in_names, &in_tensor, 1, out_names, 1);
+    float* out_data = out.front().GetTensorMutableData<float>();
+    const auto out_info = out.front().GetTensorTypeAndShapeInfo();
+    const size_t out_count = out_info.GetElementCount();
+    if (out_count != kOut) return false;
+    probs_out->assign(out_data, out_data + kOut);
+    SegActivate(probs_out->data(), static_cast<int>(kOut / kSegClasses));
+    *model_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - mt0)
+                    .count();
+    return true;
+  };
+
   while (true) {
     {
       std::unique_lock<std::mutex> lk(mu_);
@@ -255,41 +294,59 @@ void SegProvider::ThreadMain_() {
 
     const auto t0 = std::chrono::steady_clock::now();
     try {
-      constexpr size_t kIn = static_cast<size_t>(kSegInputSize) *
-                            kSegInputSize * 3;
-      constexpr size_t kOut = static_cast<size_t>(kSegInputSize) *
-                              kSegInputSize * kSegClasses;
-      std::array<int64_t, 4> in_shape{1, kSegInputSize, kSegInputSize, 3};
-      Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
-          mem, input.data(), kIn, in_shape.data(), 4);
-
-      // Nama input/output diambil dinamis (tf2onnx bisa berganti nama).
-      Ort::AllocatorWithDefaultOptions alloc;
-      auto in_name = session->GetInputNameAllocated(0, alloc);
-      auto out_name = session->GetOutputNameAllocated(0, alloc);
-      const char* in_names[] = {in_name.get()};
-      const char* out_names[] = {out_name.get()};
-      Ort::RunOptions run_opts;
-      auto out = session->Run(run_opts, in_names, &in_tensor, 1, out_names, 1);
-      float* out_data = out.front().GetTensorMutableData<float>();
-      const auto out_info = out.front().GetTensorTypeAndShapeInfo();
-      const size_t out_count = out_info.GetElementCount();
-      if (out_count != kOut) {
+      std::vector<float> probs;
+      double ms = 0.0;
+      if (!run_session(session, &probs, &ms)) {
         std::lock_guard<std::mutex> lk(err_mu_);
-        last_error_ = "bentuk keluaran seg tak terduga (" +
-                      std::to_string(out_count) + " != 65536)";
+        last_error_ = "bentuk keluaran seg tak terduga (!= 65536)";
         available_.store(false);
         dead_.store(true);
         session = nullptr;
         continue;
       }
-      std::vector<float> probs(out_data, out_data + kOut);
-      // Softmax DI LUAR MODEL bila keluarannya logit (deteksi otomatis).
-      SegActivate(probs.data(),
-                  static_cast<int>(kOut / kSegClasses));
-      const auto t1 = std::chrono::steady_clock::now();
-      const double ms =
-          std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+      if (int8_session) {
+        std::vector<float> int8_probs;
+        double int8_ms = 0.0;
+        if (run_session(int8_session, &int8_probs, &int8_ms)) {
+          SegCompareStats cmp{};
+          CompareSegOutputs(probs.data(), int8_probs.data(),
+                            kSegInputSize * kSegInputSize, &cmp);
+          ++cmp_n;
+          cmp_fp32_sum += ms;
+          cmp_int8_sum += int8_ms;
+          cmp_agree_sum += cmp.argmax_agreement;
+          cmp_miou_sum += cmp.mean_iou;
+          {
+            std::lock_guard<std::mutex> clk(cmp_mu_);
+            cmp_stats_.active = true;
+            cmp_stats_.samples = cmp_n;
+            cmp_stats_.last_fp32_ms = ms;
+            cmp_stats_.last_int8_ms = int8_ms;
+            cmp_stats_.avg_fp32_ms = cmp_fp32_sum / cmp_n;
+            cmp_stats_.avg_int8_ms = cmp_int8_sum / cmp_n;
+            cmp_stats_.last_argmax_agree = cmp.argmax_agreement;
+            cmp_stats_.avg_argmax_agree =
+                static_cast<float>(cmp_agree_sum / cmp_n);
+            cmp_stats_.last_miou = cmp.mean_iou;
+            cmp_stats_.avg_miou = static_cast<float>(cmp_miou_sum / cmp_n);
+            cmp_stats_.last_frame_serial = serial;
+          }
+          if (cmp_n == 1 || (cmp_n % 10) == 0) {
+            Log(kTag,
+                "compare frame=%llu intra_op=%d | fp32=%.1fms (avg=%.1fms) "
+                "int8=%.1fms (avg=%.1fms) | argmax_agree=%.2f%% (avg=%.2f%%) "
+                "mIoU=%.4f (avg=%.4f) [bg=%.3f hair=%.3f body=%.3f face=%.3f]",
+                static_cast<unsigned long long>(serial), intra_threads_.load(),
+                ms, cmp_fp32_sum / cmp_n, int8_ms, cmp_int8_sum / cmp_n,
+                cmp.argmax_agreement * 100.0f,
+                (cmp_agree_sum / cmp_n) * 100.0, cmp.mean_iou,
+                cmp_miou_sum / cmp_n, cmp.class_iou[0], cmp.class_iou[1],
+                cmp.class_iou[2], cmp.class_iou[3]);
+          }
+        }
+      }
+
       {
         std::lock_guard<std::mutex> lk(mu_);
         res_probs_ = std::move(probs);
@@ -304,7 +361,7 @@ void SegProvider::ThreadMain_() {
       ++infer_n;
       average_ms_.store(infer_sum_ms / static_cast<double>(infer_n));
       inferred_.fetch_add(1);
-      if ((infer_n % 90) == 0) {
+      if (infer_n == 1 || (infer_n % 60) == 0) {
         Log(kTag,
             "ep=%s precision=%s hw_cores=%u intra_op=%d infer last=%.1fms avg=%.1fms "
             "period=%dms n=%llu",
@@ -374,19 +431,29 @@ bool SegProvider::EnsureModelLoaded_() {
       dead_.store(true);  // last_error_ sudah diisi
       return false;
     }
-    // Pilih model INT8 bila tersedia lokal bersama model FP32; jika tidak,
-    // pakai FP32 terverifikasi dari rilis models-v1.
+    // M2n: FP32 tetap default sampai --seg-compare terbukti aman; INT8 hanya
+    // dipakai jika diminta lewat --seg-int8 (atau dibandingkan berdampingan
+    // lewat --seg-compare).
     std::wstring model_path = dir + L"\\" + kSegFile;
     precision_name_ = "fp32";
     const std::wstring int8_path = dir + L"\\" + kSegInt8File;
-    if (GetFileAttributesW(int8_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-      model_path = int8_path;
-      precision_name_ = "int8";
+    const bool int8_exists =
+        GetFileAttributesW(int8_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (prefer_int8_.load() && !compare_mode_.load()) {
+      if (int8_exists) {
+        model_path = int8_path;
+        precision_name_ = "int8";
+      } else {
+        Log(kTag, "--seg-int8 diminta tetapi %ls tidak ditemukan; fallback fp32",
+            kSegInt8File);
+      }
     }
 
+    // M2n: naikkan intra_op ke jumlah core penuh (mis. 6 pada CPU 6-core)
+    // untuk memangkas latensi segmenasi menuju target <= 60 ms.
     const unsigned hw_cores = std::thread::hardware_concurrency();
     const int intra_threads = std::clamp(
-        hw_cores > 0 ? static_cast<int>((hw_cores + 1) / 2) : 2, 2, 6);
+        hw_cores > 0 ? static_cast<int>(hw_cores) : 4, 2, 8);
     hw_cores_.store(hw_cores);
     intra_threads_.store(intra_threads);
 
@@ -416,16 +483,29 @@ bool SegProvider::EnsureModelLoaded_() {
       }
     }
     Log(kTag,
-        "EP probe: hw_cores=%u intra_op=%d dml_symbol=%s -> ep=%s precision=%s",
+        "EP probe: hw_cores=%u intra_op=%d dml_symbol=%s -> ep=%s precision=%s compare=%d",
         hw_cores, intra_threads, dml_symbol ? "ada" : "tidak ada", ep_name_,
-        precision_name_);
+        precision_name_, compare_mode_.load() ? 1 : 0);
     session_ = std::make_unique<Ort::Session>(*env_, model_path.c_str(), opts);
+    if (compare_mode_.load()) {
+      if (int8_exists) {
+        compare_int8_session_ =
+            std::make_unique<Ort::Session>(*env_, int8_path.c_str(), opts);
+        Log(kTag, "--seg-compare aktif: membandingkan FP32 (%ls) vs INT8 (%ls)",
+            model_path.c_str(), int8_path.c_str());
+      } else {
+        Log(kTag,
+            "--seg-compare diminta tetapi %ls tidak ditemukan di %ls; perbandingan dilewati",
+            kSegInt8File, dir.c_str());
+      }
+    }
     Log(kTag, "ORT seg siap (%ls, ep=%s, precision=%s, intra_op=%d)",
         model_path.c_str(), ep_name_, precision_name_, intra_threads);
     return true;
   } catch (const Ort::Exception& e) {
     std::lock_guard<std::mutex> lk(err_mu_);
     last_error_ = std::string("ORT session seg error: ") + e.what();
+    compare_int8_session_.reset();
     session_.reset();
     env_.reset();
     dead_.store(true);

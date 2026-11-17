@@ -40,6 +40,25 @@ class SegProvider {
   void Stop();
   // M2k: set minimum spacing between inferences (200–3000 ms), requested by PerfGuard.
   void SetPeriodMs(int period_ms);
+  // M2n: flag perbandingan FP32 vs INT8 pada frame yang sama, dan pilih INT8 opsional.
+  void SetCompareMode(bool enable) { compare_mode_.store(enable); }
+  void SetPreferInt8(bool enable) { prefer_int8_.store(enable); }
+  bool CompareMode() const { return compare_mode_.load(); }
+
+  struct CompareTelemetry {
+    bool active = false;
+    uint64_t samples = 0;
+    double last_fp32_ms = 0.0;
+    double last_int8_ms = 0.0;
+    double avg_fp32_ms = 0.0;
+    double avg_int8_ms = 0.0;
+    float last_argmax_agree = 0.0f;
+    float avg_argmax_agree = 0.0f;
+    float last_miou = 0.0f;
+    float avg_miou = 0.0f;
+    uint64_t last_frame_serial = 0;
+  };
+  CompareTelemetry LatestCompare() const;
 
   bool Available() const { return available_.load(); }
   // Alasan kegagalan / "ok" (login sekali + notifikasi UI).
@@ -100,6 +119,8 @@ class SegProvider {
   std::atomic<bool> stop_{false};
   std::atomic<bool> available_{false};
   std::atomic<bool> dead_{false};  // gagal permanen -> SubmitFrame no-op
+  std::atomic<bool> compare_mode_{false};
+  std::atomic<bool> prefer_int8_{false};
   std::atomic<double> last_ms_{0.0};
   std::atomic<double> average_ms_{0.0};
   std::atomic<int> requested_period_ms_{200};
@@ -112,8 +133,11 @@ class SegProvider {
   std::thread th_;
   mutable std::mutex err_mu_;
   std::string last_error_ = "belum dimuat";
+  mutable std::mutex cmp_mu_;
+  CompareTelemetry cmp_stats_{};
 
   std::unique_ptr<Ort::Env> env_;
   std::unique_ptr<Ort::Session> session_;
+  std::unique_ptr<Ort::Session> compare_int8_session_;
 };
 }  // namespace kgcore

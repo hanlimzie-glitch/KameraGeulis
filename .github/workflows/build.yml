@@ -64,6 +64,11 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Set up Python (for INT8 seg quantization)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Package artifact
         shell: pwsh
         env:
@@ -140,6 +145,11 @@ jobs:
             --pattern "selfie_multiclass_256x256.onnx.sha256" `
             --dir dist\models --clobber
           if ($LASTEXITCODE -ne 0) { throw "models-v1 download failed (exit $LASTEXITCODE)" }
+          # M2n: buat & bundel model INT8 untuk flag --seg-compare / --seg-int8 (FP32 tetap default)
+          python -m pip install --disable-pip-version-check --quiet onnx onnxruntime "numpy<2"
+          if ($LASTEXITCODE -ne 0) { throw "pip install onnx/onnxruntime failed (exit $LASTEXITCODE)" }
+          python scripts\models\eval_seg_int8.py dist\models\selfie_multiclass_256x256.onnx --out-int8 dist\models\selfie_multiclass_256x256.int8.onnx --quantize-only
+          if ($LASTEXITCODE -ne 0) { throw "INT8 quantization failed (exit $LASTEXITCODE)" }
           Write-Host "models copied into dist\models"
           # Debug symbols (for symbolizing crash dumps; not needed at runtime)
           $lnk = Get-ChildItem -Recurse -Path build -Filter gpupixel.pdb -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -161,6 +171,7 @@ jobs:
             'dist\res\lookup_light.png','dist\res\lookup_custom.png','dist\res\mouth.png','dist\res\blusher.png',
             'dist\models\face_detection_short_range.onnx','dist\models\face_mesh.onnx',
             'dist\models\selfie_multiclass_256x256.onnx',
+            'dist\models\selfie_multiclass_256x256.int8.onnx',
             'dist\models\selfie_multiclass_256x256.onnx.sha256',
             'dist\gpupixel.pdb','dist\gpupixel.map')
           $missing = $required | Where-Object { -not (Test-Path $_) }

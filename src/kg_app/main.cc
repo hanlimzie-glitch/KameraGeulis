@@ -283,19 +283,105 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
   const uint8_t* mask_data = have_gpu_mask ? gpu_mask.data() : mb.mask().data();
   const bool mask_ok = mb.configured() &&
       mb.mask().size() == static_cast<size_t>(mb.w()) * static_cast<size_t>(mb.h());
+  // M2n: sinkronkan mask efektif resolusi penuh dengan penyaring fitur gelap
+  // di kFsFinal supaya mask_*.png dan metrik F5 sesuai 1:1 dengan shader.
+  std::vector<uint8_t> effective_mask_full;
+  int eff_mw = mb.w(), eff_mh = mb.h();
+  const uint8_t* eff_mask_ptr = mask_data;
+  long face_pre_n = 0, dark_excl_n = 0, dark_atten_n = 0;
+  const bool apply_fullres_dark =
+      mask_ok && have_gpu_mask && blender && blender->last_skin_luma > 0.0f &&
+      !raw_rgba.empty() && raw_w == w && raw_h == h;
+  kgcore::NostrilRoiInfo nostril_info[2]{};
+  bool have_nostril_info = false;
+  if (mask_ok && !raw_rgba.empty() && raw_w == w && raw_h == h) {
+    const auto& lm_raw = pipeline->Tracker().CurrentRaw();
+    const auto& lm = lm_raw.valid ? lm_raw : pipeline->Tracker().Current();
+    if (lm.valid) {
+      std::vector<float> xy(kgcore::kLandmarkCount * 2);
+      for (size_t i = 0; i < kgcore::kLandmarkCount; ++i) {
+        xy[i * 2] = lm.pts[i].x * w;
+        xy[i * 2 + 1] = lm.pts[i].y * h;
+      }
+      const auto basis = kgcore::ComputeFaceEyeBasis(xy.data());
+      const auto base_shapes = kgcore::BuildExclusionShapes(xy.data());
+      kgcore::ExclusionShapes refined = base_shapes;
+      const float ref_luma =
+          mb.has_luma_calibration()
+              ? mb.skin_luma0()
+              : (blender ? blender->last_skin_luma : 0.0f);
+      kgcore::RefineNostrilEllipsesFromLuma(
+          base_shapes, raw_rgba.data(), w, h, w * 4, ref_luma, basis.iod,
+          &refined, nostril_info);
+      have_nostril_info = !base_shapes.ellipses.empty();
+    }
+  }
+  if (apply_fullres_dark) {
+    effective_mask_full.resize(static_cast<size_t>(w) * h);
+    kgcore::SkinMaskConfig dcfg = mb.config();
+    dcfg.dark_luma_low_ratio = blender->last_dark_low_ratio;
+    dcfg.dark_luma_high_ratio = blender->last_dark_high_ratio;
+    const float r0 = blender->last_nostril_roi[0][2];
+    const float r1 = blender->last_nostril_roi[1][2];
+    const float r0_sq = r0 * r0;
+    const float r1_sq = r1 * r1;
+    for (int y = 0; y < h; ++y) {
+      const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
+      const float fy = static_cast<float>(y) + 0.5f;
+      const uint8_t* rrow = raw_rgba.data() + static_cast<size_t>(y) * w * 4;
+      for (int x = 0; x < w; ++x) {
+        const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+        const float fx = static_cast<float>(x) + 0.5f;
+        const float m_pre = kgcore::SampleMaskBilinear(mask_data, mb.w(), mb.h(), u, v);
+        const uint8_t* p = rrow + static_cast<size_t>(x) * 4;
+        const float y_px = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+        bool in_n = false;
+        if (r0 > 0.0f) {
+          const float dx = fx - blender->last_nostril_roi[0][0];
+          const float dy = fy - blender->last_nostril_roi[0][1];
+          if (dx * dx + dy * dy <= r0_sq) in_n = true;
+        }
+        if (!in_n && r1 > 0.0f) {
+          const float dx = fx - blender->last_nostril_roi[1][0];
+          const float dy = fy - blender->last_nostril_roi[1][1];
+          if (dx * dx + dy * dy <= r1_sq) in_n = true;
+        }
+        const float w_dark = kgcore::ComputeDarkFeatureWeight(
+            y_px, blender->last_skin_luma, dcfg, in_n);
+        if (m_pre >= 0.5f) {
+          ++face_pre_n;
+          if (w_dark < 0.5f) ++dark_excl_n;
+          if (w_dark < 0.95f) ++dark_atten_n;
+        }
+        const float m_eff = std::clamp(m_pre * w_dark, 0.0f, 1.0f);
+        effective_mask_full[static_cast<size_t>(y) * w + x] =
+            static_cast<uint8_t>(m_eff * 255.0f + 0.5f);
+      }
+    }
+    eff_mask_ptr = effective_mask_full.data();
+    eff_mw = w;
+    eff_mh = h;
+  }
   // --- mask_*.png (grayscale 8-bit terkompresi ukuran frame) ---
   if (mask_ok) {
-    std::vector<uint8_t> gray_rgba(static_cast<size_t>(w) * h * 4);
-    kgcore::UpsampleMaskToGrayRgba(mask_data, mb.w(), mb.h(), w, h,
-                                   gray_rgba.data());
-    std::vector<uint8_t> gray(static_cast<size_t>(w) * h);
-    for (size_t i = 0; i < gray.size(); ++i) gray[i] = gray_rgba[i * 4];
+    std::vector<uint8_t> gray;
+    if (!effective_mask_full.empty()) {
+      gray = effective_mask_full;
+    } else {
+      std::vector<uint8_t> gray_rgba(static_cast<size_t>(w) * h * 4);
+      kgcore::UpsampleMaskToGrayRgba(mask_data, mb.w(), mb.h(), w, h,
+                                     gray_rgba.data());
+      gray.resize(static_cast<size_t>(w) * h);
+      for (size_t i = 0; i < gray.size(); ++i) gray[i] = gray_rgba[i * 4];
+    }
     const std::string path = dir + "\\mask_" + stamp + ".png";
     if (kgcore::WritePngGray(path.c_str(), gray.data(), w, h)) {
       kgcore::Log("app",
                   "F5: mask blend aktual -> %s (sumber=%s, mask %dx%d, gray8 %dx%d)",
-                  path.c_str(), have_gpu_mask ? "tex_mask GPU" : "CPU upload buffer",
-                  mb.w(), mb.h(), w, h);
+                  path.c_str(),
+                  apply_fullres_dark ? "tex_mask GPU + filter gelap full-res"
+                                     : (have_gpu_mask ? "tex_mask GPU" : "CPU upload buffer"),
+                  eff_mw, eff_mh, w, h);
     } else {
       kgcore::Log("app", "F5: GAGAL menulis %s", path.c_str());
     }
@@ -367,15 +453,15 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
       return;
     }
     float outside = 0.0f, inside = 0.0f;
-    kgcore::MaskDiffStats(cmp_raw, cmp_out, mask_data, mb.w(), mb.h(), w,
+    kgcore::MaskDiffStats(cmp_raw, cmp_out, eff_mask_ptr, eff_mw, eff_mh, w,
                           h, gain, &outside, &inside);
     kgcore::Log("app",
                 "F5: selisih rata-rata LUAR mask = %.3f (harus mendekati 0), "
                 "DALAM mask = %.3f | gain=%.2f | mode=%s | mask %dx%d",
-                outside, inside, gain, mode, mb.w(), mb.h());
+                outside, inside, gain, mode, eff_mw, eff_mh);
     kgcore::InMaskMetrics met;
-    kgcore::ComputeInMaskMetrics(cmp_raw, cmp_out, mask_data, mb.w(),
-                                 mb.h(), w, h, gain, &met);
+    kgcore::ComputeInMaskMetrics(cmp_raw, cmp_out, eff_mask_ptr, eff_mw,
+                                 eff_mh, w, h, gain, &met);
     kgcore::Log("app",
                 "F5 metrik M2i [%s]: delta luma inti = %+.1f | delta chroma inti = %.1f | "
                 "rasio detail halus = %.3f | diff pita tepi = %.1f | "
@@ -383,7 +469,7 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
                 mode, met.delta_luma, met.delta_chroma, met.detail_ratio,
                 met.edge_band_diff, met.core_n, met.edge_n, met.outside_n);
     kgcore::F5DiffReport rep;
-    kgcore::ComputeF5DiffReport(cmp_raw, cmp_out, mask_data, mb.w(), mb.h(), w, h,
+    kgcore::ComputeF5DiffReport(cmp_raw, cmp_out, eff_mask_ptr, eff_mw, eff_mh, w, h,
                                 gain, argmax_full.empty() ? nullptr : argmax_full.data(),
                                 &rep);
     static const char* bands[5] = {"<0.01", "0.01-0.1", "0.1-0.5", "0.5-0.9", ">0.9"};
@@ -401,6 +487,52 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
     }
     kgcore::Log("app", "F5 outside-mask (mask*gain < 8/255): mean=%.3f n=%ld "
                        "[target <=0.1 levels]", rep.outside_mean, rep.outside_n);
+    {
+      const auto& hc = rep.per_class[1];
+      const double hair_mean = hc.n ? hc.sum / hc.n : 0.0;
+      const double hair_ge3_pct = hc.n ? (100.0 * hc.ge3_n / hc.n) : 0.0;
+      kgcore::Log("app",
+                  "F5 metrik M2n rambut: mean=%.3f [target <=0.15] | "
+                  "berubah >=3 level=%.2f%% (%ld/%ld) [target <1%%]",
+                  hair_mean, hair_ge3_pct, hc.ge3_n, hc.n);
+    }
+    if (face_pre_n > 0) {
+      kgcore::Log("app",
+                  "F5 metrik M2n filter_gelap: skin_luma=%.1f excl(<0.5)=%.2f%% "
+                  "(%ld/%ld) atten(<0.95)=%.2f%% (%ld/%ld)",
+                  blender->last_skin_luma, 100.0 * dark_excl_n / face_pre_n,
+                  dark_excl_n, face_pre_n, 100.0 * dark_atten_n / face_pre_n,
+                  dark_atten_n, face_pre_n);
+    } else {
+      kgcore::Log("app",
+                  "F5 metrik M2n filter_gelap: skin_luma=%.1f (belum ada piksel wajah full-res)",
+                  blender ? blender->last_skin_luma : 0.0f);
+    }
+    if (have_nostril_info) {
+      kgcore::Log("app",
+                  "F5 metrik M2n lubang_hidung: Kanan anchor=(%.1f,%.1f) "
+                  "blob=(%.1f,%.1f) excl=(%.1f,%.1f) offset=%.2f px found=%d | "
+                  "Kiri anchor=(%.1f,%.1f) blob=(%.1f,%.1f) excl=(%.1f,%.1f) "
+                  "offset=%.2f px found=%d (roi_r=%.1f px)",
+                  nostril_info[0].anchor_cx, nostril_info[0].anchor_cy,
+                  nostril_info[0].dark_cx, nostril_info[0].dark_cy,
+                  nostril_info[0].excl_cx, nostril_info[0].excl_cy,
+                  nostril_info[0].offset_px, nostril_info[0].found_dark_blob ? 1 : 0,
+                  nostril_info[1].anchor_cx, nostril_info[1].anchor_cy,
+                  nostril_info[1].dark_cx, nostril_info[1].dark_cy,
+                  nostril_info[1].excl_cx, nostril_info[1].excl_cy,
+                  nostril_info[1].offset_px, nostril_info[1].found_dark_blob ? 1 : 0,
+                  nostril_info[0].roi_radius_px);
+    }
+    const auto cmp_tel = pipeline->Seg().LatestCompare();
+    if (cmp_tel.active) {
+      kgcore::Log("app",
+                  "F5 seg_compare (n=%llu): fp32_avg=%.1fms int8_avg=%.1fms | "
+                  "argmax_agree=%.2f%% mIoU=%.4f",
+                  static_cast<unsigned long long>(cmp_tel.samples),
+                  cmp_tel.avg_fp32_ms, cmp_tel.avg_int8_ms,
+                  cmp_tel.avg_argmax_agree * 100.0f, cmp_tel.avg_miou);
+    }
     const int dw = w > 960 ? 960 : w;
     const int dh = h > 540 ? 540 : h;
     std::vector<uint8_t> diff_gray;
@@ -608,6 +740,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   if (!safe) {
     try {
       pipeline = std::make_unique<kg::BeautyPipeline>();
+      pipeline->Seg().SetCompareMode(args.seg_compare);
+      pipeline->Seg().SetPreferInt8(args.seg_int8);
       pipeline_ok = pipeline->Init(exe_dir);
     } catch (const std::exception& e) {
       kgcore::Log("app", "pipeline GPUPixel init exception: %s", e.what());
@@ -1153,6 +1287,10 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                   pipeline->SegActive(), mb.skin_cb0(),
                                   mb.skin_cr0(), mb.has_color_calibration(),
                                   &mb.config(), !gpu_mask_gen_disabled,
+                                  pipeline->SegAttenuation(),
+                                  mb.hair_probability().empty() ? nullptr
+                                                                : mb.hair_probability().data(),
+                                  mb.skin_luma0(), mb.has_luma_calibration(),
                                   pipeline->SegAttenuation());
           if (!blended && blender.init_failed && !blender_warned) {
             blender_warned = true;
@@ -1619,7 +1757,15 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             xy[i * 2] = lm.pts[i].x * shown_w;
             xy[i * 2 + 1] = lm.pts[i].y * shown_h;
           }
-          const auto shapes = kgcore::BuildExclusionShapes(xy.data());
+          const auto base_shapes = kgcore::BuildExclusionShapes(xy.data());
+          const auto basis = kgcore::ComputeFaceEyeBasis(xy.data());
+          kgcore::ExclusionShapes shapes = base_shapes;
+          if (pipeline->InputRGBA() && pipeline->MaskBuilder().has_luma_calibration()) {
+            kgcore::RefineNostrilEllipsesFromLuma(
+                base_shapes, pipeline->InputRGBA(), shown_w, shown_h,
+                shown_w * 4, pipeline->MaskBuilder().skin_luma0(), basis.iod,
+                &shapes);
+          }
           ImDrawList* dl = ImGui::GetWindowDrawList();
           const ImU32 col = IM_COL32(50, 255, 230, 245);
           auto point_screen = [&](float x, float y) {

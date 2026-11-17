@@ -406,3 +406,50 @@ TEST_CASE("M2m skin_mask: pusat lubang hidung kanonik dieksklusi >= 0.95 (mask <
   // Di sayap hidung luar (0.40, 0.60) yang bukan lubang hidung: tetap kulit aktif (> 120).
   REQUIRE(at_uv(0.40f, 0.60f) > 120);
 }
+
+TEST_CASE("M2n: filter fitur gelap, transisi mulus, dan kalibrasi luma tangguh poni") {
+  SkinMaskConfig cfg;
+  const float skin_y = 110.0f;
+  // Di bawah ~0.50x -> eksklusi penuh (0.0); di atas ~0.70x -> inklusi penuh (1.0).
+  REQUIRE(ComputeDarkFeatureWeight(30.0f, skin_y, cfg) == 0.0f);
+  REQUIRE(ComputeDarkFeatureWeight(55.0f, skin_y, cfg) == 0.0f);
+  const float w_mid_low = ComputeDarkFeatureWeight(60.0f, skin_y, cfg);
+  const float w_mid = ComputeDarkFeatureWeight(66.0f, skin_y, cfg);
+  const float w_mid_high = ComputeDarkFeatureWeight(72.0f, skin_y, cfg);
+  REQUIRE(w_mid_low > 0.0f);
+  REQUIRE(w_mid > w_mid_low);
+  REQUIRE(w_mid_high > w_mid);
+  REQUIRE(w_mid_high < 1.0f);
+  REQUIRE(ComputeDarkFeatureWeight(77.0f, skin_y, cfg) == 1.0f);
+  REQUIRE(ComputeDarkFeatureWeight(110.0f, skin_y, cfg) == 1.0f);
+  // Adegan sangat gelap (< dark_min_skin_luma): filter tidak memblokir.
+  REQUIRE(ComputeDarkFeatureWeight(10.0f, 15.0f, cfg) == 1.0f);
+
+  // Kalibrasi luma: poni gelap di dahi (Y=30) tidak menurunkan luma kulit pipi (Y=110).
+  REQUIRE(std::fabs(CalibrateSkinLuma(110.0f, true, 108.0f, true, 30.0f, true) -
+                    109.0f) < 0.01f);
+  // Dahi terang ikut dihitung.
+  REQUIRE(std::fabs(CalibrateSkinLuma(110.0f, true, 108.0f, true, 112.0f, true) -
+                    110.0f) < 0.01f);
+
+  // Integrasi pada SkinMaskBuilder: poni gelap di atas dahi (RGB 25,20,18)
+  // dieksklusi dengan nol lag, sedangkan pipi terang tetap aktif.
+  const int fw = 320, fh = 320, mw = 80, mh = 80;
+  LandmarkSet lm = MakeSyntheticFace();
+  std::vector<uint8_t> rgba = MakeFaceRgba(fw, fh);
+  for (int y = static_cast<int>(0.18f * fh); y < static_cast<int>(0.34f * fh); ++y) {
+    for (int x = static_cast<int>(0.32f * fw); x < static_cast<int>(0.68f * fw); ++x) {
+      uint8_t* p = rgba.data() + (static_cast<size_t>(y) * fw + x) * 4;
+      p[0] = 25; p[1] = 20; p[2] = 18;
+    }
+  }
+  SkinMaskBuilder b;
+  b.Configure(mw, mh);
+  REQUIRE(b.Update(lm, true, rgba.data(), fw, fh, fw * 4));
+  REQUIRE(b.has_luma_calibration());
+  REQUIRE(b.skin_luma0() > 150.0f);
+  // Area poni pada dahi (y=0.26, x=0.50) harus dieksklusi nyaris nol; pipi tetap aktif.
+  REQUIRE(WindowMean(b.mask(), mw, mh, 0.50f, 0.26f, 0.03f) < 10.0f);
+  REQUIRE(WindowMean(b.mask(), mw, mh, 0.25f, 0.55f, 0.03f) > 150.0f);
+}
+

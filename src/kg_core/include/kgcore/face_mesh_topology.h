@@ -51,6 +51,28 @@ inline constexpr float kNostrilRadiusIodScale = 0.035f;
 // (kosong) supaya rasterisasi tetap aman.
 ExclusionShapes BuildExclusionShapes(const float* xy);
 
+// M2n: ROI longgar lubang hidung dari landmark + pelacakan blob gelap nyata
+// pada frame saat ini (mengikuti yaw tanpa offset kanonik 2D).
+struct NostrilRoiInfo {
+  float anchor_cx = 0.0f, anchor_cy = 0.0f;
+  float roi_radius_px = 0.0f;
+  float dark_cx = 0.0f, dark_cy = 0.0f;
+  float excl_cx = 0.0f, excl_cy = 0.0f;
+  float offset_px = 0.0f;
+  bool found_dark_blob = false;
+};
+
+void RefineNostrilEllipsesFromLuma(const ExclusionShapes& base_shapes,
+                                  const uint8_t* rgba, int fw, int fh,
+                                  int stride, float skin_luma, float iod_px,
+                                  ExclusionShapes* out_shapes,
+                                  NostrilRoiInfo out_info[2] = nullptr);
+
+void MeasureNostrilDarkBlobOffset(const ExclusionShapes& final_shapes,
+                                  const uint8_t* rgba, int fw, int fh,
+                                  int stride, float skin_luma, float iod_px,
+                                  NostrilRoiInfo out_info[2]);
+
 // Triangulasi area wajah (852 segitiga source-order resmi, indeks landmark
 // <468; exclusions mata/mulut diterapkan sesudah union).
 struct TessTriangle {

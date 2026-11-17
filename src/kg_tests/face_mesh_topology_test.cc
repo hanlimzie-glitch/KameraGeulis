@@ -218,3 +218,52 @@ TEST_CASE("topologi: OrderLoop menolak rantai terbuka") {
   std::pair<uint16_t, uint16_t> ch[3] = {{0, 1}, {1, 2}, {2, 3}};
   REQUIRE(kgcore::OrderLoopFromEdges(ch, 3).empty());
 }
+
+TEST_CASE("M2n topologi: ROI longgar melacak blob gelap lubang hidung saat yaw") {
+  float xy[468 * 2];
+  MakeSynthetic(xy);
+  constexpr int fw = 640, fh = 480;
+  const auto basis = kgcore::ComputeFaceEyeBasis(xy);
+  const auto base_shapes = kgcore::BuildExclusionShapes(xy);
+  REQUIRE(base_shapes.ellipses.size() == 2);
+
+  // Frame kulit seragam (Y ~ 150) + dua lubang hidung gelap nyata yang bergeser
+  // (+10, -5) px dari jangkar landmark akibat kepala menoleh (yaw).
+  std::vector<uint8_t> rgba(static_cast<size_t>(fw) * fh * 4);
+  for (int i = 0; i < fw * fh; ++i) {
+    rgba[i * 4 + 0] = 180;
+    rgba[i * 4 + 1] = 145;
+    rgba[i * 4 + 2] = 120;
+    rgba[i * 4 + 3] = 255;
+  }
+  const float target_x[2] = {base_shapes.ellipses[0].cx + 10.0f,
+                             base_shapes.ellipses[1].cx + 10.0f};
+  const float target_y[2] = {base_shapes.ellipses[0].cy - 5.0f,
+                             base_shapes.ellipses[1].cy - 5.0f};
+  for (int y = 0; y < fh; ++y) {
+    for (int x = 0; x < fw; ++x) {
+      for (int k = 0; k < 2; ++k) {
+        const float dx = (x + 0.5f) - target_x[k];
+        const float dy = (y + 0.5f) - target_y[k];
+        if (dx * dx + dy * dy <= 16.0f) {
+          uint8_t* p = rgba.data() + (static_cast<size_t>(y) * fw + x) * 4;
+          p[0] = 25; p[1] = 20; p[2] = 18;
+        }
+      }
+    }
+  }
+
+  kgcore::ExclusionShapes refined;
+  kgcore::NostrilRoiInfo info[2]{};
+  kgcore::RefineNostrilEllipsesFromLuma(base_shapes, rgba.data(), fw, fh,
+                                        fw * 4, 150.0f, basis.iod, &refined,
+                                        info);
+  REQUIRE(refined.ellipses.size() == 2);
+  for (int k = 0; k < 2; ++k) {
+    REQUIRE(info[k].found_dark_blob);
+    REQUIRE(std::hypot(refined.ellipses[k].cx - target_x[k],
+                       refined.ellipses[k].cy - target_y[k]) < 2.0f);
+    REQUIRE(info[k].offset_px < 1.5f);
+  }
+}
+

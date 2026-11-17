@@ -57,6 +57,13 @@ struct SkinMaskConfig {
   float chroma_feather = 0.55f;     // fraksi radius untuk mulai memudar
   float cb_min = 65.0f, cb_max = 145.0f;
   float cr_min = 120.0f, cr_max = 185.0f;
+  // M2n: penyaring fitur gelap per-piksel (melindungi poni/rambut, lubang
+  // hidung, alis, bulu mata, kumis tipis, dan tepi bibir tanpa lag).
+  float dark_luma_low_ratio = 0.50f;   // eksklusi penuh (<= low * skin_luma)
+  float dark_luma_high_ratio = 0.70f;  // inklusi penuh (>= high * skin_luma)
+  float dark_min_skin_luma = 20.0f;    // batas aman adegan sangat gelap (0..255)
+  float hair_forehead_weight = 0.85f;  // sinyal sekunder seg rambut di tepi dahi
+  bool dark_filter_enabled = true;
 };
 
 // Topologi resmi MediaPipe (mediapipe/python/solutions/
@@ -109,6 +116,17 @@ bool SkinSamplePoints(const LandmarkSet& lm, Vec2 out_pts[3]);
 // Mengembalikan jumlah sampel piksel (0 = gagal).
 int SampleChromaAt(const uint8_t* rgba, int fw, int fh, int stride,
                    const Vec2& center, float radius_px, float* cb, float* cr);
+
+// M2n: sampel rata-rata YCbCr + luma (0..255) pada disc, dan kalibrasi luma
+// kulit tangguh terhadap poni yang menutup dahi.
+int SampleChromaLumaAt(const uint8_t* rgba, int fw, int fh, int stride,
+                       const Vec2& center, float radius_px, float* cb,
+                       float* cr, float* luma);
+float CalibrateSkinLuma(float cheek_l_y, bool has_l, float cheek_r_y,
+                        bool has_r, float forehead_y, bool has_f);
+float ComputeDarkFeatureWeight(float pixel_luma, float skin_luma,
+                               const SkinMaskConfig& cfg,
+                               bool in_nostril_roi = false);
 
 // Probabilitas warna kulit [0..255] per piksel MASK di mana region != 0.
 // cb0/cr0 = pusat elips adaptif; bila use_adaptif=false pakai band lebar saja.
@@ -242,9 +260,12 @@ class SkinMaskBuilder {
 
   const std::vector<uint8_t>& mask() const { return mask_; }
   const std::vector<uint8_t>& face_probability() const { return face_probability_; }
+  const std::vector<uint8_t>& hair_probability() const { return hair_probability_; }
   bool has_color_calibration() const { return color_calibration_valid_; }
   float skin_cb0() const { return color_cb0_; }
   float skin_cr0() const { return color_cr0_; }
+  bool has_luma_calibration() const { return luma_calibration_valid_; }
+  float skin_luma0() const { return skin_luma0_; }
   bool has_face() const { return face_valid_; }
   // M2j: alpha temporal terakhir (utk log latensi/gerak).
   float LastTemporalAlpha() const { return last_alpha_; }
@@ -254,13 +275,16 @@ class SkinMaskBuilder {
  private:
   SkinMaskConfig cfg_;
   int mask_w_ = 0, mask_h_ = 0;
-  std::vector<uint8_t> mask_, prev_, prev_shift_, face_probability_;
+  std::vector<uint8_t> mask_, prev_, prev_shift_, face_probability_,
+      hair_probability_;
   std::vector<uint8_t> luma_full_;
   bool has_prev_ = false;
   bool face_valid_ = false;
   float prev_cx_ = 0.0f, prev_cy_ = 0.0f;  // centroid mask (ruang mask)
   float color_cb0_ = 0.0f, color_cr0_ = 0.0f;
   bool color_calibration_valid_ = false;
+  float skin_luma0_ = 0.0f;
+  bool luma_calibration_valid_ = false;
   float last_alpha_ = 0.0f;
   float last_seg_attenuation_ = 1.0f;
   SkinMaskStageTimings stage_timings_{};

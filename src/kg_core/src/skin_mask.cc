@@ -269,28 +269,85 @@ bool SkinSamplePoints(const LandmarkSet& lm, Vec2 out_pts[3]) {
 
 int SampleChromaAt(const uint8_t* rgba, int fw, int fh, int stride,
                    const Vec2& center, float radius_px, float* cb, float* cr) {
+  return SampleChromaLumaAt(rgba, fw, fh, stride, center, radius_px, cb, cr,
+                            nullptr);
+}
+
+int SampleChromaLumaAt(const uint8_t* rgba, int fw, int fh, int stride,
+                       const Vec2& center, float radius_px, float* cb,
+                       float* cr, float* luma) {
   if (!rgba || radius_px < 1.0f) return 0;
   const int cx = static_cast<int>(center.x * static_cast<float>(fw));
   const int cy = static_cast<int>(center.y * static_cast<float>(fh));
   const int r = static_cast<int>(radius_px);
-  double cb_sum = 0.0, cr_sum = 0.0;
+  double cb_sum = 0.0, cr_sum = 0.0, y_sum = 0.0;
   int n = 0;
   for (int y = std::max(0, cy - r); y <= std::min(fh - 1, cy + r); ++y) {
     const uint8_t* row = rgba + static_cast<size_t>(y) * stride;
     for (int x = std::max(0, cx - r); x <= std::min(fw - 1, cx + r); ++x) {
       const int dx = x - cx, dy = y - cy;
       if (dx * dx + dy * dy > r * r) continue;
+      const uint8_t* p = row + static_cast<size_t>(x) * 4;
+      const float lum = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
       float b_cb, b_cr;
-      RgbToCbCr(row + static_cast<size_t>(x) * 4, &b_cb, &b_cr);
+      RgbToCbCr(p, &b_cb, &b_cr);
       cb_sum += b_cb;
       cr_sum += b_cr;
+      y_sum += lum;
       ++n;
     }
   }
   if (n == 0) return 0;
-  *cb = static_cast<float>(cb_sum / n);
-  *cr = static_cast<float>(cr_sum / n);
+  if (cb) *cb = static_cast<float>(cb_sum / n);
+  if (cr) *cr = static_cast<float>(cr_sum / n);
+  if (luma) *luma = static_cast<float>(y_sum / n);
   return n;
+}
+
+float CalibrateSkinLuma(float cheek_l_y, bool has_l, float cheek_r_y,
+                        bool has_r, float forehead_y, bool has_f) {
+  double sum = 0.0;
+  int count = 0;
+  float cheek_ref = 0.0f;
+  if (has_l && cheek_l_y > 0.0f) {
+    sum += cheek_l_y;
+    ++count;
+    cheek_ref = std::max(cheek_ref, cheek_l_y);
+  }
+  if (has_r && cheek_r_y > 0.0f) {
+    sum += cheek_r_y;
+    ++count;
+    cheek_ref = std::max(cheek_ref, cheek_r_y);
+  }
+  if (has_f && forehead_y > 0.0f) {
+    // Jika poni/rambut menutup sampel dahi (jauh lebih gelap daripada pipi),
+    // abaikan sampel dahi agar kalibrasi luma kulit tidak ikut turun.
+    if (count == 0 || forehead_y >= 0.65f * cheek_ref) {
+      sum += forehead_y;
+      ++count;
+    }
+  }
+  return count > 0 ? static_cast<float>(sum / count) : 0.0f;
+}
+
+float ComputeDarkFeatureWeight(float pixel_luma, float skin_luma,
+                               const SkinMaskConfig& cfg,
+                               bool in_nostril_roi) {
+  if (!cfg.dark_filter_enabled || skin_luma < cfg.dark_min_skin_luma) {
+    return 1.0f;
+  }
+  float low_ratio = cfg.dark_luma_low_ratio;
+  float high_ratio = cfg.dark_luma_high_ratio;
+  if (in_nostril_roi) {
+    low_ratio = std::min(0.85f, low_ratio + 0.06f);
+    high_ratio = std::max(low_ratio + 0.05f, high_ratio + 0.04f);
+  }
+  const float low = low_ratio * skin_luma;
+  const float high = std::max(low + 1.0f, high_ratio * skin_luma);
+  if (pixel_luma <= low) return 0.0f;
+  if (pixel_luma >= high) return 1.0f;
+  const float t = (pixel_luma - low) / (high - low);
+  return t * t * (3.0f - 2.0f * t);  // smoothstep
 }
 
 void ApplySkinColorProb(const uint8_t* rgba, int fw, int fh, int stride,
@@ -648,6 +705,58 @@ void ComputeInMaskMetrics(const uint8_t* raw, const uint8_t* out,
 // SkinMaskBuilder
 // ---------------------------------------------------------------------------
 
+namespace {
+void CalibrateFromLandmarks(const LandmarkSet& lm, const uint8_t* rgba, int fw,
+                            int fh, int stride, float* cb0, float* cr0,
+                            bool* has_chroma, float* skin_luma0,
+                            bool* has_luma) {
+  *has_chroma = false;
+  *has_luma = false;
+  *cb0 = 0.0f;
+  *cr0 = 0.0f;
+  *skin_luma0 = 0.0f;
+  if (!lm.valid || !rgba || fw <= 0 || fh <= 0 || stride < fw * 4) return;
+  Vec2 samples[3];
+  if (!SkinSamplePoints(lm, samples)) return;
+  float min_x = 1e9f, max_x = -1e9f;
+  for (int i = 0; i < 36; ++i) {
+    const float x = lm.pts[topology::kFaceOvalRing[i]].x;
+    min_x = std::min(min_x, x);
+    max_x = std::max(max_x, x);
+  }
+  const float radius_px =
+      std::max(2.0f, (max_x - min_x) * 0.05f * static_cast<float>(fw));
+  float cb_v[3]{}, cr_v[3]{}, y_v[3]{};
+  bool ok[3]{false, false, false};
+  for (int k = 0; k < 3; ++k) {
+    ok[k] = SampleChromaLumaAt(rgba, fw, fh, stride, samples[k], radius_px,
+                               &cb_v[k], &cr_v[k], &y_v[k]) > 0;
+  }
+  const float luma_cal =
+      CalibrateSkinLuma(y_v[1], ok[1], y_v[2], ok[2], y_v[0], ok[0]);
+  if (luma_cal > 0.0f) {
+    *skin_luma0 = luma_cal;
+    *has_luma = true;
+  }
+  double cb_sum = 0.0, cr_sum = 0.0;
+  int got = 0;
+  const float cheek_ref = std::max(ok[1] ? y_v[1] : 0.0f, ok[2] ? y_v[2] : 0.0f);
+  for (int k = 0; k < 3; ++k) {
+    if (!ok[k]) continue;
+    // Jangan ikutkan sampel dahi bila tertutup poni gelap.
+    if (k == 0 && (ok[1] || ok[2]) && y_v[0] < 0.65f * cheek_ref) continue;
+    cb_sum += cb_v[k];
+    cr_sum += cr_v[k];
+    ++got;
+  }
+  if (got > 0) {
+    *cb0 = static_cast<float>(cb_sum / got);
+    *cr0 = static_cast<float>(cr_sum / got);
+    *has_chroma = true;
+  }
+}
+}  // namespace
+
 void SkinMaskBuilder::Configure(int mask_w, int mask_h,
                                 const SkinMaskConfig& cfg) {
   mask_w_ = std::max(8, mask_w);
@@ -655,9 +764,13 @@ void SkinMaskBuilder::Configure(int mask_w, int mask_h,
   cfg_ = cfg;
   mask_.assign(static_cast<size_t>(mask_w_) * mask_h_, 0);
   face_probability_.assign(static_cast<size_t>(mask_w_) * mask_h_, 255);
+  hair_probability_.assign(static_cast<size_t>(mask_w_) * mask_h_, 0);
   prev_.assign(static_cast<size_t>(mask_w_) * mask_h_, 0);
   has_prev_ = false;
   face_valid_ = false;
+  color_calibration_valid_ = false;
+  skin_luma0_ = 0.0f;
+  luma_calibration_valid_ = false;
 }
 
 bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
@@ -686,6 +799,18 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   // Region oval polos (untuk gating warna: piksel di luar oval selalu 0).
   std::vector<uint8_t> region(mask_.begin(), mask_.end());
 
+  auto color_t0 = MaskClock::now();
+  float cb0 = 0.0f, cr0 = 0.0f, luma0 = 0.0f;
+  bool use_adaptif = false, has_luma = false;
+  CalibrateFromLandmarks(lm, rgba, fw, fh, stride, &cb0, &cr0, &use_adaptif,
+                         &luma0, &has_luma);
+  color_cb0_ = cb0;
+  color_cr0_ = cr0;
+  color_calibration_valid_ = use_adaptif;
+  skin_luma0_ = luma0;
+  luma_calibration_valid_ = has_luma;
+  stage_timings_.color_gate_ms = ms_since(color_t0);
+
   // 2) Fitur yang dikeluarkan dari mask -> buffer `feat` (255 = lubang).
   std::vector<uint8_t> feat(static_cast<size_t>(w) * h, 0);
   RasterizeRing(topology::kRightEyeRing, 16, lm, w, h, feat.data(), 255);
@@ -704,59 +829,33 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   for (int c = 0; c < 4; ++c) {
     StrokeChain(topology::kBrowChains[c], 5, lm, w, h, brow_r, feat.data(), 255);
   }
-  // M2m: lubang hidung diturunkan dari geometri kanonik/lubang hidung resmi
-  // (bukan sayap hidung 48/278), radius ~0.035 * IOD + feather.
-  {
-    float xy_px[kLandmarkCount * 2];
-    for (size_t i = 0; i < kLandmarkCount; ++i) {
-      xy_px[i * 2] = lm.pts[i].x * static_cast<float>(fw);
-      xy_px[i * 2 + 1] = lm.pts[i].y * static_cast<float>(fh);
-    }
-    const ExclusionShapes shapes = BuildExclusionShapes(xy_px);
-    for (const auto& e : shapes.ellipses) {
-      const Vec2 c_norm(e.cx / static_cast<float>(fw),
-                        e.cy / static_cast<float>(fh));
-      const float r_norm = std::max(0.8f / static_cast<float>(w),
-                                    e.rx / static_cast<float>(fw));
-      FillDiscN(c_norm, r_norm, w, h, feat.data(), 255);
-    }
+  // M2n: ROI longgar lubang hidung dari landmark, lalu pusat inti diekstrak
+  // dari blob gelap frame saat ini (mengikuti yaw wajah tanpa lag).
+  float xy_px[kLandmarkCount * 2];
+  for (size_t i = 0; i < kLandmarkCount; ++i) {
+    xy_px[i * 2] = lm.pts[i].x * static_cast<float>(fw);
+    xy_px[i * 2 + 1] = lm.pts[i].y * static_cast<float>(fh);
+  }
+  const FaceEyeBasis eye_basis = ComputeFaceEyeBasis(xy_px);
+  const ExclusionShapes base_shapes = BuildExclusionShapes(xy_px);
+  ExclusionShapes shapes = base_shapes;
+  NostrilRoiInfo nostril_info[2]{};
+  RefineNostrilEllipsesFromLuma(base_shapes, rgba, fw, fh, stride, luma0,
+                                eye_basis.iod, &shapes, nostril_info);
+  for (const auto& e : shapes.ellipses) {
+    const Vec2 c_norm(e.cx / static_cast<float>(fw),
+                      e.cy / static_cast<float>(fh));
+    const float r_norm = std::max(0.8f / static_cast<float>(w),
+                                  e.rx / static_cast<float>(fw));
+    FillDiscN(c_norm, r_norm, w, h, feat.data(), 255);
   }
 
   stage_timings_.feature_ms = ms_since(feature_t0);
-  // 3) Kalibrasi warna kulit adaptif (3 sampel: dahi + 2 pipi).
-  auto color_t0 = MaskClock::now();
-  Vec2 samples[3];
-  float cb0 = 0.0f, cr0 = 0.0f;
-  bool use_adaptif = false;
-  if (SkinSamplePoints(lm, samples)) {
-    // Radius sampel (px full-res) = 5% lebar oval.
-    float min_x = 1e9f, max_x = -1e9f;
-    for (int i = 0; i < 36; ++i) {
-      const float x = lm.pts[topology::kFaceOvalRing[i]].x;
-      min_x = std::min(min_x, x);
-      max_x = std::max(max_x, x);
-    }
-    const float radius_px =
-        std::max(2.0f, (max_x - min_x) * 0.05f * static_cast<float>(fw));
-    double cb_sum = 0.0, cr_sum = 0.0;
-    int got = 0;
-    for (const Vec2& s : samples) {
-      float cb, cr;
-      if (SampleChromaAt(rgba, fw, fh, stride, s, radius_px, &cb, &cr) > 0) {
-        cb_sum += cb;
-        cr_sum += cr;
-        ++got;
-      }
-    }
-    if (got > 0) {
-      cb0 = static_cast<float>(cb_sum / got);
-      cr0 = static_cast<float>(cr_sum / got);
-      use_adaptif = true;
-    }
-  }
+  // 3) Gerbang warna kulit adaptif memakai kalibrasi pipi + dahi.
+  color_t0 = MaskClock::now();
   ApplySkinColorProb(rgba, fw, fh, stride, region.data(), w, h, cfg_, cb0, cr0,
                      use_adaptif, mask_.data());
-  stage_timings_.color_gate_ms = ms_since(color_t0);
+  stage_timings_.color_gate_ms += ms_since(color_t0);
   feature_t0 = MaskClock::now();
 
   // 4) Feather PER-REGION (M2i 3c): tepi luar = feather_bias; lubang fitur
@@ -956,8 +1055,90 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   stage_timings_.temporal_ms = ms_since(temporal_t0);
   // 7) M2j: inti fitur frame INI selalu keras 0 SETELAH temporal (lubang
   //    mengikuti landmark frame N - bukan tertinggal).
-  for (size_t i = 0; i < mask_.size(); ++i) {
-    if (feat[i]) mask_[i] = 0;
+  //    M2n: filter luma fitur gelap + sinyal sekunder rambut di dahi juga
+  //    diterapkan pada frame saat ini (nol lag).
+  std::fill(hair_probability_.begin(), hair_probability_.end(), 0);
+  if (seg && seg->valid && seg->probs && seg->letterbox) {
+    std::vector<float> p_hair(static_cast<size_t>(n));
+    if (seg->similarity.valid) {
+      SegProbsToMaskClassSimilarity(seg->probs, *seg->letterbox, kSegClassHair,
+                                    w, h, p_hair.data(), seg->similarity,
+                                    kSegInputSize);
+    } else {
+      SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassHair, w, h,
+                          p_hair.data(), kSegInputSize, seg->shift_x,
+                          seg->shift_y);
+    }
+    for (int i = 0; i < n; ++i) {
+      hair_probability_[static_cast<size_t>(i)] = static_cast<uint8_t>(
+          std::clamp(p_hair[static_cast<size_t>(i)] * 255.0f + 0.5f, 0.0f, 255.0f));
+    }
+  }
+  const float sx_f = static_cast<float>(fw) / static_cast<float>(w);
+  const float sy_f = static_cast<float>(fh) / static_cast<float>(h);
+  const float n0_cx = shapes.ellipses.size() >= 1 ? shapes.ellipses[0].cx : 0.0f;
+  const float n0_cy = shapes.ellipses.size() >= 1 ? shapes.ellipses[0].cy : 0.0f;
+  const float n1_cx = shapes.ellipses.size() >= 2 ? shapes.ellipses[1].cx : 0.0f;
+  const float n1_cy = shapes.ellipses.size() >= 2 ? shapes.ellipses[1].cy : 0.0f;
+  const float roi_r =
+      shapes.ellipses.empty()
+          ? 0.0f
+          : std::max(8.0f, eye_basis.valid ? 0.14f * eye_basis.iod
+                                           : shapes.ellipses[0].rx * 4.0f);
+  const float roi_r2 = roi_r * roi_r;
+  for (int y = 0; y < h; ++y) {
+    const int py = std::min(fh - 1, static_cast<int>((y + 0.5f) * sy_f));
+    const uint8_t* row = rgba + static_cast<size_t>(py) * stride;
+    for (int x = 0; x < w; ++x) {
+      const size_t idx = static_cast<size_t>(y) * w + x;
+      if (feat[idx]) {
+        mask_[idx] = 0;
+        continue;
+      }
+      if (mask_[idx] == 0) continue;
+      const float fx = (x + 0.5f) * sx_f;
+      const float fy = (y + 0.5f) * sy_f;
+      float mul = 1.0f;
+      if (eye_basis.valid && cfg_.hair_forehead_weight > 0.0f &&
+          hair_probability_[idx] > 0) {
+        // Sumbu -v adalah arah ke atas (menuju dahi), dalam satuan IOD.
+        const float up_t = ((fx - eye_basis.eye_mid_x) * (-eye_basis.vx) +
+                            (fy - eye_basis.eye_mid_y) * (-eye_basis.vy)) /
+                           std::max(1.0f, eye_basis.iod);
+        if (up_t > 0.22f) {
+          const float band =
+              std::clamp((up_t - 0.22f) / (0.52f - 0.22f), 0.0f, 1.0f);
+          const float band_s = band * band * (3.0f - 2.0f * band);
+          const float hp = static_cast<float>(hair_probability_[idx]) / 255.0f;
+          const float h_ramp =
+              std::clamp((hp - 0.18f) / (0.62f - 0.18f), 0.0f, 1.0f);
+          const float h_excl =
+              std::clamp(h_ramp * h_ramp * (3.0f - 2.0f * h_ramp) *
+                             cfg_.hair_forehead_weight * last_seg_attenuation_ *
+                             band_s,
+                         0.0f, 1.0f);
+          mul *= (1.0f - h_excl);
+        }
+      }
+      if (has_luma) {
+        const int px = std::min(fw - 1, static_cast<int>(fx));
+        const uint8_t* p = row + static_cast<size_t>(px) * 4;
+        const float lum = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+        bool in_n = false;
+        if (roi_r > 0.0f) {
+          const float d0 =
+              (fx - n0_cx) * (fx - n0_cx) + (fy - n0_cy) * (fy - n0_cy);
+          const float d1 =
+              (fx - n1_cx) * (fx - n1_cx) + (fy - n1_cy) * (fy - n1_cy);
+          in_n = (d0 <= roi_r2) || (shapes.ellipses.size() >= 2 && d1 <= roi_r2);
+        }
+        mul *= ComputeDarkFeatureWeight(lum, luma0, cfg_, in_n);
+      }
+      if (mul < 1.0f) {
+        mask_[idx] = static_cast<uint8_t>(
+            std::clamp(static_cast<float>(mask_[idx]) * mul + 0.5f, 0.0f, 255.0f));
+      }
+    }
   }
   face_valid_ = true;
   return true;
@@ -973,12 +1154,30 @@ bool SkinMaskBuilder::UpdateSegmentationOnly(const LandmarkSet& lm,
   };
   stage_timings_ = SkinMaskStageTimings{};
   color_calibration_valid_ = false;
+  luma_calibration_valid_ = false;
   if (mask_w_ <= 0 || !rgba || fw <= 0 || fh <= 0) return false;
   std::fill(mask_.begin(), mask_.end(), 0);
   std::fill(face_probability_.begin(), face_probability_.end(), 255);
+  std::fill(hair_probability_.begin(), hair_probability_.end(), 0);
   face_valid_ = lm.valid;
+
+  // M2n: kalibrasi chroma & luma kulit selalu dijalankan dari frame saat ini
+  // (tanpa menunggu hasil segmentasi / tetap aktif saat mode Wajah saja).
+  auto color_prep_t0 = MaskClock::now();
+  float cb0 = 0.0f, cr0 = 0.0f, luma0 = 0.0f;
+  bool adaptive = false, has_luma = false;
+  CalibrateFromLandmarks(lm, rgba, fw, fh, stride, &cb0, &cr0, &adaptive,
+                         &luma0, &has_luma);
+  color_cb0_ = cb0;
+  color_cr0_ = cr0;
+  color_calibration_valid_ = adaptive;
+  skin_luma0_ = luma0;
+  luma_calibration_valid_ = has_luma;
+  const float cal_ms = (adaptive || has_luma) ? ms_since(color_prep_t0) : 0.0f;
+
   if (!seg || !seg->valid || !seg->probs || !seg->letterbox) {
     last_seg_attenuation_ = 1.0f;
+    stage_timings_.color_gate_ms = cal_ms;
     return false;  // GPU membentuk domain wajah; tanpa seg trim dinonaktifkan.
   }
   const int w = mask_w_, h = mask_h_, n = w * h;
@@ -986,67 +1185,55 @@ bool SkinMaskBuilder::UpdateSegmentationOnly(const LandmarkSet& lm,
       ComputeSegMotionAttenuation(seg->seg_age_frames, seg->head_speed_px);
   if (cfg_.coverage == SkinCoverage::kFaceOnly) {
     std::vector<float> p_face(static_cast<size_t>(n));
+    std::vector<float> p_hair(static_cast<size_t>(n));
     const auto t0 = MaskClock::now();
     if (seg->similarity.valid) {
       SegProbsToMaskClassSimilarity(seg->probs, *seg->letterbox, kSegClassFaceSkin,
                                     w, h, p_face.data(), seg->similarity,
                                     kSegInputSize);
+      SegProbsToMaskClassSimilarity(seg->probs, *seg->letterbox, kSegClassHair,
+                                    w, h, p_hair.data(), seg->similarity,
+                                    kSegInputSize);
     } else {
       SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassFaceSkin, w, h,
                           p_face.data(), kSegInputSize, seg->shift_x, seg->shift_y);
+      SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassHair, w, h,
+                          p_hair.data(), kSegInputSize, seg->shift_x, seg->shift_y);
     }
-    for (size_t i = 0; i < p_face.size(); ++i)
-      face_probability_[i] = static_cast<uint8_t>(std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+    for (size_t i = 0; i < p_face.size(); ++i) {
+      face_probability_[i] = static_cast<uint8_t>(
+          std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+      hair_probability_[i] = static_cast<uint8_t>(
+          std::clamp(p_hair[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+    }
     stage_timings_.upsample_ms = ms_since(t0);
+    stage_timings_.color_gate_ms = cal_ms;
     return false;  // mesh GPU saja.
   }
   std::vector<float> skin(static_cast<size_t>(n));
   std::vector<float> p_face(static_cast<size_t>(n));
+  std::vector<float> p_hair(static_cast<size_t>(n));
   auto t0 = MaskClock::now();
   if (seg->similarity.valid) {
-    SegProbsToMaskSkinAndFaceSimilarity(seg->probs, *seg->letterbox, w, h,
-                                        skin.data(), p_face.data(),
-                                        seg->similarity, kSegInputSize);
+    SegProbsToMaskSkinFaceHairSimilarity(seg->probs, *seg->letterbox, w, h,
+                                         skin.data(), p_face.data(),
+                                         p_hair.data(), seg->similarity,
+                                         kSegInputSize);
   } else {
     SegProbsToMaskSkinAndFace(seg->probs, *seg->letterbox, w, h, skin.data(),
                               p_face.data(), kSegInputSize, seg->shift_x,
                               seg->shift_y);
+    SegProbsToMaskClass(seg->probs, *seg->letterbox, kSegClassHair, w, h,
+                        p_hair.data(), kSegInputSize, seg->shift_x,
+                        seg->shift_y);
   }
-  for (size_t i = 0; i < p_face.size(); ++i)
-    face_probability_[i] = static_cast<uint8_t>(std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+  for (size_t i = 0; i < p_face.size(); ++i) {
+    face_probability_[i] = static_cast<uint8_t>(
+        std::clamp(p_face[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+    hair_probability_[i] = static_cast<uint8_t>(
+        std::clamp(p_hair[i] * 255.0f + 0.5f, 0.0f, 255.0f));
+  }
   stage_timings_.upsample_ms = ms_since(t0);
-
-  // Sampel CbCr dari tiga area landmark (CPU), lalu gerbang per-piksel
-  // dijalankan di shader mask GPU pada resolusi mask — bukan frame thread.
-  auto color_prep_t0 = MaskClock::now();
-  float cb0 = 0.0f, cr0 = 0.0f;
-  bool adaptive = false;
-  color_calibration_valid_ = false;
-  Vec2 samples[3];
-  if (lm.valid && SkinSamplePoints(lm, samples)) {
-    float min_x = 1.0f, max_x = 0.0f;
-    for (int i = 0; i < 36; ++i) {
-      const float x = lm.pts[topology::kFaceOvalRing[i]].x;
-      min_x = std::min(min_x, x); max_x = std::max(max_x, x);
-    }
-    const float radius = std::max(2.0f, (max_x - min_x) * 0.05f * fw);
-    double cbs = 0.0, crs = 0.0;
-    int got = 0;
-    for (const Vec2& p : samples) {
-      float cb = 0.0f, cr = 0.0f;
-      if (SampleChromaAt(rgba, fw, fh, stride, p, radius, &cb, &cr) > 0) {
-        cbs += cb; crs += cr; ++got;
-      }
-    }
-    if (got) {
-      cb0 = static_cast<float>(cbs / got);
-      cr0 = static_cast<float>(crs / got);
-      adaptive = true;
-      color_cb0_ = cb0;
-      color_cr0_ = cr0;
-      color_calibration_valid_ = true;
-    }
-  }
   t0 = MaskClock::now();
   // Hanya upsample/strength (plus redaman seg saat gerak cepat & seg tua)
   // dikirim ke texture R8; edge color gate dilakukan GPU pada pass komposisi.
@@ -1056,7 +1243,7 @@ bool SkinMaskBuilder::UpdateSegmentationOnly(const LandmarkSet& lm,
     mask_[static_cast<size_t>(i)] =
         static_cast<uint8_t>(v * 255.0f + 0.5f);
   }
-  stage_timings_.color_gate_ms = adaptive ? ms_since(color_prep_t0) : 0.0f;
+  stage_timings_.color_gate_ms = cal_ms;
   face_valid_ = lm.valid;
   return true;
 }

@@ -97,10 +97,12 @@ void ComputeF5DiffReport(const uint8_t* raw, const uint8_t* out,
       int band = m < 0.01f ? 0 : (m < 0.1f ? 1 : (m < 0.5f ? 2 : (m < 0.9f ? 3 : 4)));
       rep->per_range[band].sum += d;
       ++rep->per_range[band].n;
+      if (d >= 3.0) ++rep->per_range[band].ge3_n;
       int cls = argmax_seg ? argmax_seg[static_cast<size_t>(y) * w + x] : 0;
       if (cls < 0 || cls > 5) cls = 0;
       rep->per_class[cls].sum += d;
       ++rep->per_class[cls].n;
+      if (d >= 3.0) ++rep->per_class[cls].ge3_n;
       if (m < 8.0f / 255.0f) {
         rep->outside_mean += d;
         ++rep->outside_n;

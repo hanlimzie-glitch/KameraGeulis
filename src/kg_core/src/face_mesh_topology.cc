@@ -384,4 +384,144 @@ ExclusionShapes BuildExclusionShapes(const float* xy) {
   return out;
 }
 
+namespace {
+inline float PixelLumaRgba(const uint8_t* p) {
+  return 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+}
+
+void FindDarkBlobInNostrilRoi(const ExclusionEllipse& anchor,
+                              const ExclusionEllipse* other_anchor,
+                              const uint8_t* rgba, int fw, int fh, int stride,
+                              float skin_luma, float iod_px,
+                              NostrilRoiInfo* info) {
+  *info = NostrilRoiInfo{};
+  info->anchor_cx = anchor.cx;
+  info->anchor_cy = anchor.cy;
+  info->dark_cx = anchor.cx;
+  info->dark_cy = anchor.cy;
+  info->excl_cx = anchor.cx;
+  info->excl_cy = anchor.cy;
+  const float roi_r =
+      std::max(8.0f, (iod_px > 1.0f ? 0.14f * iod_px : anchor.rx * 4.0f));
+  info->roi_radius_px = roi_r;
+  if (!rgba || fw <= 0 || fh <= 0 || stride < fw * 4 || skin_luma < 20.0f) {
+    return;
+  }
+  const float dark_thresh = 0.58f * skin_luma;
+  const int x0 = std::max(0, static_cast<int>(std::floor(anchor.cx - roi_r)));
+  const int x1 = std::min(fw - 1, static_cast<int>(std::ceil(anchor.cx + roi_r)));
+  const int y0 = std::max(0, static_cast<int>(std::floor(anchor.cy - roi_r)));
+  const int y1 = std::min(fh - 1, static_cast<int>(std::ceil(anchor.cy + roi_r)));
+  const float r2 = roi_r * roi_r;
+
+  float min_y = 1e9f;
+  int min_px = -1, min_py = -1;
+  int dark_n = 0;
+  for (int y = y0; y <= y1; ++y) {
+    const uint8_t* row = rgba + static_cast<size_t>(y) * stride;
+    for (int x = x0; x <= x1; ++x) {
+      const float dx = (x + 0.5f) - anchor.cx;
+      const float dy = (y + 0.5f) - anchor.cy;
+      const float d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      if (other_anchor) {
+        const float odx = (x + 0.5f) - other_anchor->cx;
+        const float ody = (y + 0.5f) - other_anchor->cy;
+        if (odx * odx + ody * ody < d2) continue;
+      }
+      const float lum = PixelLumaRgba(row + static_cast<size_t>(x) * 4);
+      if (lum < min_y) {
+        min_y = lum;
+        min_px = x;
+        min_py = y;
+      }
+      if (lum < dark_thresh) ++dark_n;
+    }
+  }
+  const int min_dark_pixels = (fw >= 640) ? 4 : 1;
+  if (min_px < 0 || dark_n < min_dark_pixels || min_y >= dark_thresh) {
+    return;
+  }
+
+  // Hitung centroid berbobot kuadrat di sekitar piksel tergelap agar inti
+  // lubang hidung tetap terkunci meski tepi ROI menyentuh bayangan sayap.
+  const float core_r =
+      std::min(roi_r, std::max(5.0f, iod_px > 1.0f ? 0.065f * iod_px : anchor.rx * 2.0f));
+  const float core_r2 = core_r * core_r;
+  const int cx0 = std::max(x0, static_cast<int>(std::floor(min_px + 0.5f - core_r)));
+  const int cx1 = std::min(x1, static_cast<int>(std::ceil(min_px + 0.5f + core_r)));
+  const int cy0 = std::max(y0, static_cast<int>(std::floor(min_py + 0.5f - core_r)));
+  const int cy1 = std::min(y1, static_cast<int>(std::ceil(min_py + 0.5f + core_r)));
+  double wx = 0.0, wy = 0.0, wsum = 0.0;
+  for (int y = cy0; y <= cy1; ++y) {
+    const uint8_t* row = rgba + static_cast<size_t>(y) * stride;
+    for (int x = cx0; x <= cx1; ++x) {
+      const float dx = (x + 0.5f) - (min_px + 0.5f);
+      const float dy = (y + 0.5f) - (min_py + 0.5f);
+      if (dx * dx + dy * dy > core_r2) continue;
+      const float lum = PixelLumaRgba(row + static_cast<size_t>(x) * 4);
+      if (lum >= dark_thresh) continue;
+      const float diff = dark_thresh - lum;
+      const double w = static_cast<double>(diff) * diff;
+      wx += static_cast<double>(x + 0.5f) * w;
+      wy += static_cast<double>(y + 0.5f) * w;
+      wsum += w;
+    }
+  }
+  if (wsum > 0.0) {
+    info->dark_cx = static_cast<float>(wx / wsum);
+    info->dark_cy = static_cast<float>(wy / wsum);
+    info->found_dark_blob = true;
+  }
+}
+}  // namespace
+
+void RefineNostrilEllipsesFromLuma(const ExclusionShapes& base_shapes,
+                                  const uint8_t* rgba, int fw, int fh,
+                                  int stride, float skin_luma, float iod_px,
+                                  ExclusionShapes* out_shapes,
+                                  NostrilRoiInfo out_info[2]) {
+  if (!out_shapes) return;
+  *out_shapes = base_shapes;
+  if (base_shapes.ellipses.empty()) return;
+  for (size_t k = 0; k < base_shapes.ellipses.size() && k < 2; ++k) {
+    const ExclusionEllipse& anchor = base_shapes.ellipses[k];
+    const ExclusionEllipse* other =
+        (base_shapes.ellipses.size() >= 2) ? &base_shapes.ellipses[1 - k] : nullptr;
+    NostrilRoiInfo info;
+    FindDarkBlobInNostrilRoi(anchor, other, rgba, fw, fh, stride, skin_luma,
+                             iod_px, &info);
+    if (info.found_dark_blob) {
+      out_shapes->ellipses[k].cx = info.dark_cx;
+      out_shapes->ellipses[k].cy = info.dark_cy;
+    }
+    info.excl_cx = out_shapes->ellipses[k].cx;
+    info.excl_cy = out_shapes->ellipses[k].cy;
+    info.offset_px =
+        std::hypot(info.excl_cx - info.dark_cx, info.excl_cy - info.dark_cy);
+    if (out_info) out_info[k] = info;
+  }
+}
+
+void MeasureNostrilDarkBlobOffset(const ExclusionShapes& final_shapes,
+                                  const uint8_t* rgba, int fw, int fh,
+                                  int stride, float skin_luma, float iod_px,
+                                  NostrilRoiInfo out_info[2]) {
+  if (!out_info) return;
+  for (size_t k = 0; k < 2; ++k) {
+    out_info[k] = NostrilRoiInfo{};
+    if (k >= final_shapes.ellipses.size()) continue;
+    const ExclusionEllipse& anchor = final_shapes.ellipses[k];
+    const ExclusionEllipse* other =
+        (final_shapes.ellipses.size() >= 2) ? &final_shapes.ellipses[1 - k] : nullptr;
+    FindDarkBlobInNostrilRoi(anchor, other, rgba, fw, fh, stride, skin_luma,
+                             iod_px, &out_info[k]);
+    out_info[k].excl_cx = anchor.cx;
+    out_info[k].excl_cy = anchor.cy;
+    out_info[k].offset_px =
+        std::hypot(anchor.cx - out_info[k].dark_cx,
+                   anchor.cy - out_info[k].dark_cy);
+  }
+}
+
 }  // namespace kgcore

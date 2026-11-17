@@ -67,6 +67,11 @@ struct MaskBlender {
   bool has_stats = true;      // RGBA16F bisa dirender (guided aktif)
   bool disabled = false;      // M2i/M2l: dimatikan (flag --no-mask-gl / swa-uji)
   bool warned_no_stats = false;
+  // M2n: state filter gelap per-frame terakhir (dipakai kFsFinal, F6, dan sinkron F5).
+  float last_skin_luma = 0.0f;
+  float last_dark_low_ratio = 0.50f;
+  float last_dark_high_ratio = 0.70f;
+  float last_nostril_roi[2][3] = {{0, 0, 0}, {0, 0, 0}};
   std::string last_error;
 
   GLuint DisplayTex(bool debug_mask) const {
@@ -126,6 +131,12 @@ uniform float u_chroma_retain;
 uniform float u_smooth_eps;
 uniform float u_lift;
 uniform int u_has_stats;
+uniform float u_skin_luma;
+uniform float u_dark_low_ratio;
+uniform float u_dark_high_ratio;
+uniform vec2 u_frame_size;
+uniform vec3 u_nostril_roi0;
+uniform vec3 u_nostril_roi1;
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 vec3 ycbcr(float r, float g, float b) {
@@ -142,6 +153,23 @@ void main() {
   vec3 raw255 = texture(u_raw, v_uv).rgb * 255.0;
   vec3 beauty255 = texture(u_beauty, v_uv).rgb * 255.0;
   float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
+  if (u_skin_luma > 0.0 && m > 0.0) {
+    float y_px = luma(raw255);
+    float low_r = u_dark_low_ratio;
+    float high_r = u_dark_high_ratio;
+    vec2 px_pos = v_uv * u_frame_size;
+    bool in_n0 = u_nostril_roi0.z > 0.0 &&
+                 distance(px_pos, u_nostril_roi0.xy) <= u_nostril_roi0.z;
+    bool in_n1 = u_nostril_roi1.z > 0.0 &&
+                 distance(px_pos, u_nostril_roi1.xy) <= u_nostril_roi1.z;
+    if (in_n0 || in_n1) {
+      low_r = min(0.85, low_r + 0.06);
+      high_r = max(low_r + 0.05, high_r + 0.04);
+    }
+    float low = low_r * u_skin_luma;
+    float high = max(low + 1.0, high_r * u_skin_luma);
+    m *= smoothstep(low, high, y_px);
+  }
   if (m < (8.0 / 255.0)) { frag = vec4(raw255 / 255.0, 1.0); return; }
 
   float yb = luma(beauty255) / 255.0;
@@ -170,10 +198,35 @@ in vec2 v_uv;
 out vec4 frag;
 uniform sampler2D u_out;
 uniform sampler2D u_mask;
+uniform sampler2D u_raw;
 uniform float u_gain;
+uniform float u_skin_luma;
+uniform float u_dark_low_ratio;
+uniform float u_dark_high_ratio;
+uniform vec2 u_frame_size;
+uniform vec3 u_nostril_roi0;
+uniform vec3 u_nostril_roi1;
 void main() {
   vec3 c = texture(u_out, v_uv).rgb;
   float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
+  if (u_skin_luma > 0.0 && m > 0.0) {
+    vec3 raw255 = texture(u_raw, v_uv).rgb * 255.0;
+    float y_px = dot(raw255, vec3(0.299, 0.587, 0.114));
+    float low_r = u_dark_low_ratio;
+    float high_r = u_dark_high_ratio;
+    vec2 px_pos = v_uv * u_frame_size;
+    bool in_n0 = u_nostril_roi0.z > 0.0 &&
+                 distance(px_pos, u_nostril_roi0.xy) <= u_nostril_roi0.z;
+    bool in_n1 = u_nostril_roi1.z > 0.0 &&
+                 distance(px_pos, u_nostril_roi1.xy) <= u_nostril_roi1.z;
+    if (in_n0 || in_n1) {
+      low_r = min(0.85, low_r + 0.06);
+      high_r = max(low_r + 0.05, high_r + 0.04);
+    }
+    float low = low_r * u_skin_luma;
+    float high = max(low + 1.0, high_r * u_skin_luma);
+    m *= smoothstep(low, high, y_px);
+  }
   vec3 red = vec3(1.0, 30.0 / 255.0, 30.0 / 255.0);
   frag = vec4(mix(c, red, m * 0.55), 1.0);
 })";
@@ -223,11 +276,37 @@ uniform vec2 u_skin_cbcr;
 uniform vec4 u_gate_limits;
 uniform vec2 u_gate_radii;
 uniform float u_seg_body_gain;
+uniform vec2 u_frame_size;
+uniform vec2 u_mask_texel;
+uniform vec2 u_eye_mid_px;
+uniform vec2 u_up_dir;
+uniform float u_iod_px;
+uniform float u_hair_forehead_weight;
+uniform float u_seg_attenuation;
 void main() {
   float mesh_coverage = texture(u_face, v_uv).r;
-  // M2m (3b): di dalam jaring wajah, mask HANYA bergantung pada landmark frame
-  // saat ini (tidak dipotong oleh u_face_prob seg yang bisa tertinggal).
+  // M2m/M2n: jaring wajah mengikuti landmark frame saat ini, ditambah sinyal
+  // sekunder probabilitas rambut seg (kompensasi gerak) di pita tepi dahi
+  // dengan feather halus supaya poni tidak ikut terdampak.
   float mesh = mesh_coverage;
+  if (u_has_seg == 1 && u_hair_forehead_weight > 0.0 && u_iod_px > 1.0 &&
+      mesh_coverage > 0.0) {
+    vec2 px_pos = v_uv * u_frame_size;
+    float up_t = dot(px_pos - u_eye_mid_px, u_up_dir) / u_iod_px;
+    float forehead_band = smoothstep(0.22, 0.52, up_t);
+    if (forehead_band > 0.0) {
+      float h0 = texture(u_face_prob, v_uv).g;
+      float h1 = texture(u_face_prob, v_uv + vec2(u_mask_texel.x, 0.0)).g;
+      float h2 = texture(u_face_prob, v_uv - vec2(u_mask_texel.x, 0.0)).g;
+      float h3 = texture(u_face_prob, v_uv + vec2(0.0, u_mask_texel.y)).g;
+      float h4 = texture(u_face_prob, v_uv - vec2(0.0, u_mask_texel.y)).g;
+      float hair_smooth = (h0 * 2.0 + h1 + h2 + h3 + h4) / 6.0;
+      float hair_excl = smoothstep(0.18, 0.62, hair_smooth) *
+                        u_hair_forehead_weight * u_seg_attenuation *
+                        forehead_band;
+      mesh *= (1.0 - clamp(hair_excl, 0.0, 1.0));
+    }
+  }
   float body = texture(u_cpu, v_uv).r * u_seg_body_gain;
   // Di sekitar batas wajah, pengaruh seg dibatasi & di-feather ke batas mesh.
   float near_face_fade = 1.0 - smoothstep(0.0, 0.5, mesh_coverage);
@@ -511,8 +590,25 @@ void main() {
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex_mask);
     glUniform1i(glGetUniformLocation(prog_debug_mask, "u_mask"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, tex_raw);
+    glUniform1i(glGetUniformLocation(prog_debug_mask, "u_raw"), 2);
     glUniform1f(glGetUniformLocation(prog_debug_mask, "u_gain"),
                 std::clamp(gain, 0.0f, 1.0f));
+    glUniform1f(glGetUniformLocation(prog_debug_mask, "u_skin_luma"),
+                last_skin_luma);
+    glUniform1f(glGetUniformLocation(prog_debug_mask, "u_dark_low_ratio"),
+                last_dark_low_ratio);
+    glUniform1f(glGetUniformLocation(prog_debug_mask, "u_dark_high_ratio"),
+                last_dark_high_ratio);
+    glUniform2f(glGetUniformLocation(prog_debug_mask, "u_frame_size"),
+                static_cast<float>(out_w), static_cast<float>(out_h));
+    glUniform3f(glGetUniformLocation(prog_debug_mask, "u_nostril_roi0"),
+                last_nostril_roi[0][0], last_nostril_roi[0][1],
+                last_nostril_roi[0][2]);
+    glUniform3f(glGetUniformLocation(prog_debug_mask, "u_nostril_roi1"),
+                last_nostril_roi[1][0], last_nostril_roi[1][1],
+                last_nostril_roi[1][2]);
     glBindVertexArray(vao);
     Draw();
     RestoreStateAfterPass();
@@ -528,7 +624,10 @@ void main() {
              bool has_seg_probability = false, float skin_cb0 = 128.0f,
              float skin_cr0 = 128.0f, bool has_color_calibration = false,
              const kgcore::SkinMaskConfig* skin_cfg = nullptr,
-             bool use_gpu_mask_gen = true, float seg_body_gain = 1.0f) {
+             bool use_gpu_mask_gen = true, float seg_body_gain = 1.0f,
+             const uint8_t* hair_probability = nullptr,
+             float skin_luma0 = 0.0f, bool has_luma_calibration = false,
+             float seg_attenuation = 1.0f) {
     if (disabled) return false;
     if (!Init() || !raw || !beauty || !mask || w <= 0 || h <= 0 || mw <= 0 ||
         mh <= 0) {
@@ -543,15 +642,28 @@ void main() {
     UploadRGBA(tex_beauty, beauty, w, h);
     UploadCpuMask(mask, mw, mh);
 
+    const kgcore::SkinMaskConfig default_skin_cfg{};
+    const kgcore::SkinMaskConfig& active_skin_cfg =
+        skin_cfg ? *skin_cfg : default_skin_cfg;
+    last_skin_luma = 0.0f;
+    last_dark_low_ratio = active_skin_cfg.dark_luma_low_ratio;
+    last_dark_high_ratio = active_skin_cfg.dark_luma_high_ratio;
+    last_nostril_roi[0][0] = last_nostril_roi[0][1] = last_nostril_roi[0][2] = 0.0f;
+    last_nostril_roi[1][0] = last_nostril_roi[1][1] = last_nostril_roi[1][2] = 0.0f;
+
     bool gpu_mask_ok = false;
     if (use_gpu_mask_gen && landmarks_xy && landmark_count >= 468) {
       gpu_mask_ok = GenerateMaskGpu(
-          landmarks_xy, landmark_count, w, h, mw, mh, face_probability,
-          has_seg_probability, skin_cb0, skin_cr0, has_color_calibration,
-          skin_cfg, seg_body_gain);
+          landmarks_xy, landmark_count, raw, w, h, mw, mh, face_probability,
+          hair_probability, has_seg_probability, skin_cb0, skin_cr0,
+          has_color_calibration, skin_luma0, has_luma_calibration,
+          skin_cfg, seg_body_gain, seg_attenuation);
       cpu_mask_submit_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - cpu_submit_t0)
                                .count();
+    }
+    if (gpu_mask_ok && has_luma_calibration && active_skin_cfg.dark_filter_enabled) {
+      last_skin_luma = skin_luma0;
     }
     if (!gpu_mask_ok) {
       // Fallback sinkron ke mask CPU (baik saat landmark kosong, --no-mask-gen-gpu,
@@ -649,6 +761,20 @@ void main() {
                 std::clamp(cfg.lift, 0.0f, 0.95f));
     glUniform1i(glGetUniformLocation(prog_final, "u_has_stats"),
                 (has_stats && cfg.smooth_amount > 0.0f) ? 1 : 0);
+    glUniform1f(glGetUniformLocation(prog_final, "u_skin_luma"),
+                last_skin_luma);
+    glUniform1f(glGetUniformLocation(prog_final, "u_dark_low_ratio"),
+                last_dark_low_ratio);
+    glUniform1f(glGetUniformLocation(prog_final, "u_dark_high_ratio"),
+                last_dark_high_ratio);
+    glUniform2f(glGetUniformLocation(prog_final, "u_frame_size"),
+                static_cast<float>(w), static_cast<float>(h));
+    glUniform3f(glGetUniformLocation(prog_final, "u_nostril_roi0"),
+                last_nostril_roi[0][0], last_nostril_roi[0][1],
+                last_nostril_roi[0][2]);
+    glUniform3f(glGetUniformLocation(prog_final, "u_nostril_roi1"),
+                last_nostril_roi[1][0], last_nostril_roi[1][1],
+                last_nostril_roi[1][2]);
     Draw();
     RestoreStateAfterPass();
 
@@ -758,8 +884,28 @@ void main() {
   void UploadCpuMask(const uint8_t* data, int w, int h) {
     UploadR8(tex_cpu_mask, data, w, h, cpu_mask_w, cpu_mask_h);
   }
-  void UploadFaceProbability(const uint8_t* data, int w, int h) {
-    UploadR8(tex_face_prob, data, w, h, face_prob_w, face_prob_h);
+  void UploadFaceAndHairProbability(const uint8_t* face_data,
+                                    const uint8_t* hair_data, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    const size_t n = static_cast<size_t>(w) * h;
+    std::vector<uint8_t> rg(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+      rg[i * 2] = face_data ? face_data[i] : 255;
+      rg[i * 2 + 1] = hair_data ? hair_data[i] : 0;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glBindTexture(GL_TEXTURE_2D, tex_face_prob);
+    if (face_prob_w != w || face_prob_h != h) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, w, h, 0, GL_RG,
+                   GL_UNSIGNED_BYTE, nullptr);
+      face_prob_w = w;
+      face_prob_h = h;
+    }
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RG, GL_UNSIGNED_BYTE,
+                    rg.data());
+    SetLinear(tex_face_prob);
   }
   void UploadR8(GLuint tex, const uint8_t* data, int w, int h, int& tex_w,
                 int& tex_h) {
@@ -798,12 +944,15 @@ void main() {
     glViewport(0, 0, w, h);
     return true;
   }
-  bool GenerateMaskGpu(const float* xy_px, int count, int fw, int fh, int mw,
-                       int mh, const uint8_t* face_probability,
+  bool GenerateMaskGpu(const float* xy_px, int count, const uint8_t* raw_rgba,
+                       int fw, int fh, int mw, int mh,
+                       const uint8_t* face_probability,
+                       const uint8_t* hair_probability,
                        bool has_seg_probability, float skin_cb0,
                        float skin_cr0, bool has_color_calibration,
+                       float skin_luma0, bool has_luma_calibration,
                        const kgcore::SkinMaskConfig* skin_cfg,
-                       float seg_body_gain) {
+                       float seg_body_gain, float seg_attenuation) {
     if (!xy_px || count < 468 || fw <= 0 || fh <= 0) return false;
     if (mask_query_pending) {
       GLint available = GL_FALSE;
@@ -857,8 +1006,22 @@ void main() {
                  verts.data(), GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 2));
 
-    // 2) Exclusion polygons + ellipses
-    kgcore::ExclusionShapes shapes = kgcore::BuildExclusionShapes(xy_px);
+    // 2) Exclusion polygons + yaw-adaptive nostril ellipses
+    const kgcore::FaceEyeBasis eye_basis = kgcore::ComputeFaceEyeBasis(xy_px);
+    const kgcore::ExclusionShapes base_shapes = kgcore::BuildExclusionShapes(xy_px);
+    kgcore::ExclusionShapes shapes = base_shapes;
+    kgcore::NostrilRoiInfo nostril_info[2]{};
+    kgcore::RefineNostrilEllipsesFromLuma(
+        base_shapes, raw_rgba, fw, fh, fw * 4,
+        has_luma_calibration ? skin_luma0 : 0.0f, eye_basis.iod,
+        &shapes, nostril_info);
+    for (int k = 0; k < 2; ++k) {
+      if (k < static_cast<int>(base_shapes.ellipses.size())) {
+        last_nostril_roi[k][0] = nostril_info[k].anchor_cx;
+        last_nostril_roi[k][1] = nostril_info[k].anchor_cy;
+        last_nostril_roi[k][2] = nostril_info[k].roi_radius_px;
+      }
+    }
     std::vector<float> exverts;
     auto add_triangle = [&](float ax, float ay, float bx, float by, float cx,
                             float cy) {
@@ -967,11 +1130,10 @@ void main() {
                 1.0f / mw, 1.0f / mh);
     glBindVertexArray(vao); Draw();
 
-    if (face_probability) {
-      UploadFaceProbability(face_probability, mw, mh);
+    if (face_probability || hair_probability) {
+      UploadFaceAndHairProbability(face_probability, hair_probability, mw, mh);
     } else {
-      std::vector<uint8_t> full(static_cast<size_t>(mw) * mh, 255);
-      UploadFaceProbability(full.data(), mw, mh);
+      UploadFaceAndHairProbability(nullptr, nullptr, mw, mh);
     }
     if (!AttachMask(tex_mask, mw, mh, "tex_mask")) return abort_gpu_mask();
     glUseProgram(prog_compose_mask);
@@ -1003,6 +1165,21 @@ void main() {
                 gate_cfg.chroma_radius * gate_cfg.seg_gate_fade);
     glUniform1f(glGetUniformLocation(prog_compose_mask, "u_seg_body_gain"),
                 std::clamp(seg_body_gain, 0.0f, 1.0f));
+    glUniform2f(glGetUniformLocation(prog_compose_mask, "u_frame_size"),
+                static_cast<float>(fw), static_cast<float>(fh));
+    glUniform2f(glGetUniformLocation(prog_compose_mask, "u_mask_texel"),
+                1.0f / static_cast<float>(mw), 1.0f / static_cast<float>(mh));
+    glUniform2f(glGetUniformLocation(prog_compose_mask, "u_eye_mid_px"),
+                eye_basis.eye_mid_x, eye_basis.eye_mid_y);
+    glUniform2f(glGetUniformLocation(prog_compose_mask, "u_up_dir"),
+                eye_basis.valid ? -eye_basis.vx : 0.0f,
+                eye_basis.valid ? -eye_basis.vy : -1.0f);
+    glUniform1f(glGetUniformLocation(prog_compose_mask, "u_iod_px"),
+                eye_basis.valid ? eye_basis.iod : 0.0f);
+    glUniform1f(glGetUniformLocation(prog_compose_mask, "u_hair_forehead_weight"),
+                gate_cfg.hair_forehead_weight);
+    glUniform1f(glGetUniformLocation(prog_compose_mask, "u_seg_attenuation"),
+                std::clamp(seg_attenuation, 0.0f, 1.0f));
     Draw();
     RestoreStateAfterPass();
     if (measure_gpu) {

@@ -115,6 +115,26 @@ def load_test_inputs(image_paths: list[str], count: int = 4) -> list[np.ndarray]
     return xs
 
 
+def quantize_only(fp32_path: pathlib.Path, int8_path: pathlib.Path) -> int:
+    quantize_dynamic(
+        model_input=str(fp32_path),
+        model_output=str(int8_path),
+        weight_type=QuantType.QUInt8,
+    )
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = 2
+    so.inter_op_num_threads = 1
+    sess = ort.InferenceSession(str(int8_path), sess_options=so,
+                                providers=["CPUExecutionProvider"])
+    inp = sess.get_inputs()[0]
+    x = np.zeros((1, 256, 256, 3), dtype=np.float32)
+    y = sess.run(None, {inp.name: x})[0]
+    assert y.shape == (1, 256, 256, 6), f"unexpected shape {y.shape}"
+    print(f"INT8 quantized & verified: {int8_path} "
+          f"({int8_path.stat().st_size / 1e6:.2f} MB vs FP32 {fp32_path.stat().st_size / 1e6:.2f} MB)")
+    return 0
+
+
 def evaluate(fp32_path: pathlib.Path, int8_path: pathlib.Path,
              inputs: list[np.ndarray], threads: int) -> int:
     quantize_dynamic(
@@ -175,20 +195,27 @@ def main() -> int:
     ap.add_argument("--image", nargs="*", default=[], help="Gambar uji opsional")
     ap.add_argument("--threads", type=int, default=max(2, min(6, (os.cpu_count() or 4) // 2)))
     ap.add_argument("--synthetic", action="store_true", help="Uji dengan model sintetis")
+    ap.add_argument("--quantize-only", action="store_true",
+                    help="Hanya kuantisasi FP32 -> INT8 + verifikasi bentuk I/O")
     args = ap.parse_args()
 
-    inputs = load_test_inputs(args.image)
     if args.synthetic:
+        inputs = load_test_inputs(args.image)
         with tempfile.TemporaryDirectory() as td:
             fp32 = pathlib.Path(td) / "syn_fp32.onnx"
             int8 = pathlib.Path(td) / "syn_int8.onnx"
             make_synthetic_onnx(fp32)
+            if args.quantize_only:
+                return quantize_only(fp32, int8)
             return evaluate(fp32, int8, inputs, args.threads)
 
     if not args.fp32:
         ap.error("berikan path model fp32 atau --synthetic")
     fp32 = pathlib.Path(args.fp32)
     int8 = pathlib.Path(args.out_int8) if args.out_int8 else fp32.with_suffix(".int8.onnx")
+    if args.quantize_only:
+        return quantize_only(fp32, int8)
+    inputs = load_test_inputs(args.image)
     return evaluate(fp32, int8, inputs, args.threads)
 
 

@@ -300,3 +300,43 @@ TEST_CASE("M2m: atenuasi seg saat umur seg tua & kepala bergerak cepat") {
   REQUIRE(a_mid > 0.0f);
   REQUIRE(a_high == 0.0f);
 }
+
+TEST_CASE("M2n: CompareSegOutputs argmax/mIoU dan SegProbsToMaskSkinFaceHairSimilarity") {
+  // 4 piksel: 2 cocok latar(0), 1 cocok rambut(1), 1 beda (fp32=rambut(1), int8=kulit(3)).
+  std::vector<float> fp32(4 * kSegClasses, 0.0f);
+  std::vector<float> int8(4 * kSegClasses, 0.0f);
+  fp32[0 * kSegClasses + 0] = int8[0 * kSegClasses + 0] = 1.0f;
+  fp32[1 * kSegClasses + 0] = int8[1 * kSegClasses + 0] = 1.0f;
+  fp32[2 * kSegClasses + 1] = int8[2 * kSegClasses + 1] = 1.0f;
+  fp32[3 * kSegClasses + 1] = 1.0f;
+  int8[3 * kSegClasses + 3] = 1.0f;
+
+  SegCompareStats cmp{};
+  CompareSegOutputs(fp32.data(), int8.data(), 4, &cmp);
+  REQUIRE(std::fabs(cmp.argmax_agreement - 0.75f) < 1e-5f);
+  REQUIRE(cmp.class_active[0]);
+  REQUIRE(cmp.class_active[1]);
+  REQUIRE(cmp.class_active[3]);
+  REQUIRE(std::fabs(cmp.class_iou[0] - 1.0f) < 1e-5f);
+  REQUIRE(std::fabs(cmp.class_iou[1] - 0.5f) < 1e-5f);
+  REQUIRE(std::fabs(cmp.class_iou[3] - 0.0f) < 1e-5f);
+  REQUIRE(std::fabs(cmp.mean_iou - 0.5f) < 1e-5f);
+
+  // Pastikan SegProbsToMaskSkinFaceHairSimilarity mengekstrak peta probabilitas rambut.
+  constexpr int dst = 256, fw = 256, fh = 256, mw = 32, mh = 32;
+  const LetterboxInfo lb = ComputeSegLetterbox(fw, fh, dst);
+  std::vector<float> probs(static_cast<size_t>(dst) * dst * kSegClasses, 0.0f);
+  for (int y = 20; y < 80; ++y) {
+    for (int x = 80; x < 176; ++x) {
+      probs[(static_cast<size_t>(y) * dst + x) * kSegClasses + kSegClassHair] = 1.0f;
+    }
+  }
+  std::vector<float> skin(mw * mh), face(mw * mh), hair(mw * mh);
+  SegSimilarity id_sim{};
+  id_sim.valid = true;
+  SegProbsToMaskSkinFaceHairSimilarity(probs.data(), lb, mw, mh, skin.data(),
+                                       face.data(), hair.data(), id_sim, dst);
+  REQUIRE(hair[6 * mw + 16] > 0.9f);   // y~52, x~132 -> di dalam wilayah rambut
+  REQUIRE(hair[24 * mw + 16] < 0.05f); // y~196 -> di luar wilayah rambut
+}
+

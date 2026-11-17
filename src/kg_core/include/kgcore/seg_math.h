@@ -16,6 +16,7 @@ namespace kgcore {
 constexpr int kSegInputSize = 256;
 constexpr int kSegClasses = 6;
 // P_p kulit = min(1, P(kulit tubuh) + P(kulit wajah)).
+constexpr int kSegClassHair = 1;
 constexpr int kSegClassBodySkin = 2;
 constexpr int kSegClassFaceSkin = 3;
 
@@ -99,11 +100,30 @@ void SegProbsToMaskSkinAndFaceSimilarity(const float* probs,
                                          float* face_out,
                                          const SegSimilarity& sim,
                                          int dst = kSegInputSize);
+void SegProbsToMaskSkinFaceHairSimilarity(const float* probs,
+                                             const LetterboxInfo& lb, int mw,
+                                             int mh, float* skin_out,
+                                             float* face_out, float* hair_out,
+                                             const SegSimilarity& sim,
+                                             int dst = kSegInputSize);
 void SegProbabilitiesToFrameArgmaxSimilarity(const float* probs,
                                              const LetterboxInfo& lb, int w,
                                              int h, uint8_t* classes,
                                              const SegSimilarity& sim,
                                              int dst = kSegInputSize);
+
+// M2n: statistik perbandingan FP32 vs INT8 (--seg-compare) pada frame yang sama.
+struct SegCompareStats {
+  float argmax_agreement = 0.0f;
+  float mean_iou = 0.0f;
+  float class_iou[kSegClasses] = {0, 0, 0, 0, 0, 0};
+  bool class_active[kSegClasses] = {false, false, false, false, false, false};
+  int active_classes = 0;
+  int total_pixels = 0;
+};
+void CompareSegOutputs(const float* fp32_probs, const float* int8_probs,
+                       int n_pix, SegCompareStats* out,
+                       int n_class = kSegClasses);
 
 // ---- Unletterbox peta probabilitas -> kulit di resolusi mask ----
 // probs: [dst*dst*6] (model), hasilkan skin [mw*mh] dgn bilinear + potong
