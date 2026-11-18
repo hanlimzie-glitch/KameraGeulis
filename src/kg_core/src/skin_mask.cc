@@ -330,6 +330,28 @@ float CalibrateSkinLuma(float cheek_l_y, bool has_l, float cheek_r_y,
   return count > 0 ? static_cast<float>(sum / count) : 0.0f;
 }
 
+float ComputeBlurredLuma5x5(const uint8_t* rgba, int fw, int fh, int stride,
+                             int x, int y) {
+  if (!rgba || fw <= 0 || fh <= 0 || stride < fw * 4) return 0.0f;
+  static constexpr float kGauss[5] = {1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f,
+                                      4.0f / 16.0f, 1.0f / 16.0f};
+  float sum = 0.0f;
+  for (int dy = -2; dy <= 2; ++dy) {
+    const int yy = std::clamp(y + dy, 0, fh - 1);
+    const uint8_t* row = rgba + static_cast<size_t>(yy) * stride;
+    const float wy = kGauss[dy + 2];
+    float row_sum = 0.0f;
+    for (int dx = -2; dx <= 2; ++dx) {
+      const int xx = std::clamp(x + dx, 0, fw - 1);
+      const uint8_t* p = row + static_cast<size_t>(xx) * 4;
+      const float lum = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+      row_sum += lum * kGauss[dx + 2];
+    }
+    sum += row_sum * wy;
+  }
+  return sum;
+}
+
 float ComputeDarkFeatureWeight(float pixel_luma, float skin_luma,
                                const SkinMaskConfig& cfg,
                                bool in_nostril_roi) {
@@ -513,27 +535,57 @@ void BoxBlurFloatV(const float* src, float* dst, int w, int h, int r) {
 
 void SmoothLumaGuidedCpu(const uint8_t* rgba_in, int w, int h, int radius,
                          float eps, float amount, uint8_t* rgba_out) {
+  SmoothLumaGuidedMaskedCpu(rgba_in, nullptr, w, h, w, h, radius, eps, amount,
+                            1.0f, rgba_out);
+}
+
+void SmoothLumaGuidedMaskedCpu(const uint8_t* rgba_in, const uint8_t* mask,
+                               int mw, int mh, int w, int h, int radius,
+                               float eps, float amount, float gain,
+                               uint8_t* rgba_out) {
   if (!rgba_in || !rgba_out || w <= 0 || h <= 0) return;
   const int n = w * h;
   const int r = std::clamp(radius, 1, 64);
   const float a_amt = std::clamp(amount, 0.0f, 1.0f);
-  std::vector<float> y0(n), y1(n), y2(n), ysq(n);
-  for (int i = 0; i < n; ++i) {
-    const uint8_t* p = rgba_in + static_cast<size_t>(i) * 4;
-    y0[i] = (0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2]) / 255.0f;
-    ysq[i] = y0[i] * y0[i];
+  const float g_val = std::clamp(gain, 0.0f, 1.0f);
+  const bool use_mask = mask != nullptr && mw > 0 && mh > 0;
+  std::vector<float> y0(n), wy(n), wysq(n), wbuf(n);
+  for (int y = 0; y < h; ++y) {
+    const float fv = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
+    for (int x = 0; x < w; ++x) {
+      const int i = y * w + x;
+      const uint8_t* p = rgba_in + static_cast<size_t>(i) * 4;
+      const float lum = (0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2]) / 255.0f;
+      y0[i] = lum;
+      float m_w = 1.0f;
+      if (use_mask) {
+        const float fu = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+        m_w = std::clamp(SampleMaskBilinear(mask, mw, mh, fu, fv) * g_val, 0.0f, 1.0f);
+      }
+      wbuf[i] = m_w;
+      wy[i] = lum * m_w;
+      wysq[i] = lum * lum * m_w;
+    }
   }
-  BoxBlurFloatH(y0.data(), y1.data(), w, h, r);
-  BoxBlurFloatV(y1.data(), y2.data(), w, h, r);   // y2 = meanY
-  std::vector<float> m1(n), m2(n);
-  BoxBlurFloatH(ysq.data(), m1.data(), w, h, r);
-  BoxBlurFloatV(m1.data(), m2.data(), w, h, r);   // m2 = meanY2
+  std::vector<float> tmp1(n), wy_blur(n), wysq_blur(n), w_blur(n);
+  BoxBlurFloatH(wy.data(), tmp1.data(), w, h, r);
+  BoxBlurFloatV(tmp1.data(), wy_blur.data(), w, h, r);
+  BoxBlurFloatH(wysq.data(), tmp1.data(), w, h, r);
+  BoxBlurFloatV(tmp1.data(), wysq_blur.data(), w, h, r);
+  BoxBlurFloatH(wbuf.data(), tmp1.data(), w, h, r);
+  BoxBlurFloatV(tmp1.data(), w_blur.data(), w, h, r);
+
   for (int i = 0; i < n; ++i) {
-    const float var = std::max(0.0f, m2[i] - y2[i] * y2[i]);
-    const float a = var / (var + std::max(eps, 1e-6f));
-    const float yg = a * y0[i] + (1.0f - a) * y2[i];
-    const float ys = y0[i] + (yg - y0[i]) * a_amt;  // mix(Y, yg, amount)
-    const float dy = (ys - y0[i]) * 255.0f;         // geser luma, chroma tetap
+    float ys = y0[i];
+    if (w_blur[i] > 1e-4f) {
+      const float mean_y = wy_blur[i] / w_blur[i];
+      const float mean_y2 = wysq_blur[i] / w_blur[i];
+      const float var = std::max(0.0f, mean_y2 - mean_y * mean_y);
+      const float a = var / (var + std::max(eps, 1e-6f));
+      const float yg = a * y0[i] + (1.0f - a) * mean_y;
+      ys = y0[i] + (yg - y0[i]) * a_amt;  // mix(Y, yg, amount)
+    }
+    const float dy = (ys - y0[i]) * 255.0f;  // geser luma, chroma tetap
     const uint8_t* p = rgba_in + static_cast<size_t>(i) * 4;
     uint8_t* o = rgba_out + static_cast<size_t>(i) * 4;
     for (int c = 0; c < 3; ++c) {
@@ -553,10 +605,11 @@ void ComposeBeautyRaw(const uint8_t* raw, const uint8_t* beauty,
   }
   const float g = std::clamp(gain, 0.0f, 1.0f);
   const float retain = std::clamp(cfg.chroma_retain, 0.0f, 1.0f);
-  // 1) kandidat: beauty dengan luma diguided (butuh buffer sementara)
+  // 1) kandidat: beauty dengan luma diguided berdasar konvolusi ternormalisasi
+  //    berbobot mask (tetangga di luar mask memberi bobot nol -> anti halo).
   std::vector<uint8_t> cand(static_cast<size_t>(w) * h * 4);
-  SmoothLumaGuidedCpu(beauty, w, h, cfg.smooth_radius, cfg.smooth_eps,
-                      cfg.smooth_amount, cand.data());
+  SmoothLumaGuidedMaskedCpu(beauty, mask, mw, mh, w, h, cfg.smooth_radius,
+                            cfg.smooth_eps, cfg.smooth_amount, g, cand.data());
   for (int y = 0; y < h; ++y) {
     const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
     const uint8_t* r = raw + static_cast<size_t>(y) * w * 4;
@@ -578,10 +631,11 @@ void ComposeBeautyRaw(const uint8_t* raw, const uint8_t* beauty,
         const float cv = static_cast<float>(c[i4 + ch]);
         mixc[ch] = rv + (cv - rv) * t;
       }
-      // 2b) M2j: lift Cerahan proporsional (hanya di dalam mask; chroma
-      //     mentah dipertahankan di langkah 3 -> tanpa cast warna).
+      // 2b) M2j/M2o: lift Cerahan proporsional yg memudar halus menuju tepi mask.
       if (cfg.lift > 0.0f) {
-        const float k = cfg.lift * t;
+        const float edge_t = std::clamp((t - 0.08f) / (0.92f - 0.08f), 0.0f, 1.0f);
+        const float lift_w = edge_t * edge_t * (3.0f - 2.0f * edge_t);
+        const float k = cfg.lift * lift_w;
         for (int ch = 0; ch < 3; ++ch) {
           mixc[ch] += k * (255.0f - mixc[ch]);
         }
@@ -699,6 +753,128 @@ void ComputeInMaskMetrics(const uint8_t* raw, const uint8_t* out,
   }
   if (edge_n) met->edge_band_diff = static_cast<float>(edge_sum / edge_n);
   if (out_n) met->outside_diff = static_cast<float>(out_sum / out_n);
+}
+
+void ComputeHairlineMetrics(const uint8_t* raw, const uint8_t* out,
+                            const uint8_t* mask, int mw, int mh, int w, int h,
+                            float gain, const LandmarkSet& lm,
+                            HairlineMetrics* met) {
+  if (!met) return;
+  *met = HairlineMetrics{};
+  if (!raw || !out || !mask || mw <= 0 || mh <= 0 || w <= 0 || h <= 0 ||
+      !lm.valid) {
+    return;
+  }
+  std::vector<float> xy(kLandmarkCount * 2);
+  for (size_t i = 0; i < kLandmarkCount; ++i) {
+    xy[i * 2] = lm.pts[i].x * static_cast<float>(w);
+    xy[i * 2 + 1] = lm.pts[i].y * static_cast<float>(h);
+  }
+  const FaceEyeBasis basis = ComputeFaceEyeBasis(xy.data());
+  if (!basis.valid || basis.iod < 8.0f) return;
+
+  const float g = std::clamp(gain, 0.0f, 1.0f);
+  std::vector<float> m_full(static_cast<size_t>(w) * h, 0.0f);
+  std::vector<uint8_t> in_forehead(static_cast<size_t>(w) * h, 0);
+  auto luma_at = [](const uint8_t* p) {
+    return 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+  };
+
+  for (int y = 0; y < h; ++y) {
+    const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
+    const float fy = static_cast<float>(y) + 0.5f;
+    for (int x = 0; x < w; ++x) {
+      const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+      const size_t idx = static_cast<size_t>(y) * w + x;
+      m_full[idx] = std::clamp(SampleMaskBilinear(mask, mw, mh, u, v) * g, 0.0f, 1.0f);
+      const float fx = static_cast<float>(x) + 0.5f;
+      const float dx = fx - basis.eye_mid_x;
+      const float dy = fy - basis.eye_mid_y;
+      const float u_t = (dx * basis.ux + dy * basis.uy) / basis.iod;
+      const float up_t = (dx * (-basis.vx) + dy * (-basis.vy)) / basis.iod;
+      if (up_t >= 0.25f && up_t <= 1.25f && std::fabs(u_t) <= 0.78f) {
+        in_forehead[idx] = 1;
+      }
+    }
+  }
+
+  // Pita garis rambut: piksel di zona dahi dalam jarak <= 6 px dari transisi
+  // mask (dimana m < 0.25 bertetangga atau piksel berada pada batas dahi).
+  // Strip 6 px di dalam garis rambut: piksel dahi dengan m >= 0.50 yang
+  // berjarak <= 6 px dari piksel luar garis rambut (m < 0.25).
+  constexpr int kR = 6;
+  double strip_raw = 0.0, strip_out = 0.0;
+  double int_raw = 0.0, int_out = 0.0;
+  int band_n = 0, rough_n = 0, strip_n = 0, int_n = 0;
+
+  for (int y = 0; y < h; ++y) {
+    const float fy = static_cast<float>(y) + 0.5f;
+    for (int x = 0; x < w; ++x) {
+      const size_t idx = static_cast<size_t>(y) * w + x;
+      const float m = m_full[idx];
+      if (in_forehead[idx]) {
+        bool near_outside = false;
+        bool near_inside = false;
+        const int x0 = std::max(0, x - kR), x1 = std::min(w - 1, x + kR);
+        const int y0 = std::max(0, y - kR), y1 = std::min(h - 1, y + kR);
+        for (int ny = y0; ny <= y1 && (!near_outside || !near_inside); ny += 2) {
+          for (int nx = x0; nx <= x1; nx += 2) {
+            const float nm = m_full[static_cast<size_t>(ny) * w + nx];
+            if (nm < 0.25f) near_outside = true;
+            if (nm >= 0.75f) near_inside = true;
+            if (near_outside && near_inside) break;
+          }
+        }
+        if ((near_outside && near_inside) || (m >= 0.05f && m <= 0.95f)) {
+          ++band_n;
+          if (m >= 0.05f && m <= 0.95f) ++rough_n;
+        }
+        if (m >= 0.50f && near_outside) {
+          const uint8_t* pr = raw + idx * 4;
+          const uint8_t* po = out + idx * 4;
+          strip_raw += luma_at(pr);
+          strip_out += luma_at(po);
+          ++strip_n;
+        }
+      }
+      // Kulit interior: di dalam mask (m >= 0.90) pada zona pipi / dahi bawah.
+      if (m >= 0.90f) {
+        const float fx = static_cast<float>(x) + 0.5f;
+        const float dx = fx - basis.eye_mid_x;
+        const float dy = fy - basis.eye_mid_y;
+        const float u_t = (dx * basis.ux + dy * basis.uy) / basis.iod;
+        const float up_t = (dx * (-basis.vx) + dy * (-basis.vy)) / basis.iod;
+        if (up_t >= -0.60f && up_t <= 0.35f && std::fabs(u_t) <= 0.85f) {
+          const uint8_t* pr = raw + idx * 4;
+          const uint8_t* po = out + idx * 4;
+          int_raw += luma_at(pr);
+          int_out += luma_at(po);
+          ++int_n;
+        }
+      }
+    }
+  }
+
+  met->band_n = band_n;
+  met->rough_n = rough_n;
+  met->roughness_pct =
+      band_n > 0 ? (100.0f * static_cast<float>(rough_n) / band_n) : 0.0f;
+  met->strip_n = strip_n;
+  met->interior_n = int_n;
+  if (strip_n > 0) {
+    met->strip_raw_luma = static_cast<float>(strip_raw / strip_n);
+    met->strip_out_luma = static_cast<float>(strip_out / strip_n);
+  }
+  if (int_n > 0) {
+    met->interior_raw_luma = static_cast<float>(int_raw / int_n);
+    met->interior_out_luma = static_cast<float>(int_out / int_n);
+  }
+  if (strip_n > 0 && int_n > 0) {
+    met->halo_out_diff = met->strip_out_luma - met->interior_out_luma;
+    met->halo_filter_delta =
+        (met->strip_out_luma - met->strip_raw_luma) -
+        (met->interior_out_luma - met->interior_raw_luma);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +1017,7 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   ExclusionShapes shapes = base_shapes;
   NostrilRoiInfo nostril_info[2]{};
   RefineNostrilEllipsesFromLuma(base_shapes, rgba, fw, fh, stride, luma0,
-                                eye_basis.iod, &shapes, nostril_info);
+                                eye_basis.iod, &shapes, nostril_info, xy_px);
   for (const auto& e : shapes.ellipses) {
     const Vec2 c_norm(e.cx / static_cast<float>(fw),
                       e.cy / static_cast<float>(fh));
@@ -1083,12 +1259,11 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
   const float roi_r =
       shapes.ellipses.empty()
           ? 0.0f
-          : std::max(8.0f, eye_basis.valid ? 0.14f * eye_basis.iod
-                                           : shapes.ellipses[0].rx * 4.0f);
+          : std::max(14.0f, eye_basis.valid ? 0.30f * eye_basis.iod
+                                            : shapes.ellipses[0].rx * 8.0f);
   const float roi_r2 = roi_r * roi_r;
   for (int y = 0; y < h; ++y) {
     const int py = std::min(fh - 1, static_cast<int>((y + 0.5f) * sy_f));
-    const uint8_t* row = rgba + static_cast<size_t>(py) * stride;
     for (int x = 0; x < w; ++x) {
       const size_t idx = static_cast<size_t>(y) * w + x;
       if (feat[idx]) {
@@ -1122,8 +1297,12 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
       }
       if (has_luma) {
         const int px = std::min(fw - 1, static_cast<int>(fx));
-        const uint8_t* p = row + static_cast<size_t>(px) * 4;
-        const float lum = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+        const float lum =
+            (cfg_.dark_luma_blur_radius >= 2)
+                ? ComputeBlurredLuma5x5(rgba, fw, fh, stride, px, py)
+                : (0.299f * rgba[static_cast<size_t>(py) * stride + px * 4 + 0] +
+                   0.587f * rgba[static_cast<size_t>(py) * stride + px * 4 + 1] +
+                   0.114f * rgba[static_cast<size_t>(py) * stride + px * 4 + 2]);
         bool in_n = false;
         if (roi_r > 0.0f) {
           const float d0 =
@@ -1137,6 +1316,34 @@ bool SkinMaskBuilder::Update(const LandmarkSet& lm, bool face_present,
       if (mul < 1.0f) {
         mask_[idx] = static_cast<uint8_t>(
             std::clamp(static_cast<float>(mask_[idx]) * mul + 0.5f, 0.0f, 255.0f));
+      }
+    }
+  }
+  // M2o: feather 2-3 px pada pita garis rambut (dahi atas) sambil menjaga
+  // inti fitur mata/alis/bibir/lubang hidung tetap nol keras.
+  if (cfg_.hairline_feather_radius > 0 && eye_basis.valid) {
+    std::vector<uint8_t> blurred = mask_;
+    FeatherMask(blurred.data(), w, h, cfg_.hairline_feather_radius, 1);
+    for (int y = 0; y < h; ++y) {
+      const float fy = (y + 0.5f) * sy_f;
+      for (int x = 0; x < w; ++x) {
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        if (feat[idx]) {
+          mask_[idx] = 0;
+          continue;
+        }
+        const float fx = (x + 0.5f) * sx_f;
+        const float up_t = ((fx - eye_basis.eye_mid_x) * (-eye_basis.vx) +
+                            (fy - eye_basis.eye_mid_y) * (-eye_basis.vy)) /
+                           std::max(1.0f, eye_basis.iod);
+        if (up_t > 0.20f) {
+          const float b = std::clamp((up_t - 0.20f) / 0.20f, 0.0f, 1.0f);
+          const float w_f = b * b * (3.0f - 2.0f * b);
+          const float cur = static_cast<float>(mask_[idx]);
+          const float bl = static_cast<float>(blurred[idx]);
+          mask_[idx] = static_cast<uint8_t>(
+              std::clamp(cur + (bl - cur) * w_f + 0.5f, 0.0f, 255.0f));
+        }
       }
     }
   }

@@ -17,6 +17,7 @@ struct StartupArgs {
   bool no_mask_gen_gpu = false; // --no-mask-gen-gpu: M2l - paksa jalur mask CPU M2j (uji A/B)
   bool seg_compare = false; // --seg-compare: M2n - jalankan FP32 & INT8 pada frame yang sama + log metrik
   bool seg_int8 = false;    // --seg-int8: M2n - pakai model segmentasi INT8 bila tersedia
+  bool seg_bench = false;   // --seg-bench: M2o - jalankan matriks benchmark 12 konfigurasi seg (10 dtk/konfig)
 };
 
 struct StartupPaths {

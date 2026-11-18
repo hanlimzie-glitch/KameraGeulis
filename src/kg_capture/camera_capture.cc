@@ -573,6 +573,11 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
     // ---- read loop (kode M2e; ditambah log OK saat frame pertama) ----
     bool read_failed = false;
     int64_t read_hr = 0;
+    int64_t fps_win_start_ms = NowMs();
+    uint64_t fps_win_frames = 0;
+    LONGLONG prev_sample_ts = -1;
+    double ts_win_ms = 0.0;
+    uint64_t ts_win_n = 0;
     while (running_.load()) {
       DWORD stream_index = 0, flags = 0;
       LONGLONG timestamp = 0;
@@ -625,7 +630,32 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
                           data + mi * stride_bytes, row_bytes);
             }
           }
-          // M2e per-frame stats (luma + center alpha) for the 1 s diag log.
+          // M2e/M2o per-frame stats (luma + center alpha + actual MF FPS).
+          const int64_t arrival_ms = frame.timestamp_ms;
+          ++fps_win_frames;
+          if (prev_sample_ts >= 0 && timestamp > prev_sample_ts) {
+            const double d_ms = static_cast<double>(timestamp - prev_sample_ts) / 10000.0;
+            if (d_ms > 1.0 && d_ms < 2000.0) {
+              ts_win_ms += d_ms;
+              ++ts_win_n;
+            }
+          }
+          prev_sample_ts = timestamp;
+          double updated_actual_fps = -1.0;
+          double updated_ts_fps = -1.0;
+          if (arrival_ms - fps_win_start_ms >= 1000) {
+            const double dt_s =
+                static_cast<double>(arrival_ms - fps_win_start_ms) / 1000.0;
+            updated_actual_fps = static_cast<double>(fps_win_frames) / dt_s;
+            updated_ts_fps =
+                (ts_win_n > 0 && ts_win_ms > 0.0)
+                    ? (static_cast<double>(ts_win_n) * 1000.0 / ts_win_ms)
+                    : 0.0;
+            fps_win_start_ms = arrival_ms;
+            fps_win_frames = 0;
+            ts_win_ms = 0.0;
+            ts_win_n = 0;
+          }
           {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.received++;
@@ -633,6 +663,8 @@ void CameraCapture::CaptureThread(int device_index, int req_width, int req_heigh
             stats_.height = height;
             stats_.stride = raw_stride;
             stats_.subtype = subtype_data1;
+            if (updated_actual_fps >= 0.0) stats_.actual_fps = updated_actual_fps;
+            if (updated_ts_fps >= 0.0) stats_.mf_ts_fps = updated_ts_fps;
             const FrameStats fst = ComputeFrameStats(
                 frame.pixels.data(), width, height, stride_bytes,
                 /*flip_vertical=*/false, /*src_is_bgra=*/true);

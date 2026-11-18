@@ -63,6 +63,9 @@ struct AppUiState {
   bool request_load_settings = false;
   bool request_reset_defaults = false;
   bool request_camera_apply = false;
+  bool request_seg_bench = false;  // M2o: mulai benchmark matrix 12 konfigurasi seg
+  bool seg_bench_active = false;
+  std::string seg_bench_status;
 };
 
 // Draws the full UI (large preview handled by the main loop; tabbed panel

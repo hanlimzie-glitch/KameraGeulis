@@ -151,7 +151,7 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
     if (!seg_start_logged_) {
       seg_.Start();
       seg_start_logged_ = true;
-      Log(kTag, "seg thread: mulai (adaptif ~100-333ms, multi-thread sesuai core)");
+      Log(kTag, "seg thread: mulai (BELOW_NORMAL, intra_op=2, allow_spinning=0, periode adaptif 250-1000ms)");
     }
     const LandmarkSet& mask_lm =
         tracker_->CurrentRaw().valid ? tracker_->CurrentRaw() : tracker_->Current();
@@ -165,7 +165,7 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
     prev_pose_anchor_ = curr_pose;
 
     seg_.SubmitFrame(convert_buf_.data(), w, h, static_cast<int>(row_bytes),
-                     /*bgra=*/false, frame_serial_, curr_pose);
+                     /*bgra=*/false, frame_serial_, curr_pose, head_speed_px_);
     LetterboxInfo seg_lb{};
     uint64_t seg_serial = 0;
     double seg_ms_val = 0.0;
@@ -231,13 +231,14 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
       const auto& mt = mask_builder_.StageTimings();
       Log(kTag,
           "lag frame serial=%llu: mesh=%.1fms (~%.1ffr@30) seg=%.1fms "
-          "(lag %.0f fr) mask=%.2fms [upsample=%.2f guided=%.2f "
-          "gate_prep=%.2f union=%.2f temporal=%.2f fitur=%.2f]%s",
+          "(lag %.0f fr, period=%dms, intra_op=%d, spin=%d) mask=%.2fms "
+          "[upsample=%.2f guided=%.2f gate_prep=%.2f union=%.2f temporal=%.2f fitur=%.2f]%s",
           static_cast<unsigned long long>(frame_serial_),
           has_st ? st.mesh_ms : -1.0,
           has_st ? st.mesh_ms / 33.3f : -1.0f, seg_ms_, seg_lag_frames_,
-          mask_ms_, mt.upsample_ms, mt.guided_ms, mt.color_gate_ms, mt.union_ms,
-          mt.temporal_ms, mt.feature_ms,
+          seg_.CurrentPeriodMs(), seg_.IntraOpThreads(),
+          seg_.AllowSpinning() ? 1 : 0, mask_ms_, mt.upsample_ms, mt.guided_ms,
+          mt.color_gate_ms, mt.union_ms, mt.temporal_ms, mt.feature_ms,
           seg_result_ok_ ? "" : " [seg mati -> wajah saja]");
     }
     (void)s_lag_log_n;

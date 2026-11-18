@@ -267,3 +267,71 @@ TEST_CASE("M2n topologi: ROI longgar melacak blob gelap lubang hidung saat yaw")
   }
 }
 
+TEST_CASE("M2o topologi: nose-tip ROI menangkap dua lubang hidung yang bergeser jauh & asimetris") {
+  float xy[468 * 2];
+  MakeSynthetic(xy);
+  constexpr int fw = 1280, fh = 720;
+  // Skalakan landmark ke 1280x720 dan setel ujung hidung (landmark 1 & 4).
+  for (int i = 0; i < 468; ++i) {
+    xy[i * 2] *= 2.0f;
+    xy[i * 2 + 1] *= 1.5f;
+  }
+  const auto basis = kgcore::ComputeFaceEyeBasis(xy);
+  const auto base_shapes = kgcore::BuildExclusionShapes(xy);
+  REQUIRE(base_shapes.ellipses.size() == 2);
+  const float mid_ax = 0.5f * (base_shapes.ellipses[0].cx + base_shapes.ellipses[1].cx);
+  const float mid_ay = 0.5f * (base_shapes.ellipses[0].cy + base_shapes.ellipses[1].cy);
+  // Setel landmark 1 & 4 dekat ujung hidung.
+  xy[1 * 2] = mid_ax - 18.0f;
+  xy[1 * 2 + 1] = mid_ay + 6.0f;
+  xy[4 * 2] = mid_ax - 18.0f;
+  xy[4 * 2 + 1] = mid_ay + 4.0f;
+
+  // Kulit Y ~ 133 (menyerupai log-3 nyata), dua lubang hidung bergeser ~32 px ke
+  // kiri dan ~12 px ke bawah dari anchor, luma ~85 (~0.64x kulit), disambung
+  // bayangan tipis (Y ~ 96) supaya menguji pemisahan dua puncak gelap.
+  std::vector<uint8_t> rgba(static_cast<size_t>(fw) * fh * 4);
+  for (int i = 0; i < fw * fh; ++i) {
+    rgba[i * 4 + 0] = 160;
+    rgba[i * 4 + 1] = 128;
+    rgba[i * 4 + 2] = 104;
+    rgba[i * 4 + 3] = 255;
+  }
+  const float tx[2] = {base_shapes.ellipses[0].cx - 32.0f,
+                       base_shapes.ellipses[1].cx - 30.0f};
+  const float ty[2] = {base_shapes.ellipses[0].cy + 12.0f,
+                       base_shapes.ellipses[1].cy + 13.0f};
+  for (int y = 0; y < fh; ++y) {
+    for (int x = 0; x < fw; ++x) {
+      const float fx = x + 0.5f, fy = y + 0.5f;
+      // Bayangan penghubung tipis di bawah septum
+      if (fx >= tx[0] && fx <= tx[1] && std::fabs(fy - 0.5f * (ty[0] + ty[1])) <= 2.0f) {
+        uint8_t* p = rgba.data() + (static_cast<size_t>(y) * fw + x) * 4;
+        p[0] = 115; p[1] = 92; p[2] = 78;
+      }
+      for (int k = 0; k < 2; ++k) {
+        const float dx = fx - tx[k], dy = fy - ty[k];
+        if ((dx * dx) / 64.0f + (dy * dy) / 36.0f <= 1.0f) {
+          uint8_t* p = rgba.data() + (static_cast<size_t>(y) * fw + x) * 4;
+          p[0] = 102; p[1] = 81; p[2] = 66;  // Y ~ 85.5 (~0.64x dari 133)
+        }
+      }
+    }
+  }
+
+  kgcore::ExclusionShapes refined;
+  kgcore::NostrilRoiInfo info[2]{};
+  kgcore::RefineNostrilEllipsesFromLuma(base_shapes, rgba.data(), fw, fh,
+                                        fw * 4, 133.0f, basis.iod, &refined,
+                                        info, xy);
+  REQUIRE(refined.ellipses.size() == 2);
+  REQUIRE(info[0].found_count == 2);
+  for (int k = 0; k < 2; ++k) {
+    REQUIRE(info[k].found_dark_blob);
+    REQUIRE(info[k].anchor_blob_offset_px > 25.0f);
+    REQUIRE(info[k].offset_px < 2.5f);
+    REQUIRE(std::hypot(refined.ellipses[k].cx - tx[k],
+                       refined.ellipses[k].cy - ty[k]) < 2.5f);
+  }
+}
+

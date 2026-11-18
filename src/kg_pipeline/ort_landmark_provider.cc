@@ -269,6 +269,8 @@ bool OrtLandmarkProvider::LoadSessions_(const std::wstring& dir) {
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "KameraGeulis");
     Ort::SessionOptions opts;
     opts.SetIntraOpNumThreads(1);
+    opts.SetInterOpNumThreads(1);
+    opts.AddConfigEntry("session.intra_op.allow_spinning", "0");
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     det_ = std::make_unique<Ort::Session>(*env_, (dir + L"\\" + kDetFile).c_str(), opts);
     mesh_ = std::make_unique<Ort::Session>(*env_, (dir + L"\\" + kMeshFile).c_str(), opts);

@@ -40,6 +40,11 @@ class SegProvider {
   void Stop();
   // M2k: set minimum spacing between inferences (200–3000 ms), requested by PerfGuard.
   void SetPeriodMs(int period_ms);
+  // M2o: konfigurasi dinamis ORT untuk benchmark matrix & default hemat CPU
+  // (`intra_op` dibatasi [1,3], default 2; `allow_spinning` default false).
+  void ConfigureSession(int intra_op, bool allow_spinning);
+  // M2o: 0 = periode adaptif berdasar gerak kepala; >0 = periode tetap (ms) untuk benchmark.
+  void SetBenchmarkPeriodMs(int period_ms);
   // M2n: flag perbandingan FP32 vs INT8 pada frame yang sama, dan pilih INT8 opsional.
   void SetCompareMode(bool enable) { compare_mode_.store(enable); }
   void SetPreferInt8(bool enable) { prefer_int8_.store(enable); }
@@ -68,7 +73,8 @@ class SegProvider {
   // (murah, ~0.1 ms) lalu membangunkan thread — tidak pernah menunggu ORT.
   void SubmitFrame(const uint8_t* pixels, int w, int h, int stride_bytes,
                    bool bgra, uint64_t frame_serial,
-                   const SegPoseAnchor& pose = {});
+                   const SegPoseAnchor& pose = {},
+                   float head_speed_px = 0.0f);
 
   // Salin hasil terakhir (peta probabilitas 256x256x6 + letterbox + serial
   // frame sumber + ms inferensi). false bila belum pernah ada hasil.
@@ -88,12 +94,15 @@ class SegProvider {
   uint64_t DroppedFrames() const { return dropped_.load(); }  // slot tertimpa
   unsigned HardwareCores() const { return hw_cores_.load(); }
   int IntraOpThreads() const { return intra_threads_.load(); }
+  bool AllowSpinning() const { return allow_spinning_.load(); }
+  int CurrentPeriodMs() const { return current_period_ms_.load(); }
   const char* ExecutionProviderName() const { return ep_name_; }
   const char* PrecisionName() const { return precision_name_; }
 
  private:
   void ThreadMain_();
   bool EnsureModelLoaded_();          // di thread: unduh + verifikasi + session
+  bool RebuildSession_(int intra_op, bool allow_spinning);
   bool EnsureModelFile_(const std::wstring& dir, const wchar_t* file_name,
                         const char* sha256_hex);
   bool DownloadFile_(const wchar_t* host_path, const std::wstring& dest);
@@ -123,11 +132,20 @@ class SegProvider {
   std::atomic<bool> prefer_int8_{false};
   std::atomic<double> last_ms_{0.0};
   std::atomic<double> average_ms_{0.0};
-  std::atomic<int> requested_period_ms_{200};
+  std::atomic<int> requested_period_ms_{250};
+  std::atomic<int> benchmark_period_ms_{0};
+  std::atomic<float> head_speed_px_{0.0f};
+  std::atomic<int> current_period_ms_{1000};
   std::atomic<uint64_t> inferred_{0};
   std::atomic<uint64_t> dropped_{0};
   std::atomic<unsigned> hw_cores_{0};
-  std::atomic<int> intra_threads_{1};
+  std::atomic<int> intra_threads_{2};
+  std::atomic<bool> allow_spinning_{false};
+  std::atomic<int> target_intra_threads_{2};
+  std::atomic<bool> target_allow_spinning_{false};
+  std::atomic<bool> reconfigure_pending_{false};
+  std::wstring loaded_model_path_;
+  std::wstring loaded_int8_path_;
   const char* ep_name_ = "cpu";
   const char* precision_name_ = "fp32";
   std::thread th_;

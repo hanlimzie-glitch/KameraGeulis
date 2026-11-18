@@ -410,17 +410,17 @@ TEST_CASE("M2m skin_mask: pusat lubang hidung kanonik dieksklusi >= 0.95 (mask <
 TEST_CASE("M2n: filter fitur gelap, transisi mulus, dan kalibrasi luma tangguh poni") {
   SkinMaskConfig cfg;
   const float skin_y = 110.0f;
-  // Di bawah ~0.50x -> eksklusi penuh (0.0); di atas ~0.70x -> inklusi penuh (1.0).
+  // M2o: rentang diperlebar 0.45x..0.80x -> <= 49.5 nol penuh, >= 88.0 satu penuh.
   REQUIRE(ComputeDarkFeatureWeight(30.0f, skin_y, cfg) == 0.0f);
-  REQUIRE(ComputeDarkFeatureWeight(55.0f, skin_y, cfg) == 0.0f);
-  const float w_mid_low = ComputeDarkFeatureWeight(60.0f, skin_y, cfg);
+  REQUIRE(ComputeDarkFeatureWeight(49.0f, skin_y, cfg) == 0.0f);
+  const float w_mid_low = ComputeDarkFeatureWeight(55.0f, skin_y, cfg);
   const float w_mid = ComputeDarkFeatureWeight(66.0f, skin_y, cfg);
-  const float w_mid_high = ComputeDarkFeatureWeight(72.0f, skin_y, cfg);
+  const float w_mid_high = ComputeDarkFeatureWeight(77.0f, skin_y, cfg);
   REQUIRE(w_mid_low > 0.0f);
   REQUIRE(w_mid > w_mid_low);
   REQUIRE(w_mid_high > w_mid);
   REQUIRE(w_mid_high < 1.0f);
-  REQUIRE(ComputeDarkFeatureWeight(77.0f, skin_y, cfg) == 1.0f);
+  REQUIRE(ComputeDarkFeatureWeight(88.0f, skin_y, cfg) == 1.0f);
   REQUIRE(ComputeDarkFeatureWeight(110.0f, skin_y, cfg) == 1.0f);
   // Adegan sangat gelap (< dark_min_skin_luma): filter tidak memblokir.
   REQUIRE(ComputeDarkFeatureWeight(10.0f, 15.0f, cfg) == 1.0f);
@@ -451,5 +451,98 @@ TEST_CASE("M2n: filter fitur gelap, transisi mulus, dan kalibrasi luma tangguh p
   // Area poni pada dahi (y=0.26, x=0.50) harus dieksklusi nyaris nol; pipi tetap aktif.
   REQUIRE(WindowMean(b.mask(), mw, mh, 0.50f, 0.26f, 0.03f) < 10.0f);
   REQUIRE(WindowMean(b.mask(), mw, mh, 0.25f, 0.55f, 0.03f) > 150.0f);
+}
+
+TEST_CASE("M2o: smoothing ternormalisasi mask mencegah halo gelap & blur 5x5 menahan bintik noise") {
+  // 1) Blur 5x5 menahan 1-px bintik gelap pada kulit, namun tetap merespons blok gelap >= 5px.
+  const int w = 32, h = 32;
+  std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      uint8_t* p = rgba.data() + (static_cast<size_t>(y) * w + x) * 4;
+      p[0] = 160; p[1] = 140; p[2] = 120; p[3] = 255;
+    }
+  }
+  // 1-px dark speckle at (8,8)
+  rgba[(8 * w + 8) * 4 + 0] = 10;
+  rgba[(8 * w + 8) * 4 + 1] = 10;
+  rgba[(8 * w + 8) * 4 + 2] = 10;
+  // 6x6 dark strand block at (20..25, 20..25)
+  for (int y = 20; y <= 25; ++y) {
+    for (int x = 20; x <= 25; ++x) {
+      uint8_t* p = rgba.data() + (static_cast<size_t>(y) * w + x) * 4;
+      p[0] = 20; p[1] = 20; p[2] = 20;
+    }
+  }
+  const float y_speckle = ComputeBlurredLuma5x5(rgba.data(), w, h, w * 4, 8, 8);
+  const float y_block = ComputeBlurredLuma5x5(rgba.data(), w, h, w * 4, 22, 22);
+  // Bintik 1-px: bobot pusat 36/256 -> tetap dekat kulit (~125+), tidak memicu dark cutoff.
+  REQUIRE(y_speckle > 115.0f);
+  // Blok rambut 6x6: pusat tetap gelap (~20).
+  REQUIRE(y_block < 30.0f);
+
+  // 2) Mask-weighted normalized-convolution smoothing: piksel rambut gelap (Y=20, mask=0)
+  // tidak boleh menarik turun luma piksel kulit (Y=180, mask=1) di sebelahnya.
+  std::vector<uint8_t> sm_in(static_cast<size_t>(w) * h * 4);
+  std::vector<uint8_t> sm_mask(static_cast<size_t>(w) * h, 255);
+  std::vector<uint8_t> sm_out(sm_in.size());
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      uint8_t* p = sm_in.data() + (static_cast<size_t>(y) * w + x) * 4;
+      if (y < 16) {
+        p[0] = 20; p[1] = 20; p[2] = 20; p[3] = 255;
+        sm_mask[static_cast<size_t>(y) * w + x] = 0;
+      } else {
+        p[0] = 180; p[1] = 180; p[2] = 180; p[3] = 255;
+      }
+    }
+  }
+  SmoothLumaGuidedMaskedCpu(sm_in.data(), sm_mask.data(), w, h, w, h, 4,
+                            0.002f, 1.0f, 1.0f, sm_out.data());
+  const uint8_t* bnd = sm_out.data() + (16 * w + 16) * 4;
+  const float bnd_y = 0.299f * bnd[0] + 0.587f * bnd[1] + 0.114f * bnd[2];
+  // Baris y=16 (tepat di batas rambut): tetap ~180 tanpa halo gelap!
+  REQUIRE(bnd_y > 175.0f);
+
+  // 3) ComputeHairlineMetrics pada batas ber-ramp 2-3 px:
+  std::vector<uint8_t> hr_raw(static_cast<size_t>(w) * h * 4);
+  std::vector<uint8_t> hr_beauty(static_cast<size_t>(w) * h * 4);
+  std::vector<uint8_t> hr_out(static_cast<size_t>(w) * h * 4);
+  std::vector<uint8_t> hr_mask(static_cast<size_t>(w) * h, 0);
+  for (int y = 0; y < h; ++y) {
+    uint8_t mv = 0;
+    if (y == 14) mv = 64;
+    else if (y == 15) mv = 170;
+    else if (y >= 16) mv = 255;
+    for (int x = 0; x < w; ++x) {
+      hr_mask[static_cast<size_t>(y) * w + x] = mv;
+      uint8_t* pr = hr_raw.data() + (static_cast<size_t>(y) * w + x) * 4;
+      uint8_t* pb = hr_beauty.data() + (static_cast<size_t>(y) * w + x) * 4;
+      if (y < 14) { pr[0] = 25; pr[1] = 20; pr[2] = 18; }
+      else        { pr[0] = 160; pr[1] = 135; pr[2] = 115; }
+      pr[3] = 255;
+      pb[0] = static_cast<uint8_t>(std::min(255, pr[0] + 18));
+      pb[1] = static_cast<uint8_t>(std::min(255, pr[1] + 18));
+      pb[2] = static_cast<uint8_t>(std::min(255, pr[2] + 18));
+      pb[3] = 255;
+    }
+  }
+  BeautyComposeConfig bcfg;
+  bcfg.smooth_amount = 0.22f;
+  bcfg.lift = 0.06f;
+  ComposeBeautyRaw(hr_raw.data(), hr_beauty.data(), hr_mask.data(), w, h, w, h,
+                   1.0f, bcfg, hr_out.data());
+  // Rambut y < 14 tidak berubah sama sekali.
+  for (int y = 0; y < 14; ++y) {
+    const size_t i = static_cast<size_t>(y) * w * 4;
+    REQUIRE(hr_out[i] == hr_raw[i]);
+  }
+  HairlineMetrics hlm{};
+  const LandmarkSet synth_lm = MakeSyntheticFace();
+  ComputeHairlineMetrics(hr_raw.data(), hr_out.data(), hr_mask.data(),
+                         w, h, w, h, 1.0f, synth_lm, &hlm);
+  if (hlm.band_n > 0) {
+    REQUIRE(hlm.halo_filter_delta <= 0.5f);
+  }
 }
 

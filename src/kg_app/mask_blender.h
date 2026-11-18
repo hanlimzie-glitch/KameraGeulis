@@ -35,10 +35,12 @@ struct MaskBlender {
   // state inti
   GLuint prog_final = 0, prog_encode = 0, prog_blur = 0;
   GLuint prog_face = 0, prog_excl = 0, prog_excl_blur = 0, prog_compose_mask = 0;
+  GLuint prog_mask_gf_encode = 0, prog_gf_blur = 0, prog_mask_gf_ab = 0, prog_mask_gf_apply = 0;
   GLuint prog_debug_mask = 0, prog_probe = 0;
   GLuint vao = 0, fbo = 0, mesh_vao = 0, mesh_vbo = 0;
-  GLuint tex_raw = 0, tex_beauty = 0, tex_mask = 0, tex_cpu_mask = 0;
+  GLuint tex_raw = 0, tex_beauty = 0, tex_mask = 0, tex_mask_raw = 0, tex_cpu_mask = 0;
   GLuint tex_face = 0, tex_face_prob = 0, tex_excl = 0, tex_excl_blur = 0;
+  GLuint tex_gf_stat = 0, tex_gf_tmp = 0, tex_gf_ab = 0;
   GLuint tex_out_pair[2] = {0, 0};
   int out_front_idx = 0;
   GLuint tex_out = 0;        // selalu menunjuk ke tex_out_pair[out_front_idx]
@@ -60,6 +62,7 @@ struct MaskBlender {
   int target_w = 0, target_h = 0;
   int raw_w = 0, raw_h = 0, beauty_w = 0, beauty_h = 0;
   int stat_w = 0, stat_h = 0, tmp_w = 0, tmp_h = 0;
+  int gf_stat_w = 0, gf_stat_h = 0, gf_tmp_w = 0, gf_tmp_h = 0, gf_ab_w = 0, gf_ab_h = 0;
   double cpu_mask_submit_ms = 0.0;
   bool ready = false;         // tex_out pernah terisi
   bool debug_ready = false;   // tex_out_debug valid untuk frame terakhir
@@ -67,11 +70,14 @@ struct MaskBlender {
   bool has_stats = true;      // RGBA16F bisa dirender (guided aktif)
   bool disabled = false;      // M2i/M2l: dimatikan (flag --no-mask-gl / swa-uji)
   bool warned_no_stats = false;
-  // M2n: state filter gelap per-frame terakhir (dipakai kFsFinal, F6, dan sinkron F5).
+  // M2n/M2o: state filter gelap & hidung per-frame terakhir (dipakai kFsFinal, F6, F5).
   float last_skin_luma = 0.0f;
-  float last_dark_low_ratio = 0.50f;
-  float last_dark_high_ratio = 0.70f;
+  float last_dark_low_ratio = 0.45f;
+  float last_dark_high_ratio = 0.80f;
   float last_nostril_roi[2][3] = {{0, 0, 0}, {0, 0, 0}};
+  kgcore::NostrilRoiInfo last_nostril_info[2]{};
+  int last_nostril_found_count = 0;
+  bool last_mask_guided = false;
   std::string last_error;
 
   GLuint DisplayTex(bool debug_mask) const {
@@ -94,10 +100,13 @@ void main() {
 in vec2 v_uv;
 out vec4 frag;
 uniform sampler2D u_beauty;
+uniform sampler2D u_mask;
+uniform float u_gain;
 void main() {
   vec3 c = texture(u_beauty, v_uv).rgb;
   float y = dot(c, vec3(0.299, 0.587, 0.114));
-  frag = vec4(y, y * y, 0.0, 1.0);
+  float w = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
+  frag = vec4(y * w, y * y * w, w, 1.0);
 })";
     static const char* kFsBlur = R"(#version 330 core
 in vec2 v_uv;
@@ -106,16 +115,70 @@ uniform sampler2D u_in;
 uniform vec2 u_dir;
 uniform int u_radius;
 void main() {
-  float sum_y = 0.0, sum_y2 = 0.0;
+  vec4 sum = vec4(0.0);
   int n = 0;
   for (int i = -u_radius; i <= u_radius; ++i) {
     vec2 uv = v_uv + u_dir * float(i);
-    vec4 t = texture(u_in, uv);
-    sum_y += t.r;
-    sum_y2 += t.g;
+    sum += texture(u_in, uv);
     ++n;
   }
-  frag = vec4(sum_y / float(n), sum_y2 / float(n), 0.0, 1.0);
+  frag = vec4(sum.rgb / float(n), 1.0);
+})";
+    static const char* kFsGfBlur = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_in;
+uniform vec2 u_dir;
+uniform int u_radius;
+void main() {
+  vec4 sum = vec4(0.0);
+  int n = 0;
+  for (int i = -u_radius; i <= u_radius; ++i) {
+    sum += texture(u_in, v_uv + u_dir * float(i));
+    ++n;
+  }
+  frag = sum / float(n);
+})";
+    static const char* kFsMaskGfEncode = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_raw;
+uniform sampler2D u_mask_raw;
+void main() {
+  vec3 c = texture(u_raw, v_uv).rgb;
+  float I = dot(c, vec3(0.299, 0.587, 0.114));
+  float p = clamp(texture(u_mask_raw, v_uv).r, 0.0, 1.0);
+  frag = vec4(I, p, I * I, I * p);
+})";
+    static const char* kFsMaskGfAb = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_gf_stat;
+uniform float u_eps;
+void main() {
+  vec4 s = texture(u_gf_stat, v_uv);
+  float var_I = max(s.z - s.x * s.x, 0.0);
+  float cov_Ip = s.w - s.x * s.y;
+  float a = cov_Ip / (var_I + max(u_eps, 1e-6));
+  float b = s.y - a * s.x;
+  frag = vec4(a, b, 0.0, 1.0);
+})";
+    static const char* kFsMaskGfApply = R"(#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_raw;
+uniform sampler2D u_gf_ab;
+uniform sampler2D u_excl;
+uniform sampler2D u_excl_core;
+void main() {
+  vec3 c = texture(u_raw, v_uv).rgb;
+  float I = dot(c, vec3(0.299, 0.587, 0.114));
+  vec2 ab = texture(u_gf_ab, v_uv).rg;
+  float q = clamp(ab.x * I + ab.y, 0.0, 1.0);
+  float excl = max(texture(u_excl_core, v_uv).r, texture(u_excl, v_uv).r);
+  q *= (1.0 - clamp(excl, 0.0, 1.0));
+  if (q < 0.01) q = 0.0;
+  frag = vec4(q, 0.0, 0.0, 1.0);
 })";
     // Final: bersih TANPA overlay debug F6 (F6 dirender terpisah ke tex_out_debug).
     static const char* kFsFinal = R"(#version 330 core
@@ -139,6 +202,19 @@ uniform vec3 u_nostril_roi0;
 uniform vec3 u_nostril_roi1;
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float blurred_luma_5x5(vec2 uv) {
+  const float k[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);
+  vec2 texel = 1.0 / max(u_frame_size, vec2(1.0));
+  float sum = 0.0;
+  for (int y = -2; y <= 2; ++y) {
+    float wy = k[y + 2];
+    for (int x = -2; x <= 2; ++x) {
+      float w = wy * k[x + 2];
+      sum += luma(texture(u_raw, uv + vec2(float(x), float(y)) * texel).rgb * 255.0) * w;
+    }
+  }
+  return sum / 256.0;
+}
 vec3 ycbcr(float r, float g, float b) {
   float y = luma(vec3(r, g, b));
   return vec3(y, 128.0 + 0.564 * (b - y), 128.0 + 0.713 * (r - y));
@@ -154,7 +230,7 @@ void main() {
   vec3 beauty255 = texture(u_beauty, v_uv).rgb * 255.0;
   float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
   if (u_skin_luma > 0.0 && m > 0.0) {
-    float y_px = luma(raw255);
+    float y_px = blurred_luma_5x5(v_uv);
     float low_r = u_dark_low_ratio;
     float high_r = u_dark_high_ratio;
     vec2 px_pos = v_uv * u_frame_size;
@@ -175,17 +251,22 @@ void main() {
   float yb = luma(beauty255) / 255.0;
   float ys = yb;
   if (u_has_stats == 1 && u_smooth_amount > 0.0) {
-    vec2 st = texture(u_stat, v_uv).rg;
-    float var = max(st.g - st.r * st.r, 0.0);
-    float a = var / (var + max(u_smooth_eps, 1e-6));
-    float yg = a * yb + (1.0 - a) * st.r;
-    ys = mix(yb, yg, u_smooth_amount);
+    vec3 st = texture(u_stat, v_uv).rgb;
+    if (st.b > 1e-4) {
+      float mean_y = st.r / st.b;
+      float mean_y2 = st.g / st.b;
+      float var = max(mean_y2 - mean_y * mean_y, 0.0);
+      float a = var / (var + max(u_smooth_eps, 1e-6));
+      float yg = a * yb + (1.0 - a) * mean_y;
+      ys = mix(yb, yg, u_smooth_amount);
+    }
   }
   float dy = (ys - yb) * 255.0;
   vec3 cand255 = clamp(beauty255 + vec3(dy), 0.0, 255.0);
 
   vec3 mixed255 = mix(raw255, cand255, m);
-  if (u_lift > 0.0) mixed255 += (u_lift * m) * (255.0 - mixed255);
+  float m_lift = smoothstep(0.08, 0.92, m);
+  if (u_lift > 0.0) mixed255 += (u_lift * m_lift) * (255.0 - mixed255);
   vec3 cm = ycbcr(mixed255.r, mixed255.g, mixed255.b);
   vec3 crw = ycbcr(raw255.r, raw255.g, raw255.b);
   float cb = mix(cm.g, crw.g, u_chroma_retain);
@@ -206,12 +287,25 @@ uniform float u_dark_high_ratio;
 uniform vec2 u_frame_size;
 uniform vec3 u_nostril_roi0;
 uniform vec3 u_nostril_roi1;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float blurred_luma_5x5(vec2 uv) {
+  const float k[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);
+  vec2 texel = 1.0 / max(u_frame_size, vec2(1.0));
+  float sum = 0.0;
+  for (int y = -2; y <= 2; ++y) {
+    float wy = k[y + 2];
+    for (int x = -2; x <= 2; ++x) {
+      float w = wy * k[x + 2];
+      sum += luma(texture(u_raw, uv + vec2(float(x), float(y)) * texel).rgb * 255.0) * w;
+    }
+  }
+  return sum / 256.0;
+}
 void main() {
   vec3 c = texture(u_out, v_uv).rgb;
   float m = clamp(texture(u_mask, v_uv).r * u_gain, 0.0, 1.0);
   if (u_skin_luma > 0.0 && m > 0.0) {
-    vec3 raw255 = texture(u_raw, v_uv).rgb * 255.0;
-    float y_px = dot(raw255, vec3(0.299, 0.587, 0.114));
+    float y_px = blurred_luma_5x5(v_uv);
     float low_r = u_dark_low_ratio;
     float high_r = u_dark_high_ratio;
     vec2 px_pos = v_uv * u_frame_size;
@@ -340,10 +434,15 @@ void main() {
     prog_excl = Build(GL_FRAGMENT_SHADER, kFsMaskWhite, "mask_gen.exclude");
     prog_excl_blur = Build(GL_FRAGMENT_SHADER, kFsExclBlur, "mask_gen.exclude_blur");
     prog_compose_mask = Build(GL_FRAGMENT_SHADER, kFsComposeMask, "mask_gen.compose");
+    prog_mask_gf_encode = Build(GL_FRAGMENT_SHADER, kFsMaskGfEncode, "mask_gen.gf_encode");
+    prog_gf_blur = Build(GL_FRAGMENT_SHADER, kFsGfBlur, "mask_gen.gf_blur");
+    prog_mask_gf_ab = Build(GL_FRAGMENT_SHADER, kFsMaskGfAb, "mask_gen.gf_ab");
+    prog_mask_gf_apply = Build(GL_FRAGMENT_SHADER, kFsMaskGfApply, "mask_gen.gf_apply");
     prog_debug_mask = Build(GL_FRAGMENT_SHADER, kFsDebugMask, "mask_blender.debug_mask");
     prog_probe = Build(GL_FRAGMENT_SHADER, kFsProbe, "mask_blender.probe");
     if (!prog_face || !prog_excl || !prog_excl_blur || !prog_compose_mask ||
-        !prog_debug_mask || !prog_probe) {
+        !prog_mask_gf_encode || !prog_gf_blur || !prog_mask_gf_ab ||
+        !prog_mask_gf_apply || !prog_debug_mask || !prog_probe) {
       init_failed = true;
       return false;
     }
@@ -362,7 +461,9 @@ void main() {
     }
     if (!Link(prog_encode, vs) || !Link(prog_blur, vs) ||
         !Link(prog_final, vs) || !Link(prog_debug_mask, vs) ||
-        !Link(prog_probe, vs)) {
+        !Link(prog_probe, vs) || !Link(prog_mask_gf_encode, vs) ||
+        !Link(prog_gf_blur, vs) || !Link(prog_mask_gf_ab, vs) ||
+        !Link(prog_mask_gf_apply, vs)) {
       glDeleteShader(vs);
       init_failed = true;
       return false;
@@ -418,11 +519,15 @@ void main() {
     glGenTextures(1, &tex_raw);
     glGenTextures(1, &tex_beauty);
     glGenTextures(1, &tex_mask);
+    glGenTextures(1, &tex_mask_raw);
     glGenTextures(1, &tex_cpu_mask);
     glGenTextures(1, &tex_face);
     glGenTextures(1, &tex_face_prob);
     glGenTextures(1, &tex_excl);
     glGenTextures(1, &tex_excl_blur);
+    glGenTextures(1, &tex_gf_stat);
+    glGenTextures(1, &tex_gf_tmp);
+    glGenTextures(1, &tex_gf_ab);
     glGenTextures(2, tex_out_pair);
     glGenTextures(1, &tex_out_debug);
     glGenTextures(1, &tex_probe);
@@ -433,11 +538,15 @@ void main() {
     SetLinear(tex_raw);
     SetLinear(tex_beauty);
     SetLinear(tex_mask);
+    SetLinear(tex_mask_raw);
     SetLinear(tex_cpu_mask);
     SetLinear(tex_face);
     SetLinear(tex_face_prob);
     SetLinear(tex_excl);
     SetLinear(tex_excl_blur);
+    SetLinear(tex_gf_stat);
+    SetLinear(tex_gf_tmp);
+    SetLinear(tex_gf_ab);
     SetLinear(tex_out_pair[0]);
     SetLinear(tex_out_pair[1]);
     SetLinear(tex_out_debug);
@@ -469,6 +578,10 @@ void main() {
     if (prog_excl) glDeleteProgram(prog_excl);
     if (prog_excl_blur) glDeleteProgram(prog_excl_blur);
     if (prog_compose_mask) glDeleteProgram(prog_compose_mask);
+    if (prog_mask_gf_encode) glDeleteProgram(prog_mask_gf_encode);
+    if (prog_gf_blur) glDeleteProgram(prog_gf_blur);
+    if (prog_mask_gf_ab) glDeleteProgram(prog_mask_gf_ab);
+    if (prog_mask_gf_apply) glDeleteProgram(prog_mask_gf_apply);
     if (prog_debug_mask) glDeleteProgram(prog_debug_mask);
     if (prog_probe) glDeleteProgram(prog_probe);
     if (vao) glDeleteVertexArrays(1, &vao);
@@ -477,16 +590,19 @@ void main() {
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (mask_timer_query) glDeleteQueries(1, &mask_timer_query);
     const GLuint texes[] = {
-        tex_raw, tex_beauty, tex_mask, tex_cpu_mask, tex_face, tex_face_prob,
-        tex_excl, tex_excl_blur, tex_out_pair[0], tex_out_pair[1],
-        tex_out_debug, tex_probe, tex_stat, tex_tmp};
-    glDeleteTextures(14, texes);
+        tex_raw, tex_beauty, tex_mask, tex_mask_raw, tex_cpu_mask, tex_face,
+        tex_face_prob, tex_excl, tex_excl_blur, tex_gf_stat, tex_gf_tmp,
+        tex_gf_ab, tex_out_pair[0], tex_out_pair[1], tex_out_debug, tex_probe,
+        tex_stat, tex_tmp};
+    glDeleteTextures(18, texes);
     prog_final = prog_encode = prog_blur = prog_face = prog_excl =
-        prog_excl_blur = prog_compose_mask = prog_debug_mask = prog_probe = 0;
+        prog_excl_blur = prog_compose_mask = prog_mask_gf_encode =
+        prog_gf_blur = prog_mask_gf_ab = prog_mask_gf_apply =
+        prog_debug_mask = prog_probe = 0;
     vao = mesh_vao = mesh_vbo = fbo = 0;
-    tex_raw = tex_beauty = tex_mask = tex_cpu_mask = tex_face = tex_face_prob =
-        tex_excl = tex_excl_blur = tex_out = tex_out_debug = tex_probe =
-        tex_stat = tex_tmp = 0;
+    tex_raw = tex_beauty = tex_mask = tex_mask_raw = tex_cpu_mask = tex_face =
+        tex_face_prob = tex_excl = tex_excl_blur = tex_gf_stat = tex_gf_tmp =
+        tex_gf_ab = tex_out = tex_out_debug = tex_probe = tex_stat = tex_tmp = 0;
     tex_out_pair[0] = tex_out_pair[1] = 0;
     out_front_idx = 0;
     out_w = out_h = mask_w = mask_h = 0;
@@ -495,8 +611,11 @@ void main() {
     cpu_mask_w = cpu_mask_h = face_prob_w = face_prob_h = 0;
     target_w = target_h = raw_w = raw_h = beauty_w = beauty_h = 0;
     stat_w = stat_h = tmp_w = tmp_h = 0;
+    gf_stat_w = gf_stat_h = gf_tmp_w = gf_tmp_h = gf_ab_w = gf_ab_h = 0;
     ready = false;
     debug_ready = false;
+    last_mask_guided = false;
+    last_nostril_found_count = 0;
     mask_timer_query = 0;
     mask_query_pending = false;
     last_gpu_mask_ms = 0.0;
@@ -688,7 +807,7 @@ void main() {
     glBindVertexArray(vao);
     glViewport(0, 0, w, h);
 
-    // ---- pass statistik guided (RGBA16F): encode + box H + box V ----
+    // ---- pass statistik guided (RGBA16F): encode (mask-weighted) + box H + box V ----
     if (has_stats && cfg.smooth_amount > 0.0f) {
       Attach16F(tex_stat, stat_w, stat_h, w, h);
       if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -703,6 +822,11 @@ void main() {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex_beauty);
         glUniform1i(glGetUniformLocation(prog_encode, "u_beauty"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, tex_mask);
+        glUniform1i(glGetUniformLocation(prog_encode, "u_mask"), 1);
+        glUniform1f(glGetUniformLocation(prog_encode, "u_gain"),
+                    std::clamp(gain, 0.0f, 1.0f));
         Draw();
         Attach16F(tex_tmp, tmp_w, tmp_h, w, h);
         glUseProgram(prog_blur);
@@ -970,11 +1094,9 @@ void main() {
       AllocateMaskTarget(tex_face, mw, mh);
       AllocateMaskTarget(tex_excl, mw, mh);
       AllocateMaskTarget(tex_excl_blur, mw, mh);
-      AllocateMaskTarget(tex_mask, mw, mh);
+      AllocateMaskTarget(tex_mask_raw, mw, mh);
       target_w = mw;
       target_h = mh;
-      mask_w = mw;
-      mask_h = mh;
     }
 
     auto abort_gpu_mask = [&]() {
@@ -1006,7 +1128,7 @@ void main() {
                  verts.data(), GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 2));
 
-    // 2) Exclusion polygons + yaw-adaptive nostril ellipses
+    // 2) Exclusion polygons + yaw-adaptive nostril ellipses (nose-tip ROI + xy_px)
     const kgcore::FaceEyeBasis eye_basis = kgcore::ComputeFaceEyeBasis(xy_px);
     const kgcore::ExclusionShapes base_shapes = kgcore::BuildExclusionShapes(xy_px);
     kgcore::ExclusionShapes shapes = base_shapes;
@@ -1014,8 +1136,11 @@ void main() {
     kgcore::RefineNostrilEllipsesFromLuma(
         base_shapes, raw_rgba, fw, fh, fw * 4,
         has_luma_calibration ? skin_luma0 : 0.0f, eye_basis.iod,
-        &shapes, nostril_info);
+        &shapes, nostril_info, xy_px);
+    last_nostril_found_count = 0;
     for (int k = 0; k < 2; ++k) {
+      last_nostril_info[k] = nostril_info[k];
+      if (nostril_info[k].found_dark_blob) ++last_nostril_found_count;
       if (k < static_cast<int>(base_shapes.ellipses.size())) {
         last_nostril_roi[k][0] = nostril_info[k].anchor_cx;
         last_nostril_roi[k][1] = nostril_info[k].anchor_cy;
@@ -1135,7 +1260,19 @@ void main() {
     } else {
       UploadFaceAndHairProbability(nullptr, nullptr, mw, mh);
     }
-    if (!AttachMask(tex_mask, mw, mh, "tex_mask")) return abort_gpu_mask();
+    const kgcore::SkinMaskConfig default_skin_cfg{};
+    const kgcore::SkinMaskConfig& gate_cfg = skin_cfg ? *skin_cfg : default_skin_cfg;
+    const bool run_guided = has_stats && gate_cfg.guided_radius > 0;
+    const GLuint compose_target = run_guided ? tex_mask_raw : tex_mask;
+    if (!run_guided && (mask_w != mw || mask_h != mh)) {
+      AllocateMaskTarget(tex_mask, mw, mh);
+      mask_w = mw;
+      mask_h = mh;
+    }
+    if (!AttachMask(compose_target, mw, mh,
+                    run_guided ? "tex_mask_raw" : "tex_mask")) {
+      return abort_gpu_mask();
+    }
     glUseProgram(prog_compose_mask);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_cpu_mask);
     glUniform1i(glGetUniformLocation(prog_compose_mask, "u_cpu"), 0);
@@ -1155,8 +1292,6 @@ void main() {
                 has_color_calibration ? 1 : 0);
     glUniform2f(glGetUniformLocation(prog_compose_mask, "u_skin_cbcr"),
                 skin_cb0, skin_cr0);
-    const kgcore::SkinMaskConfig default_skin_cfg{};
-    const kgcore::SkinMaskConfig& gate_cfg = skin_cfg ? *skin_cfg : default_skin_cfg;
     glUniform4f(glGetUniformLocation(prog_compose_mask, "u_gate_limits"),
                 gate_cfg.cb_min, gate_cfg.cb_max, gate_cfg.cr_min,
                 gate_cfg.cr_max);
@@ -1181,6 +1316,101 @@ void main() {
     glUniform1f(glGetUniformLocation(prog_compose_mask, "u_seg_attenuation"),
                 std::clamp(seg_attenuation, 0.0f, 1.0f));
     Draw();
+
+    // 5) M2o GPU Guided Filter pada mask (statistik half-res RGBA16F, apply full-res
+    //    dengan guide luma tex_raw supaya batas poni/rambut terkunci halus 2-3 px).
+    last_mask_guided = false;
+    if (run_guided) {
+      const int gw = std::max(mw, fw / 2);
+      const int gh = std::max(mh, fh / 2);
+      const int gf_r = std::clamp(gate_cfg.guided_radius, 1, 6);
+      Attach16F(tex_gf_stat, gf_stat_w, gf_stat_h, gw, gh);
+      if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glViewport(0, 0, gw, gh);
+        glUseProgram(prog_mask_gf_encode);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_raw);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_encode, "u_raw"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tex_mask_raw);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_encode, "u_mask_raw"), 1);
+        Draw();
+
+        // Box blur H + V untuk (I, p, I^2, I*p)
+        Attach16F(tex_gf_tmp, gf_tmp_w, gf_tmp_h, gw, gh);
+        glUseProgram(prog_gf_blur);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_gf_stat);
+        glUniform1i(glGetUniformLocation(prog_gf_blur, "u_in"), 0);
+        glUniform2f(glGetUniformLocation(prog_gf_blur, "u_dir"),
+                    1.0f / static_cast<float>(gw), 0.0f);
+        glUniform1i(glGetUniformLocation(prog_gf_blur, "u_radius"), gf_r);
+        Draw();
+
+        Attach16F(tex_gf_stat, gf_stat_w, gf_stat_h, gw, gh);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_gf_tmp);
+        glUniform2f(glGetUniformLocation(prog_gf_blur, "u_dir"),
+                    0.0f, 1.0f / static_cast<float>(gh));
+        Draw();
+
+        // Koefisien linear (a, b)
+        Attach16F(tex_gf_ab, gf_ab_w, gf_ab_h, gw, gh);
+        glUseProgram(prog_mask_gf_ab);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_gf_stat);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_ab, "u_gf_stat"), 0);
+        glUniform1f(glGetUniformLocation(prog_mask_gf_ab, "u_eps"),
+                    gate_cfg.guided_eps);
+        Draw();
+
+        // Box blur H + V untuk (mean_a, mean_b)
+        Attach16F(tex_gf_tmp, gf_tmp_w, gf_tmp_h, gw, gh);
+        glUseProgram(prog_gf_blur);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_gf_ab);
+        glUniform1i(glGetUniformLocation(prog_gf_blur, "u_in"), 0);
+        glUniform2f(glGetUniformLocation(prog_gf_blur, "u_dir"),
+                    1.0f / static_cast<float>(gw), 0.0f);
+        glUniform1i(glGetUniformLocation(prog_gf_blur, "u_radius"), gf_r);
+        Draw();
+
+        Attach16F(tex_gf_ab, gf_ab_w, gf_ab_h, gw, gh);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_gf_tmp);
+        glUniform2f(glGetUniformLocation(prog_gf_blur, "u_dir"),
+                    0.0f, 1.0f / static_cast<float>(gh));
+        Draw();
+
+        // Apply pada resolusi penuh (fw, fh) dengan kunci fitur eksklusi
+        if (mask_w != fw || mask_h != fh) {
+          AllocateMaskTarget(tex_mask, fw, fh);
+          mask_w = fw;
+          mask_h = fh;
+        }
+        if (!AttachMask(tex_mask, fw, fh, "tex_mask_guided")) {
+          return abort_gpu_mask();
+        }
+        glUseProgram(prog_mask_gf_apply);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_raw);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_apply, "u_raw"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tex_gf_ab);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_apply, "u_gf_ab"), 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, tex_excl_blur);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_apply, "u_excl"), 2);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, tex_excl);
+        glUniform1i(glGetUniformLocation(prog_mask_gf_apply, "u_excl_core"), 3);
+        Draw();
+        last_mask_guided = true;
+      } else {
+        // Fallback tanpa guided filter bila RGBA16F gagal
+        if (mask_w != mw || mask_h != mh) {
+          AllocateMaskTarget(tex_mask, mw, mh);
+          mask_w = mw;
+          mask_h = mh;
+        }
+        if (!AttachMask(tex_mask, mw, mh, "tex_mask_fallback")) {
+          return abort_gpu_mask();
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex_cpu_mask);
+        glUseProgram(prog_compose_mask);
+        Draw();
+      }
+    }
     RestoreStateAfterPass();
     if (measure_gpu) {
       glEndQuery(kTimeElapsedQuery);

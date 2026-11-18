@@ -276,17 +276,22 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
   const kg::SkinMaskBuilder& mb = pipeline->MaskBuilder();
   const float gain = pipeline->Tracker().Gain();
   std::vector<uint8_t> gpu_mask, gpu_out;
-  const bool have_gpu_mask = blend_current && skin_only && blender && blender->ReadbackMask(&gpu_mask) &&
-      gpu_mask.size() == static_cast<size_t>(mb.w()) * mb.h();
+  const bool have_gpu_mask = blend_current && skin_only && blender &&
+      blender->mask_w > 0 && blender->mask_h > 0 &&
+      blender->ReadbackMask(&gpu_mask) &&
+      gpu_mask.size() == static_cast<size_t>(blender->mask_w) * blender->mask_h;
   const bool have_gpu_out = blend_current && skin_only && blender && blender->ReadbackOutput(&gpu_out) &&
       gpu_out.size() == static_cast<size_t>(w) * h * 4;
+  const int src_mw = have_gpu_mask ? blender->mask_w : mb.w();
+  const int src_mh = have_gpu_mask ? blender->mask_h : mb.h();
   const uint8_t* mask_data = have_gpu_mask ? gpu_mask.data() : mb.mask().data();
-  const bool mask_ok = mb.configured() &&
-      mb.mask().size() == static_cast<size_t>(mb.w()) * static_cast<size_t>(mb.h());
-  // M2n: sinkronkan mask efektif resolusi penuh dengan penyaring fitur gelap
-  // di kFsFinal supaya mask_*.png dan metrik F5 sesuai 1:1 dengan shader.
+  const bool mask_ok = have_gpu_mask ||
+      (mb.configured() &&
+       mb.mask().size() == static_cast<size_t>(mb.w()) * static_cast<size_t>(mb.h()));
+  // M2n/M2o: sinkronkan mask efektif resolusi penuh dengan penyaring fitur gelap
+  // (luma blur 5x5) di kFsFinal supaya mask_*.png dan metrik F5 sesuai 1:1.
   std::vector<uint8_t> effective_mask_full;
-  int eff_mw = mb.w(), eff_mh = mb.h();
+  int eff_mw = src_mw, eff_mh = src_mh;
   const uint8_t* eff_mask_ptr = mask_data;
   long face_pre_n = 0, dark_excl_n = 0, dark_atten_n = 0;
   const bool apply_fullres_dark =
@@ -294,17 +299,20 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
       !raw_rgba.empty() && raw_w == w && raw_h == h;
   kgcore::NostrilRoiInfo nostril_info[2]{};
   bool have_nostril_info = false;
+  int nostril_found_count = 0;
+  kgcore::LandmarkSet f5_lm{};
   if (mask_ok && !raw_rgba.empty() && raw_w == w && raw_h == h) {
     const auto& lm_raw = pipeline->Tracker().CurrentRaw();
     const auto& lm = lm_raw.valid ? lm_raw : pipeline->Tracker().Current();
+    f5_lm = lm;
     if (lm.valid) {
-      std::vector<float> xy(kgcore::kLandmarkCount * 2);
+      std::vector<float> f5_xy(kgcore::kLandmarkCount * 2);
       for (size_t i = 0; i < kgcore::kLandmarkCount; ++i) {
-        xy[i * 2] = lm.pts[i].x * w;
-        xy[i * 2 + 1] = lm.pts[i].y * h;
+        f5_xy[i * 2] = lm.pts[i].x * w;
+        f5_xy[i * 2 + 1] = lm.pts[i].y * h;
       }
-      const auto basis = kgcore::ComputeFaceEyeBasis(xy.data());
-      const auto base_shapes = kgcore::BuildExclusionShapes(xy.data());
+      const auto basis = kgcore::ComputeFaceEyeBasis(f5_xy.data());
+      const auto base_shapes = kgcore::BuildExclusionShapes(f5_xy.data());
       kgcore::ExclusionShapes refined = base_shapes;
       const float ref_luma =
           mb.has_luma_calibration()
@@ -312,8 +320,11 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
               : (blender ? blender->last_skin_luma : 0.0f);
       kgcore::RefineNostrilEllipsesFromLuma(
           base_shapes, raw_rgba.data(), w, h, w * 4, ref_luma, basis.iod,
-          &refined, nostril_info);
+          &refined, nostril_info, f5_xy.data());
       have_nostril_info = !base_shapes.ellipses.empty();
+      for (int k = 0; k < 2; ++k) {
+        if (nostril_info[k].found_dark_blob) ++nostril_found_count;
+      }
     }
   }
   if (apply_fullres_dark) {
@@ -325,16 +336,23 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
     const float r1 = blender->last_nostril_roi[1][2];
     const float r0_sq = r0 * r0;
     const float r1_sq = r1 * r1;
+    const bool same_res_mask = (src_mw == w && src_mh == h);
     for (int y = 0; y < h; ++y) {
       const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
       const float fy = static_cast<float>(y) + 0.5f;
-      const uint8_t* rrow = raw_rgba.data() + static_cast<size_t>(y) * w * 4;
       for (int x = 0; x < w; ++x) {
         const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
         const float fx = static_cast<float>(x) + 0.5f;
-        const float m_pre = kgcore::SampleMaskBilinear(mask_data, mb.w(), mb.h(), u, v);
-        const uint8_t* p = rrow + static_cast<size_t>(x) * 4;
-        const float y_px = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        const float m_pre = same_res_mask
+            ? (static_cast<float>(mask_data[idx]) / 255.0f)
+            : kgcore::SampleMaskBilinear(mask_data, src_mw, src_mh, u, v);
+        if (m_pre <= 0.0f) {
+          effective_mask_full[idx] = 0;
+          continue;
+        }
+        const float y_px = kgcore::ComputeBlurredLuma5x5(
+            raw_rgba.data(), w, h, w * 4, x, y);
         bool in_n = false;
         if (r0 > 0.0f) {
           const float dx = fx - blender->last_nostril_roi[0][0];
@@ -354,8 +372,7 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
           if (w_dark < 0.95f) ++dark_atten_n;
         }
         const float m_eff = std::clamp(m_pre * w_dark, 0.0f, 1.0f);
-        effective_mask_full[static_cast<size_t>(y) * w + x] =
-            static_cast<uint8_t>(m_eff * 255.0f + 0.5f);
+        effective_mask_full[idx] = static_cast<uint8_t>(m_eff * 255.0f + 0.5f);
       }
     }
     eff_mask_ptr = effective_mask_full.data();
@@ -367,9 +384,11 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
     std::vector<uint8_t> gray;
     if (!effective_mask_full.empty()) {
       gray = effective_mask_full;
+    } else if (src_mw == w && src_mh == h) {
+      gray.assign(mask_data, mask_data + static_cast<size_t>(w) * h);
     } else {
       std::vector<uint8_t> gray_rgba(static_cast<size_t>(w) * h * 4);
-      kgcore::UpsampleMaskToGrayRgba(mask_data, mb.w(), mb.h(), w, h,
+      kgcore::UpsampleMaskToGrayRgba(mask_data, src_mw, src_mh, w, h,
                                      gray_rgba.data());
       gray.resize(static_cast<size_t>(w) * h);
       for (size_t i = 0; i < gray.size(); ++i) gray[i] = gray_rgba[i * 4];
@@ -510,19 +529,40 @@ void DumpDebugFrames(const std::wstring& appdata_dir, const kg::Frame* raw,
     }
     if (have_nostril_info) {
       kgcore::Log("app",
-                  "F5 metrik M2n lubang_hidung: Kanan anchor=(%.1f,%.1f) "
-                  "blob=(%.1f,%.1f) excl=(%.1f,%.1f) offset=%.2f px found=%d | "
+                  "F5 metrik M2o lubang_hidung: found=%d/2 | Kanan anchor=(%.1f,%.1f) "
+                  "blob=(%.1f,%.1f) excl=(%.1f,%.1f) anchor_blob=%.2fpx excl_blob=%.2fpx found=%d | "
                   "Kiri anchor=(%.1f,%.1f) blob=(%.1f,%.1f) excl=(%.1f,%.1f) "
-                  "offset=%.2f px found=%d (roi_r=%.1f px)",
+                  "anchor_blob=%.2fpx excl_blob=%.2fpx found=%d (search=(%.1f,%.1f) roi_r=%.1f px)",
+                  nostril_found_count,
                   nostril_info[0].anchor_cx, nostril_info[0].anchor_cy,
                   nostril_info[0].dark_cx, nostril_info[0].dark_cy,
                   nostril_info[0].excl_cx, nostril_info[0].excl_cy,
+                  nostril_info[0].anchor_blob_offset_px,
                   nostril_info[0].offset_px, nostril_info[0].found_dark_blob ? 1 : 0,
                   nostril_info[1].anchor_cx, nostril_info[1].anchor_cy,
                   nostril_info[1].dark_cx, nostril_info[1].dark_cy,
                   nostril_info[1].excl_cx, nostril_info[1].excl_cy,
+                  nostril_info[1].anchor_blob_offset_px,
                   nostril_info[1].offset_px, nostril_info[1].found_dark_blob ? 1 : 0,
+                  nostril_info[0].search_cx, nostril_info[0].search_cy,
                   nostril_info[0].roi_radius_px);
+    }
+    if (f5_lm.valid) {
+      kgcore::HairlineMetrics hlm{};
+      kgcore::ComputeHairlineMetrics(
+          cmp_raw, cmp_out, eff_mask_ptr, eff_mw, eff_mh, w, h, gain,
+          f5_lm, &hlm);
+      if (hlm.band_n > 0) {
+        kgcore::Log("app",
+                    "F5 metrik M2o hairline: band=%d rough(0.05-0.95)=%.1f%% (%d) | "
+                    "strip6_raw=%.2f strip6_out=%.2f | interior_raw=%.2f interior_out=%.2f | "
+                    "halo_out=%.2f halo_delta=%+.2f | guided=%d",
+                    hlm.band_n, hlm.roughness_pct, hlm.rough_n,
+                    hlm.strip_raw_luma, hlm.strip_out_luma,
+                    hlm.interior_raw_luma, hlm.interior_out_luma,
+                    hlm.halo_out_diff, hlm.halo_filter_delta,
+                    (blender && blender->last_mask_guided) ? 1 : 0);
+      }
     }
     const auto cmp_tel = pipeline->Seg().LatestCompare();
     if (cmp_tel.active) {
@@ -916,6 +956,30 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   std::vector<float> win_cam2screen_ms;
   int64_t pending_cam_ts_ms = -1;
   float last_mask_feat_diff_px = 0.0f;
+  // M2o: state benchmark matrix 12 konfigurasi (--seg-bench / tab Info) +
+  // deteksi MF camera FPS drop.
+  const std::vector<kgcore::SegBenchConfig> bench_matrix =
+      kgcore::BuildSegBenchMatrix();
+  std::vector<kgcore::SegBenchResult> bench_results;
+  bool bench_running = args.seg_bench && !safe;
+  size_t bench_idx = 0;
+  int64_t bench_step_start_ms = 0;
+  uint64_t bench_step_cam_recv0 = 0;
+  uint64_t bench_step_sent0 = 0;
+  uint64_t bench_step_pipe0 = 0;
+  std::vector<float> bench_fps_samples;
+  std::vector<float> bench_c2s_samples;
+  double bench_seg_ms_sum = 0.0;
+  double bench_seg_lag_sum = 0.0;
+  int bench_seg_n = 0;
+  bool bench_cfg_applied = false;
+  if (bench_running) {
+    ui.seg_bench_active = true;
+    ui.seg_bench_status = "Benchmark seg dimulai (12 konfigurasi x 10 dtk)...";
+    kgcore::Log("bench", "mode --seg-bench aktif: 12 konfigurasi x 10 detik");
+  }
+  bool mf_low_light_warned = false;
+  int mf_underdeliver_streak = 0;
 
   // glGetError must run on the context that owns preview.tex (= this thread).
   auto drain_gl_errors = [&] {
@@ -1225,7 +1289,9 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                !blender.disabled && !gpu_mask_gen_disabled);
       pipeline->SetSkinCoverage(perf_guard.ForceFaceOnly() ||
                                 (ui.skin_only && ui.skin_coverage == 1));
-      pipeline->Seg().SetPeriodMs(perf_guard.SegPeriodMs());
+      if (!bench_running) {
+        pipeline->Seg().SetPeriodMs(perf_guard.SegPeriodMs());
+      }
       pipeline->ProcessFrame(frame);
       // M2j: telemetri seg ke HUD (thread sendiri; lag dalam satuan frame).
       ui.seg_ms = pipeline->SegMs();
@@ -1455,7 +1521,125 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     }
     const double perf_now_ms = std::chrono::duration<double, std::milli>(
                                    now.time_since_epoch()).count();
-    perf_guard.Update(perf_now_ms, ui.fps);
+    if (ui.request_seg_bench) {
+      ui.request_seg_bench = false;
+      if (!safe && pipeline_ok && pipeline && !bench_running) {
+        bench_running = true;
+        bench_idx = 0;
+        bench_results.clear();
+        bench_cfg_applied = false;
+        ui.seg_bench_active = true;
+        ui.seg_bench_status = "Benchmark seg dimulai (12 konfig x 10 dtk)...";
+        kgcore::Log("bench", "benchmark seg dimulai dari UI (12 konfig x 10 dtk)");
+      }
+    }
+    if (bench_running && pipeline_ok && pipeline) {
+      const int64_t now_ms_b = static_cast<int64_t>(perf_now_ms);
+      if (!bench_cfg_applied) {
+        const auto& cfg = bench_matrix[bench_idx];
+        pipeline->Seg().ConfigureSession(cfg.intra_op, cfg.allow_spinning);
+        pipeline->Seg().SetBenchmarkPeriodMs(cfg.period_ms);
+        bench_step_start_ms = now_ms_b;
+        bench_step_cam_recv0 = capture.GetStats().received;
+        bench_step_sent0 = sent_to_pipeline;
+        bench_step_pipe0 = pipe_out;
+        bench_fps_samples.clear();
+        bench_c2s_samples.clear();
+        bench_seg_ms_sum = 0.0;
+        bench_seg_lag_sum = 0.0;
+        bench_seg_n = 0;
+        bench_cfg_applied = true;
+        char sbuf[160];
+        std::snprintf(sbuf, sizeof(sbuf),
+                      "Benchmark %zu/%zu: intra=%d spin=%d period=%dms",
+                      bench_idx + 1, bench_matrix.size(), cfg.intra_op,
+                      cfg.allow_spinning ? 1 : 0, cfg.period_ms);
+        ui.seg_bench_status = sbuf;
+        kgcore::Log("bench", "mulai #%zu/%zu: intra_op=%d allow_spinning=%d period=%dms",
+                    bench_idx + 1, bench_matrix.size(), cfg.intra_op,
+                    cfg.allow_spinning ? 1 : 0, cfg.period_ms);
+      } else {
+        const int64_t elapsed_b = now_ms_b - bench_step_start_ms;
+        // 1 dtk warmup setelah rebuild session; 9 dtk pengukuran
+        if (elapsed_b >= 1000) {
+          if (ui.fps > 0.0f) bench_fps_samples.push_back(ui.fps);
+          if (pipeline->SegActive()) {
+            bench_seg_ms_sum += pipeline->SegMs();
+            bench_seg_lag_sum += std::max(0.0f, pipeline->SegLagFrames());
+            ++bench_seg_n;
+          }
+        } else {
+          bench_step_cam_recv0 = capture.GetStats().received;
+          bench_step_sent0 = sent_to_pipeline;
+          bench_step_pipe0 = pipe_out;
+          bench_c2s_samples.clear();
+        }
+        if (elapsed_b >= 10000) {
+          const double dt_s = std::max(1.0, static_cast<double>(elapsed_b - 1000) / 1000.0);
+          const kg::CameraStats cst_b = capture.GetStats();
+          const uint64_t recv_d = cst_b.received - bench_step_cam_recv0;
+          const uint64_t sent_d = sent_to_pipeline - bench_step_sent0;
+          const uint64_t pipe_d = pipe_out - bench_step_pipe0;
+          auto mean_vec = [](const std::vector<float>& v) {
+            if (v.empty()) return 0.0;
+            double s = 0.0;
+            for (float x : v) s += x;
+            return s / v.size();
+          };
+          auto pct_vec = [](std::vector<float> v, float q) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            const size_t idx = static_cast<size_t>(
+                std::clamp(q, 0.0f, 1.0f) * static_cast<float>(v.size() - 1));
+            return static_cast<double>(v[idx]);
+          };
+          kgcore::SegBenchResult res;
+          res.cfg = bench_matrix[bench_idx];
+          res.recv_fps = static_cast<double>(recv_d) / dt_s;
+          res.proc_fps = static_cast<double>(pipe_d) / dt_s;
+          res.cam2screen_med_ms = pct_vec(bench_c2s_samples, 0.50f);
+          res.cam2screen_p95_ms = pct_vec(bench_c2s_samples, 0.95f);
+          res.seg_infer_avg_ms = bench_seg_n > 0 ? (bench_seg_ms_sum / bench_seg_n) : 0.0;
+          res.seg_samples = bench_seg_n;
+          res.meets_criteria = kgcore::EvaluateSegBenchCriteria(res);
+          bench_results.push_back(res);
+          const double drop_pct = recv_d > 0
+              ? (1.0 - static_cast<double>(std::min(sent_d, recv_d)) / recv_d) * 100.0
+              : 0.0;
+          kgcore::Log("bench",
+                      "selesai #%zu/%zu: intra=%d spin=%d period=%dms | render=%.1f fps "
+                      "cam=%.1f/s proc=%.1f/s drop=%.1f%% c2s_med=%.1fms c2s_p95=%.1fms "
+                      "seg=%.1fms (n=%d) | pass=%d",
+                      bench_idx + 1, bench_matrix.size(), res.cfg.intra_op,
+                      res.cfg.allow_spinning ? 1 : 0, res.cfg.period_ms,
+                      mean_vec(bench_fps_samples), res.recv_fps, res.proc_fps,
+                      drop_pct, res.cam2screen_med_ms, res.cam2screen_p95_ms,
+                      res.seg_infer_avg_ms, res.seg_samples,
+                      res.meets_criteria ? 1 : 0);
+          ++bench_idx;
+          bench_cfg_applied = false;
+          if (bench_idx >= bench_matrix.size()) {
+            const int best_i = kgcore::SelectBestSegBenchConfig(bench_results);
+            const auto& win_cfg = bench_results[static_cast<size_t>(best_i)].cfg;
+            pipeline->Seg().ConfigureSession(win_cfg.intra_op, win_cfg.allow_spinning);
+            pipeline->Seg().SetBenchmarkPeriodMs(0);  // kembali ke adaptif
+            bench_running = false;
+            ui.seg_bench_active = false;
+            char done_buf[200];
+            std::snprintf(done_buf, sizeof(done_buf),
+                          "Selesai: pemenang #%d intra=%d spin=%d period=%dms (pass=%d)",
+                          best_i + 1, win_cfg.intra_op,
+                          win_cfg.allow_spinning ? 1 : 0, win_cfg.period_ms,
+                          bench_results[static_cast<size_t>(best_i)].meets_criteria ? 1 : 0);
+            ui.seg_bench_status = done_buf;
+            kgcore::Log("bench", "PEMENANG MATRIKS: %s", done_buf);
+          }
+        }
+      }
+    }
+    if (!bench_running) {
+      perf_guard.Update(perf_now_ms, ui.fps);
+    }
     if (perf_guard.JustChanged()) {
       const std::string notice = perf_guard.TakeNotice();
       kgcore::Log("perf", "%s | state=%d seg_period=%dms fps=%.1f",
@@ -1568,17 +1752,33 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         const float seg_age_fr = pipeline ? pipeline->SegLagFrames() : -1.0f;
         const float seg_ms_cur = pipeline ? pipeline->SegMs() : 0.0f;
         const size_t qlen = capture.QueueSize();
+        const double neg_fps = (cst.fps_num > 0 && cst.fps_den > 0)
+            ? static_cast<double>(cst.fps_num) / static_cast<double>(cst.fps_den)
+            : 0.0;
+        if (neg_fps > 0.0 && cst.actual_fps > 0.0 && cst.actual_fps < 0.75 * neg_fps) {
+          if (++mf_underdeliver_streak >= 3 && !mf_low_light_warned) {
+            mf_low_light_warned = true;
+            kgcore::Log("diag",
+                        "PERINGATAN kamera MF di bawah FPS negosiasi (eksposur rendah / USB?): "
+                        "actual=%.1f fps ts=%.1f fps vs negosiasi=%.1f fps (luma=%.1f)",
+                        cst.actual_fps, cst.mf_ts_fps, neg_fps, cst.mean_luma);
+          }
+        } else {
+          mf_underdeliver_streak = 0;
+          mf_low_light_warned = false;
+        }
 
         kgcore::Log(
             "diag",
-            "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d luma=%.1f alpha=%d | "
+            "MF: recv=%llu %dx%d stride=%d subtype=0x%08X fps=%d/%d actual_fps=%.1f ts_fps=%.1f luma=%.1f alpha=%d | "
             "pipeline: sent=%llu out=%llu err=%llu | upload: out=%llu raw=%llu | "
             "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
-            "blend=%u %dx%d%s gpu_mask=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f | "
-            "lag: oneeuro(mean=%.2f p95=%.2f px) mask_feat_diff=%.2f px seg_age=%.0f fr (%.1fms) "
+            "blend=%u %dx%d%s gpu_mask=%d guided=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f | "
+            "lag: oneeuro(mean=%.2f p95=%.2f px) mask_feat_diff=%.2f px seg_age=%.0f fr (%.1fms period=%dms intra=%d spin=%d) "
             "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu roi_resets=%d (%.1f/m)",
             static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
-            static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den, cst.mean_luma,
+            static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den,
+            cst.actual_fps, cst.mf_ts_fps, cst.mean_luma,
             cst.center_alpha, static_cast<unsigned long long>(sent_to_pipeline),
             static_cast<unsigned long long>(pipe_out),
             static_cast<unsigned long long>(pipe_err_count),
@@ -1588,9 +1788,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             static_cast<void*>(glfwGetCurrentContext()), capture.Running() ? 1 : 0,
             pipeline_ok ? 1 : 0, blender.tex_out, blender.out_w, blender.out_h,
             blender.disabled ? " (OFF)" : "", gpu_mask_gen_disabled ? 0 : 1,
+            blender.last_mask_guided ? 1 : 0,
             bsum.dark, bsum.total, bsum.window_dark_ratio * 100.0,
             last_raw_luma, iter_out_luma,
             oe_mean, oe_p95, mask_diff, seg_age_fr, seg_ms_cur,
+            pipeline ? pipeline->Seg().CurrentPeriodMs() : 0,
+            pipeline ? pipeline->Seg().IntraOpThreads() : 0,
+            (pipeline && pipeline->Seg().AllowSpinning()) ? 1 : 0,
             c2s_med, c2s_p95, qlen, diag_st.reset_count, diag_st.resets_per_min);
       } else {
         kgcore::Log("diag",
@@ -1764,7 +1968,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             kgcore::RefineNostrilEllipsesFromLuma(
                 base_shapes, pipeline->InputRGBA(), shown_w, shown_h,
                 shown_w * 4, pipeline->MaskBuilder().skin_luma0(), basis.iod,
-                &shapes);
+                &shapes, nullptr, xy.data());
           }
           ImDrawList* dl = ImGui::GetWindowDrawList();
           const ImU32 col = IM_COL32(50, 255, 230, 245);
@@ -1824,6 +2028,9 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       const float c2s = static_cast<float>(
           std::max<int64_t>(0, present_ms - pending_cam_ts_ms));
       win_cam2screen_ms.push_back(c2s);
+      if (bench_running && bench_cfg_applied) {
+        bench_c2s_samples.push_back(c2s);
+      }
       pending_cam_ts_ms = -1;
     }
     ui.render_ms =

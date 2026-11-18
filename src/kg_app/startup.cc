@@ -205,6 +205,7 @@ StartupArgs ParseStartupArgs(const wchar_t* cmdline) {
     if (wcscmp(argv[i], L"--no-mask-gen-gpu") == 0) args.no_mask_gen_gpu = true;
     if (wcscmp(argv[i], L"--seg-compare") == 0) args.seg_compare = true;
     if (wcscmp(argv[i], L"--seg-int8") == 0) args.seg_int8 = true;
+    if (wcscmp(argv[i], L"--seg-bench") == 0) args.seg_bench = true;
   }
   LocalFree(argv);
   return args;
@@ -236,10 +237,11 @@ void BeginFileLog(const StartupPaths& paths, const StartupArgs& args) {
   kgcore::Log("startup", "log: %ls", paths.log_path.c_str());
   kgcore::Log("startup",
               "flags: --safe=%d --selftest=%d --capture-plain=%d --no-mask-gl=%d "
-              "--no-mask-gen-gpu=%d --seg-compare=%d --seg-int8=%d",
+              "--no-mask-gen-gpu=%d --seg-compare=%d --seg-int8=%d --seg-bench=%d",
               args.safe ? 1 : 0, args.selftest ? 1 : 0, args.capture_plain ? 1 : 0,
               args.no_mask_gl ? 1 : 0, args.no_mask_gen_gpu ? 1 : 0,
-              args.seg_compare ? 1 : 0, args.seg_int8 ? 1 : 0);
+              args.seg_compare ? 1 : 0, args.seg_int8 ? 1 : 0,
+              args.seg_bench ? 1 : 0);
 }
 
 void EndFileLog() { kgcore::CloseLogFile(); }

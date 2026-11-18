@@ -51,14 +51,17 @@ inline constexpr float kNostrilRadiusIodScale = 0.035f;
 // (kosong) supaya rasterisasi tetap aman.
 ExclusionShapes BuildExclusionShapes(const float* xy);
 
-// M2n: ROI longgar lubang hidung dari landmark + pelacakan blob gelap nyata
-// pada frame saat ini (mengikuti yaw tanpa offset kanonik 2D).
+// M2n/M2o: pencarian blob gelap lubang hidung berpusat di ujung hidung
+// (~0.30 * IOD, ambang ~0.80x luma kulit) + fallback jangkar landmark.
 struct NostrilRoiInfo {
   float anchor_cx = 0.0f, anchor_cy = 0.0f;
   float roi_radius_px = 0.0f;
+  float search_cx = 0.0f, search_cy = 0.0f;
   float dark_cx = 0.0f, dark_cy = 0.0f;
   float excl_cx = 0.0f, excl_cy = 0.0f;
-  float offset_px = 0.0f;
+  float offset_px = 0.0f;              // excl vs blob (kompatibilitas M2n)
+  float anchor_blob_offset_px = 0.0f;  // M2o: jarak jangkar landmark vs blob
+  int found_count = 0;                 // M2o: total 0/1/2 blob ditemukan
   bool found_dark_blob = false;
 };
 
@@ -66,7 +69,8 @@ void RefineNostrilEllipsesFromLuma(const ExclusionShapes& base_shapes,
                                   const uint8_t* rgba, int fw, int fh,
                                   int stride, float skin_luma, float iod_px,
                                   ExclusionShapes* out_shapes,
-                                  NostrilRoiInfo out_info[2] = nullptr);
+                                  NostrilRoiInfo out_info[2] = nullptr,
+                                  const float* xy_px = nullptr);
 
 void MeasureNostrilDarkBlobOffset(const ExclusionShapes& final_shapes,
                                   const uint8_t* rgba, int fw, int fh,

@@ -389,6 +389,280 @@ inline float PixelLumaRgba(const uint8_t* p) {
   return 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
 }
 
+struct CompactDarkBlob {
+  float cx = 0.0f, cy = 0.0f;
+  float u_off = 0.0f, v_off = 0.0f;
+  float min_lum = 255.0f;
+  float mean_lum = 255.0f;
+  float rx = 0.0f, ry = 0.0f;
+  int area = 0;
+};
+
+struct NoseTipSearchFrame {
+  float tip_x = 0.0f, tip_y = 0.0f;
+  float ux = 1.0f, uy = 0.0f;
+  float vx = 0.0f, vy = 1.0f;
+  float iod = 100.0f;
+  float roi_r = 30.0f;
+};
+
+NoseTipSearchFrame BuildNoseTipSearchFrame(const ExclusionShapes& base_shapes,
+                                           float iod_px, const float* xy_px,
+                                           int fw, int fh) {
+  NoseTipSearchFrame sf;
+  const float ax0 = base_shapes.ellipses[0].cx;
+  const float ay0 = base_shapes.ellipses[0].cy;
+  const float ax1 = base_shapes.ellipses.size() >= 2 ? base_shapes.ellipses[1].cx : ax0;
+  const float ay1 = base_shapes.ellipses.size() >= 2 ? base_shapes.ellipses[1].cy : ay0;
+  const float mid_ax = 0.5f * (ax0 + ax1);
+  const float mid_ay = 0.5f * (ay0 + ay1);
+
+  if (xy_px) {
+    const FaceEyeBasis basis = ComputeFaceEyeBasis(xy_px);
+    if (basis.valid) {
+      sf.ux = basis.ux;
+      sf.uy = basis.uy;
+      sf.vx = basis.vx;
+      sf.vy = basis.vy;
+      sf.iod = basis.iod;
+    }
+  }
+  if (sf.iod <= 1.0f || !xy_px) {
+    const float adx = ax1 - ax0;
+    const float ady = ay1 - ay0;
+    const float ad = std::hypot(adx, ady);
+    if (ad > 2.0f) {
+      sf.ux = adx / ad;
+      sf.uy = ady / ad;
+      sf.vx = -sf.uy;
+      sf.vy = sf.ux;
+      sf.iod = iod_px > 1.0f ? iod_px : (ad / 0.30f);
+    } else {
+      sf.iod = iod_px > 1.0f ? iod_px : std::max(40.0f, base_shapes.ellipses[0].rx * 28.0f);
+    }
+  }
+  if (iod_px > 1.0f) sf.iod = iod_px;
+
+  auto valid_tip_pt = [&](int idx, float* x, float* y) -> bool {
+    if (!xy_px) return false;
+    const float px = xy_px[idx * 2];
+    const float py = xy_px[idx * 2 + 1];
+    if (std::fabs(px) + std::fabs(py) <= 1e-4f) return false;
+    if (px < 0.0f || py < 0.0f || px >= static_cast<float>(fw) ||
+        py >= static_cast<float>(fh)) {
+      return false;
+    }
+    if (std::hypot(px - mid_ax, py - mid_ay) > 0.55f * sf.iod) return false;
+    *x = px;
+    *y = py;
+    return true;
+  };
+  float x1 = 0, y1 = 0, x4 = 0, y4 = 0;
+  const bool ok1 = valid_tip_pt(1, &x1, &y1);
+  const bool ok4 = valid_tip_pt(4, &x4, &y4);
+  if (ok1 && ok4) {
+    sf.tip_x = 0.5f * (x1 + x4);
+    sf.tip_y = 0.5f * (y1 + y4);
+  } else if (ok1) {
+    sf.tip_x = x1;
+    sf.tip_y = y1;
+  } else if (ok4) {
+    sf.tip_x = x4;
+    sf.tip_y = y4;
+  } else {
+    sf.tip_x = mid_ax - 0.06f * sf.iod * sf.vx;
+    sf.tip_y = mid_ay - 0.06f * sf.iod * sf.vy;
+  }
+
+  sf.roi_r = std::max(14.0f, 0.30f * sf.iod);
+  return sf;
+}
+
+std::vector<CompactDarkBlob> DetectCompactNostrilBlobs(
+    const NoseTipSearchFrame& sf, const uint8_t* rgba, int fw, int fh,
+    int stride, float skin_luma) {
+  std::vector<CompactDarkBlob> blobs;
+  if (!rgba || fw <= 0 || fh <= 0 || stride < fw * 4 || skin_luma < 20.0f) {
+    return blobs;
+  }
+  const float dark_thresh = 0.80f * skin_luma;
+  const int x0 = std::max(0, static_cast<int>(std::floor(sf.tip_x - sf.roi_r)));
+  const int x1 = std::min(fw - 1, static_cast<int>(std::ceil(sf.tip_x + sf.roi_r)));
+  const int y0 = std::max(0, static_cast<int>(std::floor(sf.tip_y - sf.roi_r)));
+  const int y1 = std::min(fh - 1, static_cast<int>(std::ceil(sf.tip_y + sf.roi_r)));
+  const int gw = x1 - x0 + 1;
+  const int gh = y1 - y0 + 1;
+  if (gw <= 0 || gh <= 0) return blobs;
+
+  const float r2 = sf.roi_r * sf.roi_r;
+  const float min_v = -0.04f * sf.iod;
+  const float max_v = 0.32f * sf.iod;
+  const float max_abs_u = 0.30f * sf.iod;
+
+  std::vector<float> lum_grid(static_cast<size_t>(gw) * gh, 255.0f);
+  std::vector<uint8_t> cand_mask(static_cast<size_t>(gw) * gh, 0);
+  int total_dark = 0;
+  for (int y = y0; y <= y1; ++y) {
+    const uint8_t* row = rgba + static_cast<size_t>(y) * stride;
+    for (int x = x0; x <= x1; ++x) {
+      const float fx = static_cast<float>(x) + 0.5f;
+      const float fy = static_cast<float>(y) + 0.5f;
+      const float dx = fx - sf.tip_x;
+      const float dy = fy - sf.tip_y;
+      if (dx * dx + dy * dy > r2) continue;
+      const float u_off = dx * sf.ux + dy * sf.uy;
+      const float v_off = dx * sf.vx + dy * sf.vy;
+      if (v_off < min_v || v_off > max_v || std::fabs(u_off) > max_abs_u) {
+        continue;
+      }
+      const float lum = PixelLumaRgba(row + static_cast<size_t>(x) * 4);
+      const size_t gi = static_cast<size_t>(y - y0) * gw + (x - x0);
+      lum_grid[gi] = lum;
+      if (lum < dark_thresh) {
+        cand_mask[gi] = 1;
+        ++total_dark;
+      }
+    }
+  }
+  const int min_blob_px = (fw >= 640) ? 3 : 1;
+  if (total_dark < min_blob_px) return blobs;
+
+  const int max_blob_area =
+      std::max(36, static_cast<int>(0.025f * sf.iod * sf.iod));
+  const float max_span = std::max(8.0f, 0.17f * sf.iod);
+
+  auto build_blob_from_pixels = [&](const std::vector<int>& pix) {
+    if (static_cast<int>(pix.size()) < min_blob_px ||
+        static_cast<int>(pix.size()) > max_blob_area) {
+      return;
+    }
+    float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+    float min_l = 255.0f;
+    double lsum = 0.0;
+    double wx = 0.0, wy = 0.0, wsum = 0.0;
+    for (int gi : pix) {
+      const int gx = gi % gw;
+      const int gy = gi / gw;
+      const float fx = static_cast<float>(x0 + gx) + 0.5f;
+      const float fy = static_cast<float>(y0 + gy) + 0.5f;
+      const float dx = fx - sf.tip_x;
+      const float dy = fy - sf.tip_y;
+      const float u_off = dx * sf.ux + dy * sf.uy;
+      const float v_off = dx * sf.vx + dy * sf.vy;
+      umin = std::min(umin, u_off);
+      umax = std::max(umax, u_off);
+      vmin = std::min(vmin, v_off);
+      vmax = std::max(vmax, v_off);
+      const float l = lum_grid[static_cast<size_t>(gi)];
+      min_l = std::min(min_l, l);
+      lsum += l;
+      const float diff = std::max(0.5f, dark_thresh - l);
+      const double w = static_cast<double>(diff) * diff;
+      wx += static_cast<double>(fx) * w;
+      wy += static_cast<double>(fy) * w;
+      wsum += w;
+    }
+    const float span_u = std::max(1.0f, umax - umin + 1.0f);
+    const float span_v = std::max(1.0f, vmax - vmin + 1.0f);
+    if (span_u > max_span || span_v > max_span || wsum <= 0.0) return;
+
+    CompactDarkBlob b;
+    b.cx = static_cast<float>(wx / wsum);
+    b.cy = static_cast<float>(wy / wsum);
+    const float dx = b.cx - sf.tip_x;
+    const float dy = b.cy - sf.tip_y;
+    b.u_off = dx * sf.ux + dy * sf.uy;
+    b.v_off = dx * sf.vx + dy * sf.vy;
+    b.min_lum = min_l;
+    b.mean_lum = static_cast<float>(lsum / static_cast<double>(pix.size()));
+    const float r_eq = std::sqrt(static_cast<float>(pix.size()) / 3.14159265f);
+    b.rx = std::clamp(std::max(r_eq, 0.5f * span_u), 2.0f, 0.08f * sf.iod);
+    b.ry = std::clamp(std::max(r_eq, 0.5f * span_v), 2.0f, 0.08f * sf.iod);
+    b.area = static_cast<int>(pix.size());
+    blobs.push_back(b);
+  };
+
+  // Connected components (4-ketetanggaan); jika sebuah komponen melebar
+  // (mis. kedua lubang tersambung oleh bayangan kolumela di 0.80x), pecah
+  // lewat minima gelap lokal yang terpisah >= 0.08 * IOD.
+  std::vector<uint8_t> visited(static_cast<size_t>(gw) * gh, 0);
+  std::vector<int> q;
+  for (int i = 0; i < gw * gh; ++i) {
+    if (!cand_mask[i] || visited[i]) continue;
+    q.clear();
+    q.push_back(i);
+    visited[i] = 1;
+    size_t head = 0;
+    float umin = 1e9f, umax = -1e9f;
+    while (head < q.size()) {
+      const int cur = q[head++];
+      const int gx = cur % gw;
+      const int gy = cur / gw;
+      const float dx = (static_cast<float>(x0 + gx) + 0.5f) - sf.tip_x;
+      const float dy = (static_cast<float>(y0 + gy) + 0.5f) - sf.tip_y;
+      const float u_off = dx * sf.ux + dy * sf.uy;
+      umin = std::min(umin, u_off);
+      umax = std::max(umax, u_off);
+      const int nb[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+      for (const auto& d : nb) {
+        const int nx = gx + d[0];
+        const int ny = gy + d[1];
+        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+        const int ni = ny * gw + nx;
+        if (cand_mask[ni] && !visited[ni]) {
+          visited[ni] = 1;
+          q.push_back(ni);
+        }
+      }
+    }
+
+    if (umax - umin <= max_span && static_cast<int>(q.size()) <= max_blob_area) {
+      build_blob_from_pixels(q);
+    } else if (static_cast<int>(q.size()) >= 2 * min_blob_px) {
+      // Pecah komponen lebar: ambil dua benih minima paling gelap berjarak >= 0.08*IOD.
+      std::vector<int> sorted_q = q;
+      std::sort(sorted_q.begin(), sorted_q.end(), [&](int a, int b) {
+        return lum_grid[a] < lum_grid[b];
+      });
+      std::vector<int> seeds;
+      const float min_sep = std::max(5.0f, 0.08f * sf.iod);
+      for (int idx : sorted_q) {
+        const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
+        const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
+        bool far = true;
+        for (int s : seeds) {
+          const float sx = static_cast<float>(x0 + (s % gw)) + 0.5f;
+          const float sy = static_cast<float>(y0 + (s / gw)) + 0.5f;
+          if (std::hypot(px - sx, py - sy) < min_sep) {
+            far = false;
+            break;
+          }
+        }
+        if (far) {
+          seeds.push_back(idx);
+          if (seeds.size() >= 4) break;
+        }
+      }
+      const float core_r = std::max(4.0f, 0.075f * sf.iod);
+      for (int s : seeds) {
+        const float sx = static_cast<float>(x0 + (s % gw)) + 0.5f;
+        const float sy = static_cast<float>(y0 + (s / gw)) + 0.5f;
+        const float local_cut =
+            std::min(dark_thresh, lum_grid[s] + 0.14f * skin_luma);
+        std::vector<int> sub;
+        for (int idx : q) {
+          if (lum_grid[idx] > local_cut) continue;
+          const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
+          const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
+          if (std::hypot(px - sx, py - sy) <= core_r) sub.push_back(idx);
+        }
+        build_blob_from_pixels(sub);
+      }
+    }
+  }
+  return blobs;
+}
+
 void FindDarkBlobInNostrilRoi(const ExclusionEllipse& anchor,
                               const ExclusionEllipse* other_anchor,
                               const uint8_t* rgba, int fw, int fh, int stride,
@@ -402,12 +676,12 @@ void FindDarkBlobInNostrilRoi(const ExclusionEllipse& anchor,
   info->excl_cx = anchor.cx;
   info->excl_cy = anchor.cy;
   const float roi_r =
-      std::max(8.0f, (iod_px > 1.0f ? 0.14f * iod_px : anchor.rx * 4.0f));
+      std::max(14.0f, (iod_px > 1.0f ? 0.30f * iod_px : anchor.rx * 8.0f));
   info->roi_radius_px = roi_r;
   if (!rgba || fw <= 0 || fh <= 0 || stride < fw * 4 || skin_luma < 20.0f) {
     return;
   }
-  const float dark_thresh = 0.58f * skin_luma;
+  const float dark_thresh = 0.80f * skin_luma;
   const int x0 = std::max(0, static_cast<int>(std::floor(anchor.cx - roi_r)));
   const int x1 = std::min(fw - 1, static_cast<int>(std::ceil(anchor.cx + roi_r)));
   const int y0 = std::max(0, static_cast<int>(std::floor(anchor.cy - roi_r)));
@@ -438,13 +712,10 @@ void FindDarkBlobInNostrilRoi(const ExclusionEllipse& anchor,
       if (lum < dark_thresh) ++dark_n;
     }
   }
-  const int min_dark_pixels = (fw >= 640) ? 4 : 1;
+  const int min_dark_pixels = (fw >= 640) ? 3 : 1;
   if (min_px < 0 || dark_n < min_dark_pixels || min_y >= dark_thresh) {
     return;
   }
-
-  // Hitung centroid berbobot kuadrat di sekitar piksel tergelap agar inti
-  // lubang hidung tetap terkunci meski tepi ROI menyentuh bayangan sayap.
   const float core_r =
       std::min(roi_r, std::max(5.0f, iod_px > 1.0f ? 0.065f * iod_px : anchor.rx * 2.0f));
   const float core_r2 = core_r * core_r;
@@ -472,6 +743,8 @@ void FindDarkBlobInNostrilRoi(const ExclusionEllipse& anchor,
     info->dark_cx = static_cast<float>(wx / wsum);
     info->dark_cy = static_cast<float>(wy / wsum);
     info->found_dark_blob = true;
+    info->anchor_blob_offset_px =
+        std::hypot(info->dark_cx - info->anchor_cx, info->dark_cy - info->anchor_cy);
   }
 }
 }  // namespace
@@ -480,25 +753,113 @@ void RefineNostrilEllipsesFromLuma(const ExclusionShapes& base_shapes,
                                   const uint8_t* rgba, int fw, int fh,
                                   int stride, float skin_luma, float iod_px,
                                   ExclusionShapes* out_shapes,
-                                  NostrilRoiInfo out_info[2]) {
+                                  NostrilRoiInfo out_info[2],
+                                  const float* xy_px) {
   if (!out_shapes) return;
   *out_shapes = base_shapes;
   if (base_shapes.ellipses.empty()) return;
+
+  const NoseTipSearchFrame sf =
+      BuildNoseTipSearchFrame(base_shapes, iod_px, xy_px, fw, fh);
+  const std::vector<CompactDarkBlob> blobs =
+      DetectCompactNostrilBlobs(sf, rgba, fw, fh, stride, skin_luma);
+
+  int best_r = -1, best_l = -1;
+  double best_pair_score = 1e18;
+  for (int i = 0; i < static_cast<int>(blobs.size()); ++i) {
+    for (int j = 0; j < static_cast<int>(blobs.size()); ++j) {
+      if (i == j) continue;
+      const auto& br = blobs[i];
+      const auto& bl = blobs[j];
+      if (br.u_off >= bl.u_off) continue;  // kanan (-u) di kiri kiri (+u)
+      const float du = bl.u_off - br.u_off;
+      const float dv = std::fabs(bl.v_off - br.v_off);
+      const float mid_u = 0.5f * (br.u_off + bl.u_off);
+      if (du < 0.10f * sf.iod || du > 0.42f * sf.iod) continue;
+      if (dv > 0.14f * sf.iod) continue;
+      if (std::fabs(mid_u) > 0.22f * sf.iod) continue;
+      if (std::min(br.area, bl.area) >= 3 &&
+          std::max(br.area, bl.area) > 4.5f * std::min(br.area, bl.area)) {
+        continue;
+      }
+      const double score =
+          (br.min_lum + bl.min_lum) / std::max(20.0f, skin_luma) +
+          2.0 * (dv / sf.iod) + 1.5 * std::fabs(du / sf.iod - 0.28f) +
+          0.8 * (std::fabs(mid_u) / sf.iod);
+      if (score < best_pair_score) {
+        best_pair_score = score;
+        best_r = i;
+        best_l = j;
+      }
+    }
+  }
+
+  bool side_found[2] = {false, false};
+  CompactDarkBlob chosen[2]{};
+  if (best_r >= 0 && best_l >= 0) {
+    side_found[0] = true;
+    side_found[1] = true;
+    chosen[0] = blobs[best_r];
+    chosen[1] = blobs[best_l];
+  } else if (!blobs.empty() && base_shapes.ellipses.size() >= 2) {
+    // Jika hanya 1 blob cocok, pasangkan ke sisi jangkar terdekat.
+    int best_k = -1, best_b = -1;
+    float best_d = 1e9f;
+    for (int k = 0; k < 2; ++k) {
+      const auto& a = base_shapes.ellipses[k];
+      for (int bi = 0; bi < static_cast<int>(blobs.size()); ++bi) {
+        const float d = std::hypot(blobs[bi].cx - a.cx, blobs[bi].cy - a.cy);
+        if (d <= 0.26f * sf.iod && d < best_d) {
+          best_d = d;
+          best_k = k;
+          best_b = bi;
+        }
+      }
+    }
+    if (best_k >= 0) {
+      side_found[best_k] = true;
+      chosen[best_k] = blobs[best_b];
+    }
+  } else if (!blobs.empty() && base_shapes.ellipses.size() == 1) {
+    side_found[0] = true;
+    chosen[0] = blobs[0];
+  }
+
+  const int total_found =
+      (side_found[0] ? 1 : 0) + (side_found[1] ? 1 : 0);
+  constexpr float kNostrilDilationPx = 3.0f;
   for (size_t k = 0; k < base_shapes.ellipses.size() && k < 2; ++k) {
     const ExclusionEllipse& anchor = base_shapes.ellipses[k];
-    const ExclusionEllipse* other =
-        (base_shapes.ellipses.size() >= 2) ? &base_shapes.ellipses[1 - k] : nullptr;
     NostrilRoiInfo info;
-    FindDarkBlobInNostrilRoi(anchor, other, rgba, fw, fh, stride, skin_luma,
-                             iod_px, &info);
-    if (info.found_dark_blob) {
-      out_shapes->ellipses[k].cx = info.dark_cx;
-      out_shapes->ellipses[k].cy = info.dark_cy;
+    info.anchor_cx = anchor.cx;
+    info.anchor_cy = anchor.cy;
+    info.roi_radius_px = sf.roi_r;
+    info.search_cx = sf.tip_x;
+    info.search_cy = sf.tip_y;
+    info.found_count = total_found;
+    info.found_dark_blob = side_found[k];
+    if (side_found[k]) {
+      out_shapes->ellipses[k].cx = chosen[k].cx;
+      out_shapes->ellipses[k].cy = chosen[k].cy;
+      out_shapes->ellipses[k].rx =
+          std::max(anchor.rx, chosen[k].rx) + kNostrilDilationPx;
+      out_shapes->ellipses[k].ry =
+          std::max(anchor.ry, chosen[k].ry) + kNostrilDilationPx;
+      info.dark_cx = chosen[k].cx;
+      info.dark_cy = chosen[k].cy;
+    } else {
+      info.dark_cx = anchor.cx;
+      info.dark_cy = anchor.cy;
     }
     info.excl_cx = out_shapes->ellipses[k].cx;
     info.excl_cy = out_shapes->ellipses[k].cy;
     info.offset_px =
         std::hypot(info.excl_cx - info.dark_cx, info.excl_cy - info.dark_cy);
+    info.anchor_blob_offset_px =
+        side_found[k]
+            ? std::hypot(info.dark_cx - info.anchor_cx,
+                         info.dark_cy - info.anchor_cy)
+            : 0.0f;
     if (out_info) out_info[k] = info;
   }
 }

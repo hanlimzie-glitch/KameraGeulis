@@ -25,6 +25,8 @@ struct CameraStats {
   int stride = 0;               // last negotiated stride, SIGNED (negative = bottom-up)
   int subtype = 0;              // MF_MT_SUBTYPE fourcc (e.g. 'RGB32')
   int fps_num = 0, fps_den = 0; // negotiated MF_MT_FRAME_RATE
+  double actual_fps = 0.0;      // M2o: actual received FPS measured in capture thread
+  double mf_ts_fps = 0.0;       // M2o: FPS computed from MF sample timestamps
   double mean_luma = 0.0;       // sampled mean luma of last frame (0..255)
   int center_alpha = 0;         // alpha byte at frame center of last frame
   bool mode_from_device = false;// true once GetCurrentMediaType read-back succeeded

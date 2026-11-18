@@ -57,11 +57,15 @@ struct SkinMaskConfig {
   float chroma_feather = 0.55f;     // fraksi radius untuk mulai memudar
   float cb_min = 65.0f, cb_max = 145.0f;
   float cr_min = 120.0f, cr_max = 185.0f;
-  // M2n: penyaring fitur gelap per-piksel (melindungi poni/rambut, lubang
-  // hidung, alis, bulu mata, kumis tipis, dan tepi bibir tanpa lag).
-  float dark_luma_low_ratio = 0.50f;   // eksklusi penuh (<= low * skin_luma)
-  float dark_luma_high_ratio = 0.70f;  // inklusi penuh (>= high * skin_luma)
+  // M2n/M2o: penyaring fitur gelap dari luma Gaussian 5x5 + transisi smoothstep
+  // lebih lebar + feather 2-3 px di tepi garis rambut + guided GPU setengah res.
+  float dark_luma_low_ratio = 0.45f;   // eksklusi penuh (<= low * skin_luma)
+  float dark_luma_high_ratio = 0.80f;  // inklusi penuh (>= high * skin_luma)
   float dark_min_skin_luma = 20.0f;    // batas aman adegan sangat gelap (0..255)
+  int dark_luma_blur_radius = 2;       // 2 -> Gaussian 5x5 sebelum filter gelap
+  int hairline_feather_radius = 2;     // feather 2-3 px di pita garis rambut
+  int guided_radius = 4;               // radius guided filter setengah res (~8px full)
+  float guided_eps = 0.002f;           // eps guided filter luma [0..1]^2
   float hair_forehead_weight = 0.85f;  // sinyal sekunder seg rambut di tepi dahi
   bool dark_filter_enabled = true;
 };
@@ -127,6 +131,9 @@ float CalibrateSkinLuma(float cheek_l_y, bool has_l, float cheek_r_y,
 float ComputeDarkFeatureWeight(float pixel_luma, float skin_luma,
                                const SkinMaskConfig& cfg,
                                bool in_nostril_roi = false);
+// M2o: luma terblur Gaussian 5x5 (bobot [1,4,6,4,1]/16 x [1,4,6,4,1]/16).
+float ComputeBlurredLuma5x5(const uint8_t* rgba, int fw, int fh, int stride,
+                             int x, int y);
 
 // Probabilitas warna kulit [0..255] per piksel MASK di mana region != 0.
 // cb0/cr0 = pusat elips adaptif; bila use_adaptif=false pakai band lebar saja.
@@ -191,6 +198,14 @@ struct BeautyComposeConfig {
 void SmoothLumaGuidedCpu(const uint8_t* rgba_in, int w, int h, int radius,
                          float eps, float amount, uint8_t* rgba_out);
 
+// M2o: guided smoothing luma berbobot mask (konvolusi ternormalisasi):
+// tetangga di luar mask memberi bobot nol sehingga warna rambut gelap tidak
+// menarik luma kulit di sepanjang garis rambut (anti-halo).
+void SmoothLumaGuidedMaskedCpu(const uint8_t* rgba_in, const uint8_t* mask,
+                               int mw, int mh, int w, int h, int radius,
+                               float eps, float amount, float gain,
+                               uint8_t* rgba_out);
+
 // Komposit M2i (rumus identik shader GPU mask_blender):
 //  1) cand = beauty dgn Y diguided (radius/eps/amount dari cfg)
 //  2) mixed = mix(raw, cand, mask*gain)
@@ -220,6 +235,29 @@ struct InMaskMetrics {
 void ComputeInMaskMetrics(const uint8_t* raw, const uint8_t* out,
                           const uint8_t* mask, int mw, int mh, int w, int h,
                           float gain, InMaskMetrics* m);
+
+// M2o: metrik garis rambut untuk log F5:
+//  - roughness_pct: % piksel mask bernilai 0.05..0.95 di sepanjang pita garis rambut
+//  - halo_out_diff: selisih mean luma out antara strip 6 px di dalam garis rambut
+//    vs kulit interior
+//  - halo_filter_delta: selisih pertambahan luma (out-raw) di strip 6 px vs interior
+struct HairlineMetrics {
+  float roughness_pct = 0.0f;
+  int band_n = 0;
+  int rough_n = 0;
+  float strip_raw_luma = 0.0f;
+  float strip_out_luma = 0.0f;
+  float interior_raw_luma = 0.0f;
+  float interior_out_luma = 0.0f;
+  float halo_out_diff = 0.0f;
+  float halo_filter_delta = 0.0f;
+  int strip_n = 0;
+  int interior_n = 0;
+};
+void ComputeHairlineMetrics(const uint8_t* raw, const uint8_t* out,
+                            const uint8_t* mask, int mw, int mh, int w, int h,
+                            float gain, const LandmarkSet& lm,
+                            HairlineMetrics* met);
 
 // Tahap kerja mask per frame (CPU wall-clock; GPU ms dicatat terpisah oleh GL).
 struct SkinMaskStageTimings {

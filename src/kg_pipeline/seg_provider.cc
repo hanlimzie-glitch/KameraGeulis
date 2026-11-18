@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "kgcore/log.h"
+#include "kgcore/perf_guard.h"
 #include "windows_paths.h"
 
 namespace kgcore {
@@ -161,6 +162,23 @@ void SegProvider::SetPeriodMs(int period_ms) {
   requested_period_ms_.store(std::clamp(period_ms, 200, 3000));
 }
 
+void SegProvider::ConfigureSession(int intra_op, bool allow_spinning) {
+  const int clamped = std::clamp(intra_op, 1, 3);
+  target_intra_threads_.store(clamped);
+  target_allow_spinning_.store(allow_spinning);
+  if (running_.load() &&
+      (clamped != intra_threads_.load() ||
+       allow_spinning != allow_spinning_.load())) {
+    reconfigure_pending_.store(true);
+    cv_.notify_one();
+  }
+}
+
+void SegProvider::SetBenchmarkPeriodMs(int period_ms) {
+  benchmark_period_ms_.store(period_ms > 0 ? std::clamp(period_ms, 100, 3000) : 0);
+  cv_.notify_one();
+}
+
 std::string SegProvider::LastError() const {
   std::lock_guard<std::mutex> lk(err_mu_);
   return last_error_;
@@ -174,9 +192,11 @@ SegProvider::CompareTelemetry SegProvider::LatestCompare() const {
 void SegProvider::SubmitFrame(const uint8_t* pixels, int w, int h,
                               int stride_bytes, bool bgra,
                               uint64_t frame_serial,
-                              const SegPoseAnchor& pose) {
+                              const SegPoseAnchor& pose,
+                              float head_speed_px) {
   if (dead_.load()) return;  // gagal permanen: hemat, pemanggil pakai wajah
   if (!pixels || w <= 0 || h <= 0) return;
+  head_speed_px_.store(head_speed_px);
   LetterboxInfo lb = ComputeSegLetterbox(w, h, kSegInputSize);
   std::vector<float> input(static_cast<size_t>(kSegInputSize) *
                            kSegInputSize * 3);
@@ -222,6 +242,11 @@ bool SegProvider::GetResultIfNewer(uint64_t last_seen_serial,
 }
 
 void SegProvider::ThreadMain_() {
+  const BOOL prio_ok =
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  Log(kTag, "thread priority set BELOW_NORMAL -> %s",
+      prio_ok ? "OK" : "GAGAL");
+
   // Muat model DI THREAD (unduh pertama kali tidak memblokir UI/render).
   const bool ok = EnsureModelLoaded_();
   {
@@ -278,10 +303,40 @@ void SegProvider::ThreadMain_() {
     return true;
   };
 
+  auto last_infer_done =
+      std::chrono::steady_clock::now() - std::chrono::seconds(5);
   while (true) {
     {
       std::unique_lock<std::mutex> lk(mu_);
-      cv_.wait(lk, [&] { return stop_.load() || slot_pending_; });
+      while (!stop_.load()) {
+        if (reconfigure_pending_.exchange(false)) {
+          const int req_intra = target_intra_threads_.load();
+          const bool req_spin = target_allow_spinning_.load();
+          lk.unlock();
+          RebuildSession_(req_intra, req_spin);
+          session = available_.load() ? session_.get() : nullptr;
+          int8_session = available_.load() ? compare_int8_session_.get() : nullptr;
+          lk.lock();
+        }
+        const int bench_p = benchmark_period_ms_.load();
+        const int period_ms =
+            bench_p > 0 ? bench_p
+                        : ComputeAdaptiveSegPeriodMs(
+                              head_speed_px_.load(), last_ms_.load(),
+                              requested_period_ms_.load(), res_valid_);
+        current_period_ms_.store(period_ms);
+        const auto next_due =
+            last_infer_done + std::chrono::milliseconds(period_ms);
+        const auto now = std::chrono::steady_clock::now();
+        if (slot_pending_ && (now >= next_due || !res_valid_)) {
+          break;
+        }
+        if (slot_pending_) {
+          cv_.wait_until(lk, next_due);
+        } else {
+          cv_.wait(lk);
+        }
+      }
       if (stop_.load()) break;
       input = std::move(slot_input_);
       lb = slot_lb_;
@@ -292,7 +347,6 @@ void SegProvider::ThreadMain_() {
 
     if (!session) continue;  // model gagal: buang frame (fallback muka saja)
 
-    const auto t0 = std::chrono::steady_clock::now();
     try {
       std::vector<float> probs;
       double ms = 0.0;
@@ -361,29 +415,16 @@ void SegProvider::ThreadMain_() {
       ++infer_n;
       average_ms_.store(infer_sum_ms / static_cast<double>(infer_n));
       inferred_.fetch_add(1);
-      if (infer_n == 1 || (infer_n % 60) == 0) {
+      if (infer_n == 1 || (infer_n % 30) == 0) {
         Log(kTag,
-            "ep=%s precision=%s hw_cores=%u intra_op=%d infer last=%.1fms avg=%.1fms "
-            "period=%dms n=%llu",
+            "ep=%s precision=%s hw_cores=%u intra_op=%d spin=%d infer last=%.1fms avg=%.1fms "
+            "period=%dms speed=%.1fpx n=%llu",
             ep_name_, precision_name_, hw_cores_.load(), intra_threads_.load(),
-            ms, average_ms_.load(), requested_period_ms_.load(),
+            allow_spinning_.load() ? 1 : 0, ms, average_ms_.load(),
+            current_period_ms_.load(), head_speed_px_.load(),
             static_cast<unsigned long long>(infer_n));
       }
-      // M2m: interval adaptif ~2x waktu inferensi (100..333 ms) saat beban
-      // normal agar seg_age tetap rendah (~2-3 frame bila infer <= 60 ms),
-      // namun tetap menghormati perlambatan PerfGuard (>250 ms).
-      const int adaptive_ms = std::clamp(static_cast<int>(std::ceil(ms * 2.0)),
-                                         100, 333);
-      const int req_ms = requested_period_ms_.load();
-      const int period_ms = (req_ms <= 250) ? adaptive_ms
-                                            : std::max(adaptive_ms, req_ms);
-      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - t0)
-                               .count();
-      if (elapsed < period_ms) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(period_ms - elapsed));
-      }
+      last_infer_done = std::chrono::steady_clock::now();
     } catch (const Ort::Exception& e) {
       std::lock_guard<std::mutex> lk(err_mu_);
       last_error_ = std::string("inferensi seg gagal: ") + e.what();
@@ -449,20 +490,42 @@ bool SegProvider::EnsureModelLoaded_() {
       }
     }
 
-    // M2n: naikkan intra_op ke jumlah core penuh (mis. 6 pada CPU 6-core)
-    // untuk memangkas latensi segmenasi menuju target <= 60 ms.
+    // M2o: default hemat CPU — intra_op=2 (max 3), intra_op.allow_spinning=0,
+    // prioritas thread BELOW_NORMAL, tidak pernah menaikkan intra_op di atas
+    // default tanpa bukti benchmark.
     const unsigned hw_cores = std::thread::hardware_concurrency();
-    const int intra_threads = std::clamp(
-        hw_cores > 0 ? static_cast<int>(hw_cores) : 4, 2, 8);
     hw_cores_.store(hw_cores);
-    intra_threads_.store(intra_threads);
-
+    loaded_model_path_ = model_path;
+    loaded_int8_path_ = int8_exists ? int8_path : L"";
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "KameraGeulisSeg");
+    return RebuildSession_(target_intra_threads_.load(),
+                           target_allow_spinning_.load());
+  } catch (const Ort::Exception& e) {
+    std::lock_guard<std::mutex> lk(err_mu_);
+    last_error_ = std::string("ORT session seg error: ") + e.what();
+    compare_int8_session_.reset();
+    session_.reset();
+    env_.reset();
+    dead_.store(true);
+    return false;
+  }
+}
+
+bool SegProvider::RebuildSession_(int intra_op, bool allow_spinning) {
+  if (!env_ || loaded_model_path_.empty()) return false;
+  try {
+    const int intra_threads = std::clamp(intra_op, 1, 3);
+    intra_threads_.store(intra_threads);
+    allow_spinning_.store(allow_spinning);
+
     Ort::SessionOptions opts;
     opts.SetIntraOpNumThreads(intra_threads);
     opts.SetInterOpNumThreads(1);
     opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    opts.AddConfigEntry("session.intra_op.allow_spinning",
+                        allow_spinning ? "1" : "0");
+    opts.AddConfigEntry("session.inter_op.allow_spinning", "0");
 
     HMODULE ort_module = GetModuleHandleW(L"onnxruntime.dll");
     FARPROC dml_symbol = ort_module
@@ -483,32 +546,33 @@ bool SegProvider::EnsureModelLoaded_() {
       }
     }
     Log(kTag,
-        "EP probe: hw_cores=%u intra_op=%d dml_symbol=%s -> ep=%s precision=%s compare=%d",
-        hw_cores, intra_threads, dml_symbol ? "ada" : "tidak ada", ep_name_,
-        precision_name_, compare_mode_.load() ? 1 : 0);
-    session_ = std::make_unique<Ort::Session>(*env_, model_path.c_str(), opts);
-    if (compare_mode_.load()) {
-      if (int8_exists) {
-        compare_int8_session_ =
-            std::make_unique<Ort::Session>(*env_, int8_path.c_str(), opts);
-        Log(kTag, "--seg-compare aktif: membandingkan FP32 (%ls) vs INT8 (%ls)",
-            model_path.c_str(), int8_path.c_str());
-      } else {
-        Log(kTag,
-            "--seg-compare diminta tetapi %ls tidak ditemukan di %ls; perbandingan dilewati",
-            kSegInt8File, dir.c_str());
-      }
+        "EP probe: hw_cores=%u intra_op=%d allow_spinning=%d dml_symbol=%s -> ep=%s precision=%s compare=%d",
+        hw_cores_.load(), intra_threads, allow_spinning ? 1 : 0,
+        dml_symbol ? "ada" : "tidak ada", ep_name_, precision_name_,
+        compare_mode_.load() ? 1 : 0);
+    compare_int8_session_.reset();
+    session_.reset();
+    session_ = std::make_unique<Ort::Session>(*env_, loaded_model_path_.c_str(), opts);
+    if (compare_mode_.load() && !loaded_int8_path_.empty()) {
+      compare_int8_session_ =
+          std::make_unique<Ort::Session>(*env_, loaded_int8_path_.c_str(), opts);
+      Log(kTag, "--seg-compare aktif: membandingkan FP32 (%ls) vs INT8 (%ls)",
+          loaded_model_path_.c_str(), loaded_int8_path_.c_str());
+    } else if (compare_mode_.load()) {
+      Log(kTag,
+          "--seg-compare diminta tetapi %ls tidak ditemukan; perbandingan dilewati",
+          kSegInt8File);
     }
-    Log(kTag, "ORT seg siap (%ls, ep=%s, precision=%s, intra_op=%d)",
-        model_path.c_str(), ep_name_, precision_name_, intra_threads);
+    Log(kTag, "ORT seg siap (%ls, ep=%s, precision=%s, intra_op=%d, allow_spinning=%d)",
+        loaded_model_path_.c_str(), ep_name_, precision_name_, intra_threads,
+        allow_spinning ? 1 : 0);
     return true;
   } catch (const Ort::Exception& e) {
     std::lock_guard<std::mutex> lk(err_mu_);
     last_error_ = std::string("ORT session seg error: ") + e.what();
     compare_int8_session_.reset();
     session_.reset();
-    env_.reset();
-    dead_.store(true);
+    available_.store(false);
     return false;
   }
 }

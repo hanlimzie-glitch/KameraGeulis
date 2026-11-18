@@ -272,6 +272,16 @@ void DrawAboutTab(AppUiState& ui) {
         "Simpan 1 frame mentah + 1 frame keluaran pipeline sebagai PNG\n"
         "ke folder %APPDATA%\\KameraGeulis\\debug\\ (path dicatat di log)");
   }
+  if (ui.seg_bench_active) ImGui::BeginDisabled();
+  if (ImGui::Button(ui.seg_bench_active
+                        ? "Benchmark seg berjalan..."
+                        : "Jalankan benchmark seg (12 konfig)")) {
+    ui.request_seg_bench = true;
+  }
+  if (ui.seg_bench_active) ImGui::EndDisabled();
+  if (!ui.seg_bench_status.empty()) {
+    ImGui::TextWrapped("%s", ui.seg_bench_status.c_str());
+  }
   if (!ui.camera_mode_line.empty()) {
     ImGui::Text("Kamera: %s", ui.camera_mode_line.c_str());
   }
