@@ -619,44 +619,97 @@ std::vector<CompactDarkBlob> DetectCompactNostrilBlobs(
     if (umax - umin <= max_span && static_cast<int>(q.size()) <= max_blob_area) {
       build_blob_from_pixels(q);
     } else if (static_cast<int>(q.size()) >= 2 * min_blob_px) {
-      // Pecah komponen lebar: ambil dua benih minima paling gelap berjarak >= 0.08*IOD.
-      std::vector<int> sorted_q = q;
-      std::sort(sorted_q.begin(), sorted_q.end(), [&](int a, int b) {
-        return lum_grid[a] < lum_grid[b];
-      });
-      std::vector<int> seeds;
-      const float min_sep = std::max(5.0f, 0.08f * sf.iod);
-      for (int idx : sorted_q) {
-        const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
-        const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
-        bool far = true;
+      // M2o: pecah komponen melebar. Langkah 1: coba pisahkan sub-komponen
+      // memakai ambang lebih ketat (min_lum + 0.06 * skin_luma) supaya
+      // bayangan penghubung di kolumela rontok tanpa bias tepi/urutan sort.
+      float min_comp_lum = 255.0f;
+      for (int idx : q) min_comp_lum = std::min(min_comp_lum, lum_grid[idx]);
+      const float tight_cut =
+          std::min(dark_thresh, min_comp_lum + 0.06f * skin_luma);
+      std::vector<uint8_t> in_q_tight(static_cast<size_t>(gw) * gh, 0);
+      for (int idx : q) {
+        if (lum_grid[idx] <= tight_cut) in_q_tight[idx] = 1;
+      }
+      std::vector<uint8_t> vis_t(static_cast<size_t>(gw) * gh, 0);
+      std::vector<int> sq;
+      int split_added = 0;
+      for (int idx : q) {
+        if (!in_q_tight[idx] || vis_t[idx]) continue;
+        sq.clear();
+        sq.push_back(idx);
+        vis_t[idx] = 1;
+        size_t sh = 0;
+        float sumin = 1e9f, sumax = -1e9f;
+        while (sh < sq.size()) {
+          const int cur = sq[sh++];
+          const int gx = cur % gw;
+          const int gy = cur / gw;
+          const float dx = (static_cast<float>(x0 + gx) + 0.5f) - sf.tip_x;
+          const float dy = (static_cast<float>(y0 + gy) + 0.5f) - sf.tip_y;
+          const float u_off = dx * sf.ux + dy * sf.uy;
+          sumin = std::min(sumin, u_off);
+          sumax = std::max(sumax, u_off);
+          const int nb[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+          for (const auto& d : nb) {
+            const int nx = gx + d[0];
+            const int ny = gy + d[1];
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            const int ni = ny * gw + nx;
+            if (in_q_tight[ni] && !vis_t[ni]) {
+              vis_t[ni] = 1;
+              sq.push_back(ni);
+            }
+          }
+        }
+        if (sumax - sumin <= max_span &&
+            static_cast<int>(sq.size()) <= max_blob_area &&
+            static_cast<int>(sq.size()) >= min_blob_px) {
+          build_blob_from_pixels(sq);
+          ++split_added;
+        }
+      }
+
+      if (split_added == 0) {
+        // Fallback: ambil minima gelap deterministik berjarak >= 0.08*IOD.
+        std::vector<int> sorted_q = q;
+        std::sort(sorted_q.begin(), sorted_q.end(), [&](int a, int b) {
+          if (lum_grid[a] != lum_grid[b]) return lum_grid[a] < lum_grid[b];
+          return a < b;
+        });
+        std::vector<int> seeds;
+        const float min_sep = std::max(5.0f, 0.08f * sf.iod);
+        for (int idx : sorted_q) {
+          const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
+          const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
+          bool far = true;
+          for (int s : seeds) {
+            const float sx = static_cast<float>(x0 + (s % gw)) + 0.5f;
+            const float sy = static_cast<float>(y0 + (s / gw)) + 0.5f;
+            if (std::hypot(px - sx, py - sy) < min_sep) {
+              far = false;
+              break;
+            }
+          }
+          if (far) {
+            seeds.push_back(idx);
+            if (seeds.size() >= 4) break;
+          }
+        }
+        const float core_r = std::max(4.0f, 0.075f * sf.iod);
         for (int s : seeds) {
           const float sx = static_cast<float>(x0 + (s % gw)) + 0.5f;
           const float sy = static_cast<float>(y0 + (s / gw)) + 0.5f;
-          if (std::hypot(px - sx, py - sy) < min_sep) {
-            far = false;
-            break;
+          const float local_cut =
+              std::min(dark_thresh, lum_grid[s] + 0.08f * skin_luma);
+          std::vector<int> sub;
+          for (int idx : q) {
+            if (lum_grid[idx] > local_cut) continue;
+            const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
+            const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
+            if (std::hypot(px - sx, py - sy) <= core_r) sub.push_back(idx);
           }
+          build_blob_from_pixels(sub);
         }
-        if (far) {
-          seeds.push_back(idx);
-          if (seeds.size() >= 4) break;
-        }
-      }
-      const float core_r = std::max(4.0f, 0.075f * sf.iod);
-      for (int s : seeds) {
-        const float sx = static_cast<float>(x0 + (s % gw)) + 0.5f;
-        const float sy = static_cast<float>(y0 + (s / gw)) + 0.5f;
-        const float local_cut =
-            std::min(dark_thresh, lum_grid[s] + 0.14f * skin_luma);
-        std::vector<int> sub;
-        for (int idx : q) {
-          if (lum_grid[idx] > local_cut) continue;
-          const float px = static_cast<float>(x0 + (idx % gw)) + 0.5f;
-          const float py = static_cast<float>(y0 + (idx / gw)) + 0.5f;
-          if (std::hypot(px - sx, py - sy) <= core_r) sub.push_back(idx);
-        }
-        build_blob_from_pixels(sub);
       }
     }
   }
