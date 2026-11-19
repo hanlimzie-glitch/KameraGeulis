@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include "kgcore/frame.h"
 
 namespace kgcore {
 // Pure CPU frame helpers - no GL/OS dependencies, unit-tested on Linux.
@@ -20,6 +21,16 @@ namespace kgcore {
 void ConvertToRgbaTopDown(const uint8_t* src, int width, int height,
                           size_t src_stride, bool flip_vertical,
                           bool src_is_bgra, uint8_t* dst);
+
+// M2p: Normalisasi mode rotasi kamera (-1 = otomatis; selain itu 0/90/180/270).
+int NormalizeRotationSetting(int deg);
+// Normalisasi sudut rotasi efektif menjadi salah satu dari {0, 90, 180, 270}.
+int NormalizeEffectiveRotation(int deg);
+
+// M2p: Rotasi frame 4-byte-per-pixel searah jarum jam (0/90/180/270 derajat).
+// Output selalu tightly packed (stride = dst->width * 4), mempertahankan
+// format piksel (BGRA/RGBA) dan timestamp_ms.
+bool RotateFrameCW(const Frame& src, int rot_deg_cw, Frame* dst);
 
 struct FrameStats {
   double mean_luma = 0.0;   // 0..255, 0.299R+0.587G+0.114B over a sample grid

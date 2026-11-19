@@ -25,7 +25,9 @@ bool Settings::operator==(const Settings& o) const {
          landmark_enabled == o.landmark_enabled && preset == o.preset &&
          language == o.language && camera_device == o.camera_device &&
          capture_width == o.capture_width && capture_height == o.capture_height &&
-         capture_fps == o.capture_fps;
+         capture_fps == o.capture_fps &&
+         camera_rotation == o.camera_rotation &&
+         auto_rotation_prior == o.auto_rotation_prior;
 }
 
 static float ClampUnit(const json& j, const char* key, float def) {
@@ -77,6 +79,22 @@ bool Settings::FromJson(const std::string& text) {
   capture_height = ClampInt(j, "capture_height", capture_height, 16, 4320);
   capture_fps = ClampInt(j, "capture_fps", capture_fps, 1, 240);
   skin_coverage = ClampInt(j, "skin_coverage", skin_coverage, 0, 1);
+  if (j.contains("camera_rotation")) {
+    try {
+      const int r = j.at("camera_rotation").get<int>();
+      if (r == -1 || r == 0 || r == 90 || r == 180 || r == 270) {
+        camera_rotation = r;
+      }
+    } catch (const std::exception&) {}
+  }
+  if (j.contains("auto_rotation_prior")) {
+    try {
+      const int p = j.at("auto_rotation_prior").get<int>();
+      if (p == 0 || p == 90 || p == 180 || p == 270) {
+        auto_rotation_prior = p;
+      }
+    } catch (const std::exception&) {}
+  }
   return true;
 }
 
@@ -99,6 +117,8 @@ std::string Settings::ToJson() const {
   j["capture_height"] = capture_height;
   j["capture_fps"] = capture_fps;
   j["skin_coverage"] = skin_coverage;
+  j["camera_rotation"] = camera_rotation;
+  j["auto_rotation_prior"] = auto_rotation_prior;
   return j.dump(2);
 }
 

@@ -1,7 +1,102 @@
 #include "kgcore/frame_convert.h"
 #include <cmath>
+#include <cstring>
 
 namespace kgcore {
+
+int NormalizeRotationSetting(int deg) {
+  if (deg < 0) return -1;
+  return NormalizeEffectiveRotation(deg);
+}
+
+int NormalizeEffectiveRotation(int deg) {
+  int r = deg % 360;
+  if (r < 0) r += 360;
+  if (r == 90 || r == 180 || r == 270) return r;
+  return 0;
+}
+
+bool RotateFrameCW(const Frame& src, int rot_deg_cw, Frame* dst) {
+  if (!dst || !src.IsValid()) return false;
+  if (dst == &src) {
+    Frame tmp = src;
+    return RotateFrameCW(tmp, rot_deg_cw, dst);
+  }
+  const int rot = NormalizeEffectiveRotation(rot_deg_cw);
+  const int sw = src.width;
+  const int sh = src.height;
+  const size_t src_row_bytes = static_cast<size_t>(sw) * 4;
+  const size_t src_stride = src.stride_bytes >= static_cast<int>(src_row_bytes)
+                                ? static_cast<size_t>(src.stride_bytes)
+                                : src_row_bytes;
+  if (src.pixels.size() < src_stride * static_cast<size_t>(sh)) return false;
+
+  const int dw = (rot == 90 || rot == 270) ? sh : sw;
+  const int dh = (rot == 90 || rot == 270) ? sw : sh;
+  dst->width = dw;
+  dst->height = dh;
+  dst->stride_bytes = dw * 4;
+  dst->format = src.format;
+  dst->timestamp_ms = src.timestamp_ms;
+  dst->pixels.resize(static_cast<size_t>(dw) * dh * 4);
+
+  const uint8_t* sbase = src.pixels.data();
+  uint8_t* dbase = dst->pixels.data();
+
+  if (rot == 0) {
+    if (src_stride == src_row_bytes) {
+      std::memcpy(dbase, sbase, src_row_bytes * static_cast<size_t>(sh));
+    } else {
+      for (int y = 0; y < sh; ++y) {
+        std::memcpy(dbase + static_cast<size_t>(y) * src_row_bytes,
+                    sbase + static_cast<size_t>(y) * src_stride, src_row_bytes);
+      }
+    }
+    return true;
+  }
+
+  if (rot == 180) {
+    for (int dy = 0; dy < dh; ++dy) {
+      const uint32_t* srow = reinterpret_cast<const uint32_t*>(
+          sbase + static_cast<size_t>(sh - 1 - dy) * src_stride);
+      uint32_t* drow = reinterpret_cast<uint32_t*>(
+          dbase + static_cast<size_t>(dy) * dw * 4);
+      for (int dx = 0; dx < dw; ++dx) {
+        drow[dx] = srow[sw - 1 - dx];
+      }
+    }
+    return true;
+  }
+
+  if (rot == 90) {
+    for (int dy = 0; dy < dh; ++dy) {
+      uint32_t* drow = reinterpret_cast<uint32_t*>(
+          dbase + static_cast<size_t>(dy) * dw * 4);
+      const int sx = dy;
+      for (int dx = 0; dx < dw; ++dx) {
+        const int sy = sh - 1 - dx;
+        const uint32_t* srow = reinterpret_cast<const uint32_t*>(
+            sbase + static_cast<size_t>(sy) * src_stride);
+        drow[dx] = srow[sx];
+      }
+    }
+    return true;
+  }
+
+  // rot == 270
+  for (int dy = 0; dy < dh; ++dy) {
+    uint32_t* drow = reinterpret_cast<uint32_t*>(
+        dbase + static_cast<size_t>(dy) * dw * 4);
+    const int sx = sw - 1 - dy;
+    for (int dx = 0; dx < dw; ++dx) {
+      const int sy = dx;
+      const uint32_t* srow = reinterpret_cast<const uint32_t*>(
+          sbase + static_cast<size_t>(sy) * src_stride);
+      drow[dx] = srow[sx];
+    }
+  }
+  return true;
+}
 
 void ConvertToRgbaTopDown(const uint8_t* src, int width, int height,
                           size_t src_stride, bool flip_vertical,

@@ -12,7 +12,9 @@
 #include <string>
 #include <vector>
 #include "face_tracker.h"
+#include "kgcore/camera_orientation.h"
 #include "kgcore/landmark.h"
+#include "kgcore/landmark_tracking.h"
 #include "kgcore/roi_align.h"
 
 namespace Ort {
@@ -31,6 +33,8 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   bool Available() const override;
   const char* Name() const override { return "ort-cpu"; }
   LandmarkSet Track(const Frame& frame) override;
+  bool ProbeOrientations(const Frame& raw_frame, OrientationScores* out) override;
+  void ResetTracking() override;
   bool GetStageTimings(StageTimings* out) const override;
   bool GetDebugRoi(std::vector<uint8_t>* rgba_out, int* w, int* h,
                    AlignedRoi* roi_out) const override;
@@ -43,6 +47,7 @@ class OrtLandmarkProvider : public ILandmarkProvider {
  private:
   LandmarkSet TrackImpl_(const Frame& frame);  // Track() = wrapper ber-timing
   bool DetectionStage_(const Frame& frame, AlignedRoi* roi_out, float* face_score_out);
+  float DetectionScoreRotated_(const Frame& raw_frame, int rot_deg_cw);
   bool RunMeshOnRoi_(const Frame& frame, const AlignedRoi& roi,
                      std::array<Vec2, kLandmarkCount>* canvas_pts,
                      float* face_flag_out, std::vector<uint8_t>* roi_rgba_out);
@@ -61,9 +66,10 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   bool logged_failure_ = false;
   std::string last_error_ = "model belum dimuat";
 
-  // State tracking antar-frame (M2l: ROI dihitung langsung dari bbox
-  // landmark ter-rotasi + detektor periodik adaptif 10-15 frame + uji sanity).
+  // State tracking antar-frame (M2l/M2p: ROI dari landmark + detektor
+  // periodik adaptif + anti-thrash ResetGuard).
   bool have_prev_roi_ = false;
+  bool has_initialized_once_ = false;
   AlignedRoi prev_roi_{};
   LandmarkSet prev_lm_{};
   float det_ref_side_px_ = 0.0f;
@@ -71,10 +77,10 @@ class OrtLandmarkProvider : public ILandmarkProvider {
   float prev_face_flag_ = 10.0f;
   float last_roi_shift_frac_ = 0.0f;
   float last_angle_delta_rad_ = 0.0f;
-  int lost_streak_ = 0;          // frame gagal berurutan
   int frames_since_detect_ = 0;  // frame sejak detektor terakhir jalan
   int reset_count_ = 0;
-  std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
+  int64_t last_rate_limit_log_ms_ = -60000;
+  ResetGuard reset_guard_;
   std::string last_reset_reason_;
   StageTimings stage_;               // debug-overlay per-stage timings
 

@@ -23,6 +23,10 @@ struct Settings {
   int capture_width = 1280;         // requested capture mode (best effort)
   int capture_height = 720;
   int capture_fps = 30;
+  // M2p: Putar kamera (-1 = Otomatis, atau 0/90/180/270 derajat searah jarum jam).
+  int camera_rotation = -1;
+  // M2p: Prior orientasi terbaik terakhir pada mode Otomatis (0/90/180/270).
+  int auto_rotation_prior = 0;
 
   bool operator==(const Settings& o) const;
   bool operator!=(const Settings& o) const { return !(*this == o); }

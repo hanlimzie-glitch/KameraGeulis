@@ -21,6 +21,7 @@
 #include "kgcore/face_anchors.h"
 #include "kgcore/face_detection_decode.h"
 #include "kgcore/face_mesh_decode.h"
+#include "kgcore/frame_convert.h"
 #include "kgcore/landmark_tracking.h"
 #include "kgcore/log.h"
 #include "kgcore/roi_align.h"
@@ -407,17 +408,25 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
     return out;
   }
 
+  const int64_t now_ms =
+      frame.timestamp_ms > 0
+          ? frame.timestamp_ms
+          : std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+  reset_guard_.BeginFrame(now_ms);
   const int src_w = frame.width, src_h = frame.height;
   const int detect_interval = AdaptiveDetectInterval(
       last_roi_shift_frac_, last_angle_delta_rad_, prev_face_flag_);
-  const bool need_detection = !have_prev_roi_ || lost_streak_ >= 2 ||
-                              frames_since_detect_ >= detect_interval;
+  const bool need_detection =
+      !have_prev_roi_ || frames_since_detect_ >= detect_interval;
 
   AlignedRoi roi{};
   AlignedRoi det_roi{};
   bool det_ran = false;
   bool det_ok = false;
   float det_score = prev_face_score_;
+  bool roi_init_this_frame = false;
   bool roi_reset_this_frame = false;
   std::string reset_reason;
 
@@ -430,51 +439,42 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
     return ok;
   };
 
+  auto log_rate_limit = [&](const char* why) {
+    if (now_ms - last_rate_limit_log_ms_ >= 3000) {
+      last_rate_limit_log_ms_ = now_ms;
+      Log(kTag, "ROI reset ditahan rate-limit (%d/60d): %s",
+          reset_guard_.ResetsInLastMinute(now_ms), why);
+    }
+  };
+
   if (have_prev_roi_) {
     roi = TrackRoiFromLandmarks(prev_lm_, src_w, src_h, det_ref_side_px_);
-  }
-
-  if (need_detection) {
-    det_ok = run_detector(&det_roi, &det_score);
-    if (det_ok) {
-      if (!have_prev_roi_) {
-        roi = det_roi;
-        det_ref_side_px_ = det_roi.side_px;
-        roi_reset_this_frame = true;
-        reset_reason = "inisialisasi deteksi";
-        Log(kTag, "ROI init: deteksi awal (side=%.1f px, score=%.2f)",
-            det_roi.side_px, det_score);
-      } else {
-        const float iou = RoiBoxIoU(roi, det_roi);
-        if (iou < kTrackingResetIouThreshold) {
-          char buf[128];
-          std::snprintf(buf, sizeof(buf),
-                        "IoU tracking vs deteksi=%.3f (<%.2f)",
-                        iou, kTrackingResetIouThreshold);
-          reset_reason = buf;
-          Log(kTag, "ROI reset: %s, sejak deteksi %d", reset_reason.c_str(),
-              frames_since_detect_);
-          roi = det_roi;
-          det_ref_side_px_ = det_roi.side_px;
-          roi_reset_this_frame = true;
-        } else {
-          // Tracking selaras dengan deteksi: perbarui jangkar skala & reset timer deteksi.
-          det_ref_side_px_ = det_roi.side_px;
-          frames_since_detect_ = 0;
-        }
-      }
-      out.face_score = det_score;
-    } else {
-      ++lost_streak_;
-      if (have_prev_roi_ && lost_streak_ < 2) {
-        out.face_score = prev_face_score_;
-      } else {
-        have_prev_roi_ = false;
-        return out;
-      }
-    }
   } else {
-    out.face_score = prev_face_score_;
+    // Jika sebelumnya sudah pernah inisialisasi, patuhi cooldown/rate-limit
+    // agar kondisi hilang wajah berkepanjangan tidak memicu thrash detektor.
+    if (has_initialized_once_ && reset_guard_.CooldownRemaining() > 0) {
+      stage_.frames_since_detect = frames_since_detect_;
+      stage_.reset_count = reset_count_;
+      stage_.resets_in_last_min = reset_guard_.ResetsInLastMinute(now_ms);
+      stage_.resets_per_min = static_cast<float>(stage_.resets_in_last_min);
+      return out;
+    }
+    det_ok = run_detector(&det_roi, &det_score);
+    if (!det_ok) {
+      stage_.frames_since_detect = frames_since_detect_;
+      stage_.reset_count = reset_count_;
+      stage_.resets_in_last_min = reset_guard_.ResetsInLastMinute(now_ms);
+      stage_.resets_per_min = static_cast<float>(stage_.resets_in_last_min);
+      return out;
+    }
+    roi = det_roi;
+    det_ref_side_px_ = det_roi.side_px;
+    out.face_score = det_score;
+    roi_init_this_frame = true;
+    if (!has_initialized_once_) {
+      Log(kTag, "ROI init: deteksi awal (side=%.1f px, score=%.2f)",
+          det_roi.side_px, det_score);
+    }
   }
 
   auto eval_mesh = [&](const AlignedRoi& use_roi, LandmarkSet* lm_out,
@@ -500,39 +500,101 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
   std::vector<uint8_t> roi_rgba;
   bool mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
 
+  // Deteksi periodik saat tracking aktif: cek IoU drift dengan histeresis + cooldown.
+  if (have_prev_roi_ && need_detection) {
+    det_ok = run_detector(&det_roi, &det_score);
+    if (det_ok) {
+      out.face_score = det_score;
+      const float iou = RoiBoxIoU(roi, det_roi);
+      const bool low_iou = (iou < kTrackingResetIouThreshold) && (det_score >= 0.55f);
+      bool iou_rate_limited = false;
+      if (reset_guard_.ShouldTriggerIouReset(low_iou, mesh_ok, now_ms,
+                                             &iou_rate_limited)) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+                      "IoU tracking vs deteksi=%.3f (<%.2f, score=%.2f)",
+                      iou, kTrackingResetIouThreshold, det_score);
+        reset_reason = buf;
+        Log(kTag, "ROI reset: %s, sejak deteksi %d", reset_reason.c_str(),
+            frames_since_detect_);
+        roi = det_roi;
+        det_ref_side_px_ = det_roi.side_px;
+        roi_reset_this_frame = true;
+        mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
+      } else if (iou_rate_limited) {
+        log_rate_limit("IoU drift");
+      } else if (iou >= kTrackingResetIouThreshold) {
+        det_ref_side_px_ = det_roi.side_px;
+        frames_since_detect_ = 0;
+      }
+    }
+  } else if (have_prev_roi_) {
+    out.face_score = prev_face_score_;
+  }
+
+  reset_guard_.OnMeshResult(mesh_ok);
   if (!mesh_ok) {
     std::string fail_why;
     if (!IsFaceFlagValid(face_flag)) {
-      char buf[96];
-      std::snprintf(buf, sizeof(buf), "face_flag=%.3f (<%.2f)", face_flag,
-                    kFaceFlagMinThreshold);
+      char buf[112];
+      std::snprintf(buf, sizeof(buf),
+                    "face_flag_prob=%.3f (logit=%.3f < %.2f)",
+                    FaceFlagToProb(face_flag), face_flag, kFaceFlagMinThreshold);
       fail_why = buf;
     } else {
       fail_why = sanity.reason.empty() ? "mesh gagal" : sanity.reason;
     }
-    Log(kTag, "ROI reset: %s, sejak deteksi %d -> reinisialisasi via detektor",
-        fail_why.c_str(), frames_since_detect_);
 
-    // Coba pulihkan seketika pada frame yang sama lewat detektor wajah.
-    if (!det_ran) det_ok = run_detector(&det_roi, &det_score);
-    if (det_ok) {
-      out.face_score = det_score;
-      roi = det_roi;
-      det_ref_side_px_ = det_roi.side_px;
-      roi_reset_this_frame = true;
-      reset_reason = fail_why;
-      mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
+    if (have_prev_roi_) {
+      bool rate_limited = false;
+      if (!reset_guard_.ShouldTriggerMeshReset(now_ms, &rate_limited)) {
+        if (rate_limited) log_rate_limit(fail_why.c_str());
+        out.valid = false;
+        ++frames_since_detect_;
+        stage_.frames_since_detect = frames_since_detect_;
+        stage_.reset_count = reset_count_;
+        stage_.resets_in_last_min = reset_guard_.ResetsInLastMinute(now_ms);
+        stage_.resets_per_min = static_cast<float>(stage_.resets_in_last_min);
+        return out;
+      }
+      Log(kTag, "ROI reset: %s (streak=%d), sejak deteksi %d -> reinisialisasi via detektor",
+          fail_why.c_str(), reset_guard_.BadMeshStreak(), frames_since_detect_);
+      if (!det_ran) det_ok = run_detector(&det_roi, &det_score);
+      if (det_ok) {
+        out.face_score = det_score;
+        roi = det_roi;
+        det_ref_side_px_ = det_roi.side_px;
+        roi_reset_this_frame = true;
+        reset_reason = fail_why;
+        mesh_ok = eval_mesh(roi, &out, &face_flag, &sanity, &roi_rgba);
+      }
+    } else {
+      // Deteksi awal menghasilkan ROI yang langsung gagal mesh: catat cooldown
+      // agar tidak mengulang deteksi tiap frame.
+      reset_guard_.RecordReset(now_ms);
+      ++reset_count_;
+      last_reset_reason_ = fail_why;
     }
+
     if (!mesh_ok) {
-      ++lost_streak_;
-      if (lost_streak_ >= 2) have_prev_roi_ = false;
+      if (roi_reset_this_frame) {
+        reset_guard_.RecordReset(now_ms);
+        ++reset_count_;
+        last_reset_reason_ = fail_why;
+      }
+      have_prev_roi_ = false;
       out.valid = false;
       stage_.frames_since_detect = frames_since_detect_;
+      stage_.reset_count = reset_count_;
+      stage_.resets_in_last_min = reset_guard_.ResetsInLastMinute(now_ms);
+      stage_.resets_per_min = static_cast<float>(stage_.resets_in_last_min);
+      stage_.last_reset_reason = last_reset_reason_;
       return out;
     }
   }
 
   // Sukses — simpan state pelacakan & ROI debug F5.
+  has_initialized_once_ = true;
   if (have_prev_roi_ && !roi_reset_this_frame && prev_roi_.side_px > 1.0f) {
     last_roi_shift_frac_ =
         std::hypot(roi.cx_px - prev_roi_.cx_px, roi.cy_px - prev_roi_.cy_px) /
@@ -543,29 +605,24 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
     last_angle_delta_rad_ = 0.0f;
   }
 
-  const double elapsed_sec = std::chrono::duration<double>(
-                                 std::chrono::steady_clock::now() - start_time_)
-                                 .count();
-  const float rpm = elapsed_sec > 1.0
-                        ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec)
-                        : 0.0f;
-
   if (roi_reset_this_frame) {
+    reset_guard_.RecordReset(now_ms);
     ++reset_count_;
     last_reset_reason_ = reset_reason;
     frames_since_detect_ = 0;
     out.roi_reset = true;
     out.reset_reason = reset_reason;
-    const float rpm_now = elapsed_sec > 1.0
-                              ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec)
-                              : 0.0f;
-    Log(kTag, "ROI reset #%d (%.1f/menit): %s", reset_count_, rpm_now,
+    const int rpm_60s = reset_guard_.ResetsInLastMinute(now_ms);
+    Log(kTag, "ROI reset #%d (60s=%d/menit): %s", reset_count_, rpm_60s,
         reset_reason.c_str());
+  } else if (roi_init_this_frame) {
+    frames_since_detect_ = 0;
+    out.roi_reset = true;
+    out.reset_reason = "inisialisasi deteksi";
   } else if (!det_ran) {
     ++frames_since_detect_;
   }
 
-  lost_streak_ = 0;
   have_prev_roi_ = true;
   prev_roi_ = roi;
   prev_lm_ = out;
@@ -574,12 +631,98 @@ LandmarkSet OrtLandmarkProvider::TrackImpl_(const Frame& frame) {
   last_roi_rgba_ = std::move(roi_rgba);
   last_roi_used_ = roi;
 
+  const int rpm_60s = reset_guard_.ResetsInLastMinute(now_ms);
   stage_.frames_since_detect = frames_since_detect_;
   stage_.reset_count = reset_count_;
-  stage_.resets_per_min =
-      elapsed_sec > 1.0 ? static_cast<float>(reset_count_ * 60.0 / elapsed_sec) : rpm;
+  stage_.resets_in_last_min = rpm_60s;
+  stage_.resets_per_min = static_cast<float>(rpm_60s);
   stage_.last_reset_reason = last_reset_reason_;
   return out;
+}
+
+void OrtLandmarkProvider::ResetTracking() {
+  have_prev_roi_ = false;
+  has_initialized_once_ = false;
+  prev_roi_ = AlignedRoi{};
+  prev_lm_ = LandmarkSet{};
+  det_ref_side_px_ = 0.0f;
+  prev_face_score_ = 0.0f;
+  prev_face_flag_ = 10.0f;
+  last_roi_shift_frac_ = 0.0f;
+  last_angle_delta_rad_ = 0.0f;
+  frames_since_detect_ = 0;
+  reset_guard_.ClearStreaks();
+}
+
+float OrtLandmarkProvider::DetectionScoreRotated_(const Frame& raw_frame,
+                                                  int rot_deg_cw) {
+  const int rot = NormalizeEffectiveRotation(rot_deg_cw);
+  const int sw = raw_frame.width, sh = raw_frame.height;
+  const int rw = (rot == 90 || rot == 270) ? sh : sw;
+  const int rh = (rot == 90 || rot == 270) ? sw : sh;
+  const LetterboxInfo lb = ComputeLetterbox(rw, rh, 128);
+  std::vector<float> det_input(static_cast<size_t>(128) * 128 * 3, 0.0f);
+  for (int ty = 0; ty < 128; ++ty) {
+    const float ry = ((ty + 0.5f) - lb.pad_y) / lb.scale - 0.5f;
+    for (int tx = 0; tx < 128; ++tx) {
+      const float rx = ((tx + 0.5f) - lb.pad_x) / lb.scale - 0.5f;
+      float sx = rx, sy = ry;
+      if (rot == 90) {
+        sx = ry;
+        sy = static_cast<float>(sh - 1) - rx;
+      } else if (rot == 180) {
+        sx = static_cast<float>(sw - 1) - rx;
+        sy = static_cast<float>(sh - 1) - ry;
+      } else if (rot == 270) {
+        sx = static_cast<float>(sw - 1) - ry;
+        sy = rx;
+      }
+      float* dst = det_input.data() + (static_cast<size_t>(ty) * 128 + tx) * 3;
+      for (int c = 0; c < 3; ++c) {
+        dst[c] = (SampleChannel(raw_frame, sx, sy, c) / 255.0f) * 2.0f - 1.0f;
+      }
+    }
+  }
+
+  const auto anchors = GenerateFaceAnchors();
+  std::vector<float> regressors;
+  std::vector<float> classificators;
+  try {
+    Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+    const int64_t det_shape[4] = {1, 128, 128, 3};
+    Ort::Value det_tensor = Ort::Value::CreateTensor<float>(
+        memInfo, det_input.data(), det_input.size(), det_shape, 4);
+    const char* input_names[] = {"input"};
+    const char* output_names[] = {"regressors", "classificators"};
+    Ort::RunOptions run_opts;
+    auto det_out =
+        det_->Run(run_opts, input_names, &det_tensor, 1, output_names, 2);
+    const float* reg = det_out[0].GetTensorData<float>();
+    const float* cls = det_out[1].GetTensorData<float>();
+    regressors.assign(reg, reg + 896 * 16);
+    classificators.assign(cls, cls + 896);
+  } catch (const Ort::Exception&) {
+    return 0.0f;
+  }
+
+  const std::vector<Detection> dets = DecodeDetections(
+      regressors.data(), classificators.data(), anchors, 0.35f, 0.3f);
+  return dets.empty() ? 0.0f : dets[0].score;
+}
+
+bool OrtLandmarkProvider::ProbeOrientations(const Frame& raw_frame,
+                                            OrientationScores* out) {
+  if (!out || !raw_frame.IsValid() || !EnsureModelsLoaded_()) return false;
+  const auto ds = std::chrono::steady_clock::now();
+  for (int i = 0; i < 4; ++i) {
+    out->score[static_cast<size_t>(i)] =
+        DetectionScoreRotated_(raw_frame, IndexToRotation(i));
+  }
+  out->ok = true;
+  stage_.detect_ms += std::chrono::duration<float, std::milli>(
+                          std::chrono::steady_clock::now() - ds).count();
+  return true;
 }
 
 bool OrtLandmarkProvider::DetectionStage_(const Frame& frame, AlignedRoi* roi_out,

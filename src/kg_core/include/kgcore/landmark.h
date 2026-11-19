@@ -30,6 +30,8 @@ class LandmarkFade {
  public:
   explicit LandmarkFade(float fade_ms = 300.0f) : fade_ms_(fade_ms) {}
   void Update(bool face_present, int64_t now_ms);
+  void HoldTimestamp(int64_t now_ms);
+  void Reset();
   float Gain() const { return gain_; }  // [0,1]
  private:
   float fade_ms_;

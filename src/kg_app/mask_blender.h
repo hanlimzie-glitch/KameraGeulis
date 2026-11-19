@@ -746,7 +746,8 @@ void main() {
              bool use_gpu_mask_gen = true, float seg_body_gain = 1.0f,
              const uint8_t* hair_probability = nullptr,
              float skin_luma0 = 0.0f, bool has_luma_calibration = false,
-             float seg_attenuation = 1.0f) {
+             float seg_attenuation = 1.0f,
+             bool freeze_last_mask = false) {
     if (disabled) return false;
     if (!Init() || !raw || !beauty || !mask || w <= 0 || h <= 0 || mw <= 0 ||
         mh <= 0) {
@@ -764,11 +765,15 @@ void main() {
     const kgcore::SkinMaskConfig default_skin_cfg{};
     const kgcore::SkinMaskConfig& active_skin_cfg =
         skin_cfg ? *skin_cfg : default_skin_cfg;
-    last_skin_luma = 0.0f;
-    last_dark_low_ratio = active_skin_cfg.dark_luma_low_ratio;
-    last_dark_high_ratio = active_skin_cfg.dark_luma_high_ratio;
-    last_nostril_roi[0][0] = last_nostril_roi[0][1] = last_nostril_roi[0][2] = 0.0f;
-    last_nostril_roi[1][0] = last_nostril_roi[1][1] = last_nostril_roi[1][2] = 0.0f;
+    const bool can_keep_frozen =
+        freeze_last_mask && tex_mask != 0 && mask_w == mw && mask_h == mh;
+    if (!can_keep_frozen || (use_gpu_mask_gen && landmarks_xy && landmark_count >= 468)) {
+      last_skin_luma = 0.0f;
+      last_dark_low_ratio = active_skin_cfg.dark_luma_low_ratio;
+      last_dark_high_ratio = active_skin_cfg.dark_luma_high_ratio;
+      last_nostril_roi[0][0] = last_nostril_roi[0][1] = last_nostril_roi[0][2] = 0.0f;
+      last_nostril_roi[1][0] = last_nostril_roi[1][1] = last_nostril_roi[1][2] = 0.0f;
+    }
 
     bool gpu_mask_ok = false;
     if (use_gpu_mask_gen && landmarks_xy && landmark_count >= 468) {
@@ -784,9 +789,10 @@ void main() {
     if (gpu_mask_ok && has_luma_calibration && active_skin_cfg.dark_filter_enabled) {
       last_skin_luma = skin_luma0;
     }
-    if (!gpu_mask_ok) {
+    if (!gpu_mask_ok && !can_keep_frozen) {
       // Fallback sinkron ke mask CPU (baik saat landmark kosong, --no-mask-gen-gpu,
-      // maupun saat FBO mask_gen gagal).
+      // maupun saat FBO mask_gen gagal). Jika freeze_last_mask aktif, pertahankan
+      // mask terakhir yang sudah diraster agar eksklusi fitur tidak hilang.
       UploadMask(mask, mw, mh);
     }
 

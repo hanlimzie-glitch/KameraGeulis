@@ -52,7 +52,8 @@ add_library(kg_core STATIC
   src/kg_core/src/mask_layers.cc
   src/kg_core/src/perf_guard.cc
   src/kg_core/src/black_frame_guard.cc
-  src/kg_core/src/landmark_tracking.cc)
+  src/kg_core/src/landmark_tracking.cc
+  src/kg_core/src/camera_orientation.cc)
 target_include_directories(kg_core PUBLIC src/kg_core/include)
 target_link_libraries(kg_core PUBLIC nlohmann_json::nlohmann_json)
 
@@ -81,7 +82,8 @@ if(KG_BUILD_TESTS)
     src/kg_tests/mask_layers_test.cc
     src/kg_tests/perf_guard_test.cc
     src/kg_tests/black_frame_guard_test.cc
-    src/kg_tests/landmark_tracking_test.cc)
+    src/kg_tests/landmark_tracking_test.cc
+    src/kg_tests/camera_orientation_test.cc)
   target_link_libraries(kg_tests PRIVATE kg_core Catch2::Catch2WithMain)
   add_test(NAME kg_tests COMMAND kg_tests)
 endif()

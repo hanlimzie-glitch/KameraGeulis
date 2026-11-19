@@ -359,4 +359,269 @@ bool RenderLandmarkDebugOverlayRgba(const uint8_t* raw_rgba, int w, int h,
   return true;
 }
 
+float FaceFlagToProb(float face_flag_logit) {
+  return Sigmoid(face_flag_logit);
+}
+
+ResetGuard::ResetGuard(ResetGuardConfig cfg) : cfg_(cfg) {}
+
+void ResetGuard::PruneWindow_(int64_t now_ms) const {
+  while (!reset_timestamps_ms_.empty() &&
+         (now_ms - reset_timestamps_ms_.front()) > cfg_.rate_window_ms) {
+    reset_timestamps_ms_.pop_front();
+  }
+}
+
+bool ResetGuard::IsRateLimited_(int64_t now_ms) const {
+  PruneWindow_(now_ms);
+  return static_cast<int>(reset_timestamps_ms_.size()) >= cfg_.max_resets_per_min;
+}
+
+void ResetGuard::BeginFrame(int64_t now_ms) {
+  PruneWindow_(now_ms);
+  if (cooldown_remaining_ > 0) --cooldown_remaining_;
+}
+
+void ResetGuard::OnMeshResult(bool mesh_valid) {
+  if (mesh_valid) {
+    bad_mesh_streak_ = 0;
+  } else {
+    ++bad_mesh_streak_;
+  }
+}
+
+bool ResetGuard::ShouldTriggerMeshReset(int64_t now_ms, bool* rate_limited) {
+  if (rate_limited) *rate_limited = false;
+  if (bad_mesh_streak_ < cfg_.fail_frames_before_reset) return false;
+  if (cooldown_remaining_ > 0) return false;
+  if (IsRateLimited_(now_ms)) {
+    if (rate_limited) *rate_limited = true;
+    return false;
+  }
+  return true;
+}
+
+bool ResetGuard::ShouldTriggerIouReset(bool low_iou, bool mesh_healthy,
+                                       int64_t now_ms, bool* rate_limited) {
+  if (rate_limited) *rate_limited = false;
+  if (!low_iou) {
+    low_iou_streak_ = 0;
+    return false;
+  }
+  ++low_iou_streak_;
+  const int needed = mesh_healthy ? cfg_.low_iou_before_reset : 1;
+  if (low_iou_streak_ < needed) return false;
+  if (cooldown_remaining_ > 0) return false;
+  if (IsRateLimited_(now_ms)) {
+    if (rate_limited) *rate_limited = true;
+    return false;
+  }
+  return true;
+}
+
+void ResetGuard::RecordReset(int64_t now_ms) {
+  PruneWindow_(now_ms);
+  reset_timestamps_ms_.push_back(now_ms);
+  ++total_resets_;
+  cooldown_remaining_ = cfg_.cooldown_frames;
+  bad_mesh_streak_ = 0;
+  low_iou_streak_ = 0;
+}
+
+void ResetGuard::ClearStreaks() {
+  bad_mesh_streak_ = 0;
+  low_iou_streak_ = 0;
+}
+
+void ResetGuard::ResetAll() {
+  ClearStreaks();
+  cooldown_remaining_ = 0;
+  reset_timestamps_ms_.clear();
+}
+
+int ResetGuard::ResetsInLastMinute(int64_t now_ms) const {
+  PruneWindow_(now_ms);
+  return static_cast<int>(reset_timestamps_ms_.size());
+}
+
+const char* TrackingPhaseName(TrackingPhase phase) {
+  switch (phase) {
+    case TrackingPhase::kLost:
+      return "LOST";
+    case TrackingPhase::kRecovering:
+      return "RECOVERING";
+    case TrackingPhase::kTracking:
+      return "TRACKING";
+    case TrackingPhase::kHolding:
+      return "HOLDING";
+    case TrackingPhase::kFadingOut:
+      return "FADING_OUT";
+  }
+  return "UNKNOWN";
+}
+
+TrackingStateMachine::TrackingStateMachine(TrackingStateConfig cfg)
+    : cfg_(cfg), fade_(cfg.fade_ms) {}
+
+void TrackingStateMachine::Reset() {
+  phase_ = TrackingPhase::kLost;
+  fade_.Reset();
+  has_last_good_ = false;
+  last_good_raw_ = LandmarkSet{};
+  last_good_smoothed_ = LandmarkSet{};
+  last_good_ts_ms_ = 0;
+  hold_frames_ = 0;
+  hold_start_ts_ms_ = 0;
+  fade_start_ts_ms_ = 0;
+  fade_out_active_ = false;
+  fade_in_active_ = false;
+}
+
+TrackingStepResult TrackingStateMachine::Update(bool raw_valid,
+                                                const LandmarkSet* raw_lm,
+                                                const LandmarkSet* smoothed_lm,
+                                                int64_t now_ms) {
+  TrackingStepResult res;
+  res.prev_phase = phase_;
+
+  if (raw_valid) {
+    if (raw_lm) last_good_raw_ = *raw_lm;
+    if (smoothed_lm) last_good_smoothed_ = *smoothed_lm;
+    last_good_raw_.valid = true;
+    last_good_smoothed_.valid = true;
+    last_good_ts_ms_ = now_ms;
+    has_last_good_ = true;
+
+    fade_.Update(true, now_ms);
+    const float g = fade_.Gain();
+    res.use_live_landmarks = true;
+    res.gain = g;
+    res.mask_frozen = false;
+
+    if (g >= 0.999f) {
+      res.phase = TrackingPhase::kTracking;
+      if (fade_in_active_) {
+        last_fade_in_ms_ =
+            static_cast<float>(std::max<int64_t>(0, now_ms - fade_start_ts_ms_));
+        res.fade_duration_ms = last_fade_in_ms_;
+        fade_in_active_ = false;
+      }
+    } else {
+      res.phase = TrackingPhase::kRecovering;
+      if (phase_ != TrackingPhase::kRecovering) {
+        fade_start_ts_ms_ = now_ms;
+        fade_in_active_ = true;
+        fade_out_active_ = false;
+      }
+    }
+
+    if (phase_ != res.phase) {
+      res.phase_changed = true;
+      char buf[160];
+      if (phase_ == TrackingPhase::kHolding) {
+        const float held_ms =
+            static_cast<float>(std::max<int64_t>(0, now_ms - hold_start_ts_ms_));
+        std::snprintf(buf, sizeof(buf), "%s -> %s (pulih setelah hold %d fr / %.0f ms)",
+                      TrackingPhaseName(phase_), TrackingPhaseName(res.phase),
+                      hold_frames_, held_ms);
+      } else if (res.phase == TrackingPhase::kTracking && res.fade_duration_ms > 0.0f) {
+        std::snprintf(buf, sizeof(buf), "%s -> %s (fade_in=%.0f ms)",
+                      TrackingPhaseName(phase_), TrackingPhaseName(res.phase),
+                      res.fade_duration_ms);
+      } else {
+        std::snprintf(buf, sizeof(buf), "%s -> %s (wajah terdeteksi, gain=%.2f)",
+                      TrackingPhaseName(phase_), TrackingPhaseName(res.phase), g);
+      }
+      res.transition_log = buf;
+    }
+    hold_frames_ = 0;
+    phase_ = res.phase;
+    return res;
+  }
+
+  // raw_valid == false
+  const int64_t since_good_ms = std::max<int64_t>(0, now_ms - last_good_ts_ms_);
+  const bool can_hold =
+      has_last_good_ &&
+      (phase_ == TrackingPhase::kTracking || phase_ == TrackingPhase::kRecovering ||
+       phase_ == TrackingPhase::kHolding) &&
+      static_cast<float>(since_good_ms) <= cfg_.hold_ms;
+
+  if (can_hold) {
+    if (phase_ != TrackingPhase::kHolding) {
+      hold_start_ts_ms_ = now_ms;
+      hold_frames_ = 0;
+    }
+    ++hold_frames_;
+    ++total_hold_frames_;
+    fade_.HoldTimestamp(now_ms);
+    res.phase = TrackingPhase::kHolding;
+    res.holding = true;
+    res.mask_frozen = true;
+    res.gain = fade_.Gain();
+    res.hold_frames = hold_frames_;
+    if (phase_ != res.phase) {
+      res.phase_changed = true;
+      char buf[128];
+      std::snprintf(buf, sizeof(buf), "%s -> %s (hold-last-good <=%.0f ms, gain=%.2f)",
+                    TrackingPhaseName(phase_), TrackingPhaseName(res.phase),
+                    cfg_.hold_ms, res.gain);
+      res.transition_log = buf;
+    }
+    phase_ = res.phase;
+    return res;
+  }
+
+  // Di luar jendela hold -> fade efek kecantikan perlahan ke nol sambil
+  // membekukan mask terakhir hingga gain mencapai 0.
+  const bool had_gain_before = fade_.Gain() > 0.0f;
+  if (phase_ != TrackingPhase::kFadingOut && phase_ != TrackingPhase::kLost &&
+      had_gain_before) {
+    fade_start_ts_ms_ = now_ms;
+    fade_out_active_ = true;
+    fade_in_active_ = false;
+  }
+  fade_.Update(false, now_ms);
+  const float g = fade_.Gain();
+  res.gain = g;
+  res.hold_frames = hold_frames_;
+
+  if (has_last_good_ && g > 0.0f) {
+    res.phase = TrackingPhase::kFadingOut;
+    res.mask_frozen = true;
+  } else {
+    res.phase = TrackingPhase::kLost;
+    res.mask_frozen = false;
+    if (fade_out_active_) {
+      last_fade_out_ms_ =
+          static_cast<float>(std::max<int64_t>(0, now_ms - fade_start_ts_ms_));
+      res.fade_duration_ms = last_fade_out_ms_;
+      fade_out_active_ = false;
+    }
+  }
+
+  if (phase_ != res.phase) {
+    res.phase_changed = true;
+    char buf[160];
+    if (res.phase == TrackingPhase::kFadingOut) {
+      const float held_ms =
+          static_cast<float>(std::max<int64_t>(0, now_ms - hold_start_ts_ms_));
+      std::snprintf(buf, sizeof(buf),
+                    "%s -> %s (hold=%d fr / %.0f ms, mulai fade-out %.0f ms)",
+                    TrackingPhaseName(phase_), TrackingPhaseName(res.phase),
+                    hold_frames_, held_ms, cfg_.fade_ms);
+    } else if (phase_ == TrackingPhase::kFadingOut) {
+      std::snprintf(buf, sizeof(buf), "%s -> %s (fade_out=%.0f ms, mask dilepas)",
+                    TrackingPhaseName(phase_), TrackingPhaseName(res.phase),
+                    last_fade_out_ms_);
+    } else {
+      std::snprintf(buf, sizeof(buf), "%s -> %s", TrackingPhaseName(phase_),
+                    TrackingPhaseName(res.phase));
+    }
+    res.transition_log = buf;
+  }
+  phase_ = res.phase;
+  return res;
+}
+
 }  // namespace kgcore

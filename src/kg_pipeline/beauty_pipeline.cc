@@ -153,8 +153,7 @@ void BeautyPipeline::ProcessFrame(const Frame& frame) {
       seg_start_logged_ = true;
       Log(kTag, "seg thread: mulai (BELOW_NORMAL, intra_op=2, allow_spinning=0, periode adaptif 250-1000ms)");
     }
-    const LandmarkSet& mask_lm =
-        tracker_->CurrentRaw().valid ? tracker_->CurrentRaw() : tracker_->Current();
+    const LandmarkSet& mask_lm = tracker_->MaskLandmarks();
     const SegPoseAnchor curr_pose = ComputeSegPoseAnchor(mask_lm, w, h);
     if (curr_pose.valid && prev_pose_anchor_.valid) {
       head_speed_px_ = std::hypot(curr_pose.cx_px - prev_pose_anchor_.cx_px,
@@ -288,11 +287,15 @@ int BeautyPipeline::OutputHeight() const { return sink_ ? sink_->GetHeight() : 0
 
 bool BeautyPipeline::GetStageTimings(StageTimings* out) const {
   if (!out || !tracker_) return false;
-  bool ok = false;
-  if (tracker_->Provider()) ok = tracker_->Provider()->GetStageTimings(out);
+  if (tracker_->Provider()) (void)tracker_->Provider()->GetStageTimings(out);
   else *out = StageTimings{};
   out->track_ms = tracker_->LastTrackMs();
   out->mask_ms = mask_ms_;
+  out->hold_frames = tracker_->HoldFrames();
+  out->total_hold_frames = tracker_->TotalHoldFrames();
+  out->last_fade_out_ms = tracker_->LastFadeOutMs();
+  out->last_fade_in_ms = tracker_->LastFadeInMs();
+  out->tracking_phase = tracker_->Phase();
   return true;
 }
 }  // namespace kgcore

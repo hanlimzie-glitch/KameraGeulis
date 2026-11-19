@@ -217,6 +217,38 @@ void DrawCameraTab(AppUiState& ui) {
     ImGui::TextDisabled("(ulang otomatis aktif, jeda 1-8 detik)");
   }
   ImGui::Separator();
+  {
+    const std::string rot_label = s.Get("camera.rotation");
+    const std::string opt_auto = s.Get("camera.rotation_auto");
+    const std::string opt_0 = s.Get("camera.rotation_0");
+    const std::string opt_90 = s.Get("camera.rotation_90");
+    const std::string opt_180 = s.Get("camera.rotation_180");
+    const std::string opt_270 = s.Get("camera.rotation_270");
+    const char* rot_items[] = {opt_auto.c_str(), opt_0.c_str(), opt_90.c_str(),
+                               opt_180.c_str(), opt_270.c_str()};
+    constexpr int kRotValues[] = {-1, 0, 90, 180, 270};
+    int rot_idx = 0;
+    for (int i = 0; i < 5; ++i) {
+      if (kRotValues[i] == ui.camera_rotation) {
+        rot_idx = i;
+        break;
+      }
+    }
+    ImGui::SetNextItemWidth(160.0f);
+    if (ImGui::Combo(rot_label.c_str(), &rot_idx, rot_items, 5)) {
+      ui.camera_rotation = kRotValues[rot_idx];
+      ui.request_rotation_save = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", s.Get("camera.rotation_tip").c_str());
+    }
+    if (ui.camera_rotation < 0) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(%s: %d°)",
+                          s.Get("camera.rotation_effective").c_str(),
+                          ui.effective_rotation);
+    }
+  }
   ImGui::Text("%s: %dx%d", s.Get("camera.current").c_str(), ui.cam_width, ui.cam_height);
   ImGui::Text("FPS render: %.1f", ui.fps);
   ImGui::Separator();

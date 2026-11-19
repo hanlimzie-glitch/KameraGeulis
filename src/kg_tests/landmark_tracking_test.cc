@@ -211,3 +211,174 @@ TEST_CASE("M2m one_euro: beta responsif (25.0) memangkas lag gerak kepala diband
   REQUIRE(fast_mean < 10.0f);
   REQUIRE(fast_mean < slow_mean * 0.25f);
 }
+
+TEST_CASE("M2p face_flag: konversi logit ke probabilitas pasca-sigmoid ambang 0.50") {
+  // Bukti log-4.txt: logit 0.131 dan 0.021 sebelumnya ditolak oleh >= 0.50 langsung!
+  REQUIRE(FaceFlagToProb(0.0f) > 0.499f);
+  REQUIRE(IsFaceFlagValid(0.0f));
+  REQUIRE(IsFaceFlagValid(0.021f));
+  REQUIRE(IsFaceFlagValid(0.131f));
+  REQUIRE(FaceFlagToProb(0.131f) > 0.53f);
+  REQUIRE_FALSE(IsFaceFlagValid(-0.01f));
+  REQUIRE_FALSE(IsFaceFlagValid(-0.472f));
+  REQUIRE_FALSE(IsFaceFlagValid(-5.0f));
+}
+
+TEST_CASE("M2p reset_guard: histeresis N-frame, cooldown >= 10 frame, dan rate limit 60 dtk") {
+  ResetGuardConfig cfg;
+  cfg.fail_frames_before_reset = 4;
+  cfg.low_iou_before_reset = 2;
+  cfg.cooldown_frames = 12;
+  cfg.max_resets_per_min = 3;
+  cfg.rate_window_ms = 60000;
+  ResetGuard guard(cfg);
+
+  int64_t ts = 1000;
+  // 1) Histeresis N=4 frame gagal berturut-turut
+  for (int i = 0; i < 3; ++i) {
+    ts += 33;
+    guard.BeginFrame(ts);
+    guard.OnMeshResult(false);
+    REQUIRE_FALSE(guard.ShouldTriggerMeshReset(ts));
+  }
+  // 1 frame sukses mereset streak gagal
+  ts += 33;
+  guard.BeginFrame(ts);
+  guard.OnMeshResult(true);
+  REQUIRE(guard.BadMeshStreak() == 0);
+
+  // 4 frame gagal berturut-turut -> baru memicu reset
+  for (int i = 0; i < 3; ++i) {
+    ts += 33;
+    guard.BeginFrame(ts);
+    guard.OnMeshResult(false);
+    REQUIRE_FALSE(guard.ShouldTriggerMeshReset(ts));
+  }
+  ts += 33;
+  guard.BeginFrame(ts);
+  guard.OnMeshResult(false);
+  REQUIRE(guard.ShouldTriggerMeshReset(ts));
+  guard.RecordReset(ts);
+  REQUIRE(guard.ResetsInLastMinute(ts) == 1);
+  REQUIRE(guard.CooldownRemaining() == 12);
+
+  // 2) Cooldown >= 10 frame menahan reset meski gagal berturut-turut
+  for (int i = 0; i < 11; ++i) {
+    ts += 33;
+    guard.BeginFrame(ts);
+    guard.OnMeshResult(false);
+    REQUIRE_FALSE(guard.ShouldTriggerMeshReset(ts));
+  }
+  // Setelah cooldown habis (frame ke-12), streak >= 4 diizinkan reset lagi
+  ts += 33;
+  guard.BeginFrame(ts);
+  guard.OnMeshResult(false);
+  REQUIRE(guard.ShouldTriggerMeshReset(ts));
+  guard.RecordReset(ts);
+  REQUIRE(guard.ResetsInLastMinute(ts) == 2);
+
+  // Lewati cooldown untuk reset #3
+  for (int i = 0; i < 12; ++i) {
+    ts += 33;
+    guard.BeginFrame(ts);
+    guard.OnMeshResult(false);
+  }
+  REQUIRE(guard.ShouldTriggerMeshReset(ts));
+  guard.RecordReset(ts);
+  REQUIRE(guard.ResetsInLastMinute(ts) == 3);
+
+  // 3) Rate limiter 60 detik: reset ke-4 dalam <60 detik ditolak + flag rate_limited
+  for (int i = 0; i < 12; ++i) {
+    ts += 33;
+    guard.BeginFrame(ts);
+    guard.OnMeshResult(false);
+  }
+  bool rate_limited = false;
+  REQUIRE_FALSE(guard.ShouldTriggerMeshReset(ts, &rate_limited));
+  REQUIRE(rate_limited);
+
+  // Setelah jendela 60 detik berlalu, reset diizinkan lagi
+  ts += 60001;
+  guard.BeginFrame(ts);
+  REQUIRE(guard.ResetsInLastMinute(ts) == 0);
+  rate_limited = false;
+  REQUIRE(guard.ShouldTriggerMeshReset(ts, &rate_limited));
+  REQUIRE_FALSE(rate_limited);
+}
+
+TEST_CASE("M2p state_machine: hold-last-good ~300 ms, pembekuan mask saat fade, dan pulih halus") {
+  TrackingStateConfig cfg;
+  cfg.hold_ms = 300.0f;
+  cfg.fade_ms = 300.0f;
+  TrackingStateMachine sm(cfg);
+
+  const LandmarkSet lm = MakeSyntheticFace(0.5f, 0.5f, 0.22f, 0.36f, 0.0f);
+
+  // 1) Frame awal valid -> TRACKING, gain = 1.0
+  auto r0 = sm.Update(true, &lm, &lm, 1000);
+  REQUIRE(r0.phase == TrackingPhase::kTracking);
+  REQUIRE(r0.gain == 1.0f);
+  REQUIRE(r0.phase_changed);
+
+  // 2) Gangguan singkat 250 ms (<= 300 ms) -> HOLDING: landmark & gain tetap penuh
+  for (int t = 1033; t <= 1250; t += 33) {
+    auto rh = sm.Update(false, nullptr, nullptr, t);
+    REQUIRE(rh.phase == TrackingPhase::kHolding);
+    REQUIRE(rh.holding);
+    REQUIRE(rh.mask_frozen);
+    REQUIRE(rh.gain == 1.0f);
+  }
+  REQUIRE(sm.HoldFrames() >= 6);
+
+  // Pulih sebelum 300 ms -> langsung kembali TRACKING tanpa fade drop
+  auto r_rec_fast = sm.Update(true, &lm, &lm, 1280);
+  REQUIRE(r_rec_fast.phase == TrackingPhase::kTracking);
+  REQUIRE(r_rec_fast.gain == 1.0f);
+  REQUIRE(r_rec_fast.phase_changed);
+  REQUIRE(r_rec_fast.transition_log.find("hold") != std::string::npos);
+
+  // 3) Hilang berkepanjangan > 300 ms -> HOLDING -> FADING_OUT (mask tetap beku) -> LOST
+  int fade_steps = 0;
+  for (int t = 1313; t <= 1600; t += 33) {
+    auto rh = sm.Update(false, nullptr, nullptr, t);
+    if (t <= 1580) {
+      REQUIRE(rh.phase == TrackingPhase::kHolding);
+      REQUIRE(rh.gain == 1.0f);
+    } else {
+      REQUIRE(rh.phase == TrackingPhase::kFadingOut);
+      REQUIRE(rh.mask_frozen);
+      REQUIRE(rh.gain < 1.0f);
+      REQUIRE(rh.gain > 0.0f);
+      ++fade_steps;
+    }
+  }
+  // Lanjutkan hingga gain mencapai 0 -> LOST
+  TrackingStepResult r_lost;
+  for (int t = 1633; t <= 1950; t += 33) {
+    r_lost = sm.Update(false, nullptr, nullptr, t);
+    if (r_lost.phase == TrackingPhase::kFadingOut) {
+      REQUIRE(r_lost.mask_frozen);  // mask fitur tidak dijatuhkan selama fade-out!
+      ++fade_steps;
+    }
+  }
+  REQUIRE(fade_steps >= 5);
+  REQUIRE(r_lost.phase == TrackingPhase::kLost);
+  REQUIRE(r_lost.gain == 0.0f);
+  REQUIRE_FALSE(r_lost.mask_frozen);
+  REQUIRE(sm.LastFadeOutMs() >= 250.0f);
+
+  // 4) Wajah kembali dari LOST -> RECOVERING (fade-in bertahap) -> TRACKING
+  auto r_in1 = sm.Update(true, &lm, &lm, 2000);
+  REQUIRE(r_in1.phase == TrackingPhase::kRecovering);
+  REQUIRE(r_in1.gain > 0.0f);
+  REQUIRE(r_in1.gain < 1.0f);
+
+  TrackingStepResult r_in_done;
+  for (int t = 2050; t <= 2350; t += 50) {
+    r_in_done = sm.Update(true, &lm, &lm, t);
+  }
+  REQUIRE(r_in_done.phase == TrackingPhase::kTracking);
+  REQUIRE(r_in_done.gain == 1.0f);
+  REQUIRE(sm.LastFadeInMs() >= 250.0f);
+}
+

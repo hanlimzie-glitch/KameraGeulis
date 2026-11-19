@@ -92,6 +92,14 @@ class BeautyPipeline {
   // track_ms dari FaceTracker. false hanya bila pipeline belum Init.
   bool GetStageTimings(StageTimings* out) const;
 
+  // M2p: pencarian orientasi 4 rotasi (0/90/180/270) dan reset pelacakan.
+  bool ProbeOrientations(const Frame& raw_frame, OrientationScores* out) {
+    return tracker_ && tracker_->ProbeOrientations(raw_frame, out);
+  }
+  void ResetTracking() {
+    if (tracker_) tracker_->Reset();
+  }
+
   gpupixel::BeautyFaceFilter* BeautyFilter() const { return beauty_filter_.get(); }
   FaceTracker& Tracker() { return *tracker_; }
 

@@ -30,4 +30,15 @@ void LandmarkFade::Update(bool face_present, int64_t now_ms) {
     gain_ = std::max(0.0f, gain_ - step);
   }
 }
+
+void LandmarkFade::HoldTimestamp(int64_t now_ms) {
+  has_prev_ = true;
+  prev_ts_ms_ = now_ms;
+}
+
+void LandmarkFade::Reset() {
+  gain_ = 0.0f;
+  prev_ts_ms_ = 0;
+  has_prev_ = false;
+}
 }  // namespace kgcore

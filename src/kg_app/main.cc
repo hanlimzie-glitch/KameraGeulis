@@ -39,6 +39,7 @@
 #include "kgcore/perf_guard.h"  // M2k: adaptive load guard
 #include "kgcore/mask_layers.h"  // M2k: F5 same-pass diff report
 #include "kgcore/black_frame_guard.h"  // M2l: swa-uji berkelanjutan frame hitam
+#include "kgcore/camera_orientation.h" // M2p: rotasi kamera + auto-orientasi
 #include "kgcore/landmark_tracking.h"  // M2l: overlay landmark ber-indeks F5
 
 // M2j kualitas: parameter komposit per mode. Mode kulit:
@@ -134,6 +135,8 @@ kg::Settings UiToSettings(const kg::AppUiState& ui) {
   s.capture_height = ui.capture_height;
   s.capture_fps = ui.capture_fps;
   s.skin_coverage = ui.skin_coverage;  // M2j
+  s.camera_rotation = ui.camera_rotation;
+  s.auto_rotation_prior = ui.auto_rotation_prior;
   return s;
 }
 
@@ -150,6 +153,8 @@ void ApplySettingsToUi(const kg::Settings& s, kg::AppUiState& ui) {
   ui.capture_height = s.capture_height;
   ui.capture_fps = s.capture_fps;
   ui.skin_coverage = s.skin_coverage;  // M2j: 0 semua kulit, 1 wajah saja
+  ui.camera_rotation = s.camera_rotation;
+  ui.auto_rotation_prior = s.auto_rotation_prior;
 }
 
 // Synthetic fallback frame so the app renders something even with no camera
@@ -907,6 +912,12 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   auto last_frame_time = clock_type::now();
   float fps_smooth = 0.0f;
   kgcore::PerfGuard perf_guard;
+  kgcore::AutoOrientationController orient_ctrl;
+  orient_ctrl.SetPrior(ui.auto_rotation_prior);
+  ui.effective_rotation = orient_ctrl.EffectiveRotation(ui.camera_rotation);
+  int prev_effective_rot = ui.effective_rotation;
+  kgcore::Log("orient", "inisialisasi rotasi: mode=%d prior=%d° efektif=%d°",
+              ui.camera_rotation, orient_ctrl.Prior(), ui.effective_rotation);
   bool synthetic = !camera_started;
   int synthetic_w = 640, synthetic_h = 480;
   bool f3_prev = false;
@@ -1055,6 +1066,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       kg::Settings loaded;
       if (loaded.Load(settings_path)) {
         ApplySettingsToUi(loaded, ui);
+        orient_ctrl.SetPrior(ui.auto_rotation_prior);
+        orient_ctrl.ResetTransient();
         kg::Strings::Instance().SetLanguage(
             ui.language == "en" ? kg::Language::kEn : kg::Language::kId);
         ui.notice = kg::Strings::Instance().Get("presets.loaded");
@@ -1076,8 +1089,27 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.lipstick = def.lipstick;
       ui.blusher = def.blusher;
       ui.mirror = def.mirror;
+      ui.camera_rotation = def.camera_rotation;
       ui.preset = def.preset;  // "Natural"
+      orient_ctrl.ResetTransient();
       ui.request_reset_defaults = false;
+    }
+    if (ui.request_rotation_save) {
+      ui.request_rotation_save = false;
+      kg::Settings rot_s;
+      rot_s.Load(settings_path);
+      rot_s.camera_rotation = ui.camera_rotation;
+      rot_s.auto_rotation_prior = orient_ctrl.Prior();
+      std::string rot_err;
+      kg::Settings::SaveInfo sinfo;
+      if (rot_s.SaveAndVerify(settings_path, &sinfo, &rot_err)) {
+        kgcore::Log("orient",
+                    "settings: putar kamera tersimpan (%d°, prior=%d°)",
+                    rot_s.camera_rotation, rot_s.auto_rotation_prior);
+      } else {
+        kgcore::Log("orient", "settings: gagal menyimpan putar kamera - %s",
+                    rot_err.c_str());
+      }
     }
     if (ui.request_camera_apply) {
       if (safe) {
@@ -1150,23 +1182,18 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     kg::Strings::Instance().SetLanguage(
         ui.language == "en" ? kg::Language::kEn : kg::Language::kId);
 
-    // ---- capture ----
+    // ---- capture + M2p rotasi orientasi ----
+    kg::Frame raw_frame;
     kg::Frame frame;
     bool have_frame = false;
     const auto cap_start = clock_type::now();
     frame_is_synthetic = false;
-    if (capture.LatestFrame(frame)) {
+    if (capture.LatestFrame(raw_frame)) {
       have_frame = true;
       synthetic = false;
       ui.camera_ok = true;
       ui.status_message = kg::Strings::Instance().Get("status.ready");
-      // M2h butuh 4: simpan frame mentah TERAKHIR - F5 harus selalu bisa
-      // menulis raw_*.png walau F4 tidak pernah dinyalakan.
-      last_camera_raw = frame;
-      last_camera_raw_valid = true;
-      last_frame_ts_ms = frame.timestamp_ms;
-      pending_cam_ts_ms = frame.timestamp_ms;
-      last_raw_luma = ComputeMeanLumaFrame(frame);
+      pending_cam_ts_ms = raw_frame.timestamp_ms;
     }
     ui.capture_ms = duration_cast<std::chrono::microseconds>(clock_type::now() - cap_start)
                         .count() /
@@ -1175,10 +1202,60 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       auto now_ms = duration_cast<std::chrono::milliseconds>(
                         clock_type::now().time_since_epoch())
                         .count();
-      frame = MakeSyntheticFrame(synthetic_w, synthetic_h, now_ms);
+      raw_frame = MakeSyntheticFrame(synthetic_w, synthetic_h, now_ms);
       have_frame = true;
       frame_is_synthetic = true;
+    }
+
+    if (have_frame) {
+      // M2p (1b): deteksi orientasi otomatis saat wajah tidak terdeteksi
+      // atau tracking gagal berulang -> evaluasi 4 rotasi (0/90/180/270).
+      if (!frame_is_synthetic && !safe && pipeline_ok && pipeline &&
+          orient_ctrl.ShouldSearch(ui.camera_rotation)) {
+        kg::OrientationScores scores;
+        if (pipeline->ProbeOrientations(raw_frame, &scores) && scores.ok) {
+          const auto dec = orient_ctrl.ApplySearchScores(scores);
+          kgcore::Log(
+              "orient",
+              "search: 0°=%.2f 90°=%.2f 180°=%.2f 270°=%.2f | cur=%d° prior=%d° -> eff=%d° (%s)",
+              scores.score[0], scores.score[1], scores.score[2], scores.score[3],
+              dec.prev_rot, orient_ctrl.Prior(), dec.new_rot,
+              dec.reason.c_str());
+          if (dec.switched) {
+            ui.auto_rotation_prior = orient_ctrl.Prior();
+            kg::Settings ps;
+            ps.Load(settings_path);
+            ps.camera_rotation = ui.camera_rotation;
+            ps.auto_rotation_prior = ui.auto_rotation_prior;
+            ps.Save(settings_path);
+          }
+        }
+      }
+
+      const int eff_rot = orient_ctrl.EffectiveRotation(ui.camera_rotation);
+      ui.effective_rotation = eff_rot;
+      if (eff_rot != prev_effective_rot) {
+        kgcore::Log("orient", "rotasi efektif: %d° -> %d° (mode=%s)",
+                    prev_effective_rot, eff_rot,
+                    ui.camera_rotation < 0 ? "Otomatis" : "Manual");
+        prev_effective_rot = eff_rot;
+        if (pipeline) pipeline->ResetTracking();
+        last_camera_raw_valid = false;
+        preview_show_blend = false;
+      }
+
+      if (eff_rot == 0) {
+        frame = std::move(raw_frame);
+      } else if (!kg::RotateFrameCW(raw_frame, eff_rot, &frame)) {
+        frame = std::move(raw_frame);
+      }
       last_frame_ts_ms = frame.timestamp_ms;
+      if (!frame_is_synthetic) {
+        // M2h butuh 4 & M2p: simpan frame mentah TERORIENTASI terakhir.
+        last_camera_raw = frame;
+        last_camera_raw_valid = true;
+        last_raw_luma = ComputeMeanLumaFrame(frame);
+      }
     }
 
     // ---- M2f/M2g: status kamera jujur; M2g: kode AWAL + TERAKHIR siklus ----
@@ -1293,6 +1370,10 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         pipeline->Seg().SetPeriodMs(perf_guard.SegPeriodMs());
       }
       pipeline->ProcessFrame(frame);
+      if (!frame_is_synthetic) {
+        orient_ctrl.NoteFrameResult(pipeline->Tracker().CurrentRaw().valid,
+                                    pipeline->Tracker().CurrentRaw().roi_reset);
+      }
       // M2j: telemetri seg ke HUD (thread sendiri; lag dalam satuan frame).
       ui.seg_ms = pipeline->SegMs();
       ui.seg_lag = pipeline->SegLagFrames();
@@ -1321,11 +1402,11 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             !blender.init_failed && !force_no_mask_gl && !blender.disabled) {
           const kgcore::BeautyComposeConfig bcfg = MakeComposeConfig(
               ui.skin_only, ui.smoothing, ui.whitening, ui.chroma_retain);
-          // M2m (3a): kontur mask memakai landmark mentah frame ini (0 lag
-          // OneEuro; feather menyembunyikan jitter mikro).
+          // M2m (3a) & M2p: kontur mask memakai landmark mentah frame ini,
+          // atau landmark baik terakhir yang dibekukan saat hold/fade-out
+          // sehingga eksklusi mata/alis/bibir/hidung tidak pernah jatuh.
           const auto& raw_lm = pipeline->Tracker().CurrentRaw();
-          const auto& flt_lm = pipeline->Tracker().Current();
-          const auto& mask_lm = raw_lm.valid ? raw_lm : flt_lm;
+          const auto& mask_lm = pipeline->Tracker().MaskLandmarks();
           std::vector<float> mask_landmarks;
           if (mask_lm.valid) {
             mask_landmarks.resize(kgcore::kLandmarkCount * 2);
@@ -1357,7 +1438,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                                   mb.hair_probability().empty() ? nullptr
                                                                 : mb.hair_probability().data(),
                                   mb.skin_luma0(), mb.has_luma_calibration(),
-                                  pipeline->SegAttenuation());
+                                  pipeline->SegAttenuation(),
+                                  pipeline->Tracker().IsMaskFrozen());
           if (!blended && blender.init_failed && !blender_warned) {
             blender_warned = true;
             kgcore::Log("app",
@@ -1775,7 +1857,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
             "blend=%u %dx%d%s gpu_mask=%d guided=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f | "
             "lag: oneeuro(mean=%.2f p95=%.2f px) mask_feat_diff=%.2f px seg_age=%.0f fr (%.1fms period=%dms intra=%d spin=%d) "
-            "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu roi_resets=%d (%.1f/m)",
+            "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu rot=%ddeg(%s) roi_resets=%d (60s=%d/m) hold=%d/%dfr fade_out=%.0fms state=%s",
             static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
             static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den,
             cst.actual_fps, cst.mf_ts_fps, cst.mean_luma,
@@ -1795,7 +1877,12 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             pipeline ? pipeline->Seg().CurrentPeriodMs() : 0,
             pipeline ? pipeline->Seg().IntraOpThreads() : 0,
             (pipeline && pipeline->Seg().AllowSpinning()) ? 1 : 0,
-            c2s_med, c2s_p95, qlen, diag_st.reset_count, diag_st.resets_per_min);
+            c2s_med, c2s_p95, qlen, ui.effective_rotation,
+            ui.camera_rotation < 0 ? "auto" : "manual",
+            diag_st.reset_count, diag_st.resets_in_last_min,
+            diag_st.hold_frames, diag_st.total_hold_frames,
+            diag_st.last_fade_out_ms,
+            kgcore::TrackingPhaseName(diag_st.tracking_phase));
       } else {
         kgcore::Log("diag",
                     "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
@@ -1953,8 +2040,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       // landmark yang sama dengan rasterizer mask.
       if (ui.show_mask && pipeline_ok && pipeline && image_size.x > 1.0f &&
           image_size.y > 1.0f) {
-        const auto& raw_lm = pipeline->Tracker().CurrentRaw();
-        const auto& lm = raw_lm.valid ? raw_lm : pipeline->Tracker().Current();
+        const auto& lm = pipeline->Tracker().MaskLandmarks();
         if (lm.valid) {
           std::vector<float> xy(kgcore::kLandmarkCount * 2);
           for (size_t i = 0; i < kgcore::kLandmarkCount; ++i) {

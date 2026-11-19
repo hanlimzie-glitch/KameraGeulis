@@ -25,6 +25,9 @@ struct AppUiState {
   int capture_width = 1280;
   int capture_height = 720;
   int capture_fps = 30;
+  int camera_rotation = -1;       // M2p: -1=Otomatis, 0/90/180/270
+  int auto_rotation_prior = 0;    // M2p: prior terbaik terakhir (0/90/180/270)
+  int effective_rotation = 0;     // M2p: rotasi aktif yang sedang diterapkan (runtime)
 
   // ---- runtime ----
   bool quit_requested = false;
@@ -63,6 +66,7 @@ struct AppUiState {
   bool request_load_settings = false;
   bool request_reset_defaults = false;
   bool request_camera_apply = false;
+  bool request_rotation_save = false;  // M2p: simpan otomatis saat user mengubah rotasi
   bool request_seg_bench = false;  // M2o: mulai benchmark matrix 12 konfigurasi seg
   bool seg_bench_active = false;
   std::string seg_bench_status;

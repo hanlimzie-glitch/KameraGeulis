@@ -163,3 +163,30 @@ TEST_CASE("M2l: SaveAndVerify melaporkan path lengkap, jumlah byte, dan baca-ula
   REQUIRE(b == a);
   std::remove(path.c_str());
 }
+
+TEST_CASE("M2p: camera_rotation dan auto_rotation_prior round-trip dan sanitasi") {
+  kgcore::Settings def;
+  REQUIRE(def.camera_rotation == -1);
+  REQUIRE(def.auto_rotation_prior == 0);
+
+  for (int rot : {-1, 0, 90, 180, 270}) {
+    kgcore::Settings a;
+    a.camera_rotation = rot;
+    a.auto_rotation_prior = (rot < 0) ? 90 : rot;
+    const std::string path = TempPath();
+    REQUIRE(a.Save(path));
+    kgcore::Settings b;
+    REQUIRE(b.Load(path));
+    REQUIRE(b.camera_rotation == rot);
+    REQUIRE(b.auto_rotation_prior == a.auto_rotation_prior);
+    std::remove(path.c_str());
+  }
+
+  kgcore::Settings bad;
+  REQUIRE(bad.FromJson(R"({"camera_rotation": 45, "auto_rotation_prior": 123})"));
+  REQUIRE(bad.camera_rotation == -1);
+  REQUIRE(bad.auto_rotation_prior == 0);
+  REQUIRE(bad.FromJson(R"({"camera_rotation": "90"})"));
+  REQUIRE(bad.camera_rotation == -1);
+}
+
