@@ -13,7 +13,7 @@ if not exist "%DLL64%" (
   exit /b 1
 )
 
-net session >nul 2>&1
+fltmc >nul 2>&1
 if errorlevel 1 (
   echo Meminta izin Administrator ^(UAC^) untuk mendaftarkan KameraGeulis Camera...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','\"\"%~f0\" %*\"' -Verb RunAs -Wait"

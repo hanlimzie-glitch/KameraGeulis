@@ -6,7 +6,7 @@ set "SCRIPT_DIR=%~dp0"
 set "DLL64=%SCRIPT_DIR%softcam.dll"
 set "DLL32=%SCRIPT_DIR%win32\softcam.dll"
 
-net session >nul 2>&1
+fltmc >nul 2>&1
 if errorlevel 1 (
   echo Meminta izin Administrator ^(UAC^) untuk menghapus registrasi KameraGeulis Camera...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','\"\"%~f0\" %*\"' -Verb RunAs -Wait"

@@ -260,20 +260,41 @@ jobs:
           if (-not $ciExe) { throw 'kg_vcam_ci_test.exe not found' }
           Write-Host "Using test binary: $($ciExe.FullName)"
 
-          & cmd.exe /c dist\install_vcam.bat --nopause
-          if ($LASTEXITCODE -ne 0) { throw "install_vcam.bat failed ($LASTEXITCODE)" }
-
           try {
-            & $ciExe.FullName --verify-registered (Resolve-Path dist).Path
-            if ($LASTEXITCODE -ne 0) { throw "kg_vcam_ci_test --verify-registered failed ($LASTEXITCODE)" }
-          } finally {
-            & cmd.exe /c dist\uninstall_vcam.bat --nopause
-            if ($LASTEXITCODE -ne 0) { throw "uninstall_vcam.bat failed ($LASTEXITCODE)" }
-          }
+            $out1 = & cmd.exe /c dist\install_vcam.bat --nopause 2>&1
+            $out1 | ForEach-Object { Write-Host $_ }
+            if ($LASTEXITCODE -ne 0) {
+              $out1 | ForEach-Object { Write-Host "::error ::install_vcam: $_" }
+              throw "install_vcam.bat failed ($LASTEXITCODE)"
+            }
 
-          & $ciExe.FullName --verify-absent (Resolve-Path dist).Path
-          if ($LASTEXITCODE -ne 0) { throw "kg_vcam_ci_test --verify-absent failed ($LASTEXITCODE)" }
-          Write-Host "VCAM DIRECTSHOW CI TEST PASS"
+            try {
+              $out2 = & $ciExe.FullName --verify-registered (Resolve-Path dist).Path 2>&1
+              $out2 | ForEach-Object { Write-Host $_ }
+              if ($LASTEXITCODE -ne 0) {
+                $out2 | ForEach-Object { Write-Host "::error ::vcam_ci_test(reg): $_" }
+                throw "kg_vcam_ci_test --verify-registered failed ($LASTEXITCODE)"
+              }
+            } finally {
+              $out3 = & cmd.exe /c dist\uninstall_vcam.bat --nopause 2>&1
+              $out3 | ForEach-Object { Write-Host $_ }
+              if ($LASTEXITCODE -ne 0) {
+                $out3 | ForEach-Object { Write-Host "::error ::uninstall_vcam: $_" }
+                throw "uninstall_vcam.bat failed ($LASTEXITCODE)"
+              }
+            }
+
+            $out4 = & $ciExe.FullName --verify-absent (Resolve-Path dist).Path 2>&1
+            $out4 | ForEach-Object { Write-Host $_ }
+            if ($LASTEXITCODE -ne 0) {
+              $out4 | ForEach-Object { Write-Host "::error ::vcam_ci_test(absent): $_" }
+              throw "kg_vcam_ci_test --verify-absent failed ($LASTEXITCODE)"
+            }
+            Write-Host "VCAM DIRECTSHOW CI TEST PASS"
+          } catch {
+            Write-Host "::error ::$($_.Exception.Message)"
+            throw
+          }
 
       - name: Resolve crash RVA 0x3968a against gpupixel.map
         shell: pwsh
