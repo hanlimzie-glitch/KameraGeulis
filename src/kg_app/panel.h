@@ -19,6 +19,11 @@ struct AppUiState {
   float blusher = 0.0f;       // [0,1] - disabled
   std::string preset = "Natural";      // Natural|Soft|Glam|ClearSkin|Custom
   bool mirror = true;
+  bool virtual_camera = false;    // M3: kamera virtual aktif
+  int vcam_width = 1280;          // M3: default 1280x720
+  int vcam_height = 720;
+  int vcam_fps = 30;              // M3: default 30 fps
+  bool vcam_mirror = false;       // M3: default OFF (mirror preview saja)
   bool landmark_enabled = true;
   std::string language = "id";         // id|en
   int camera_device = 0;
@@ -70,6 +75,22 @@ struct AppUiState {
   bool request_seg_bench = false;  // M2o: mulai benchmark matrix 12 konfigurasi seg
   bool seg_bench_active = false;
   std::string seg_bench_status;
+
+  // ---- M3 virtual camera runtime & action ----
+  bool vcam_registered = false;
+  bool vcam_active = false;
+  int vcam_state = 0;  // 0=Belum terdaftar, 1=Terdaftar (idle), 2=Mengirim frame
+  int vcam_consumers = -1;
+  float vcam_output_fps = 0.0f;
+  float vcam_ms = 0.0f;
+  float vcam_readback_ms = 0.0f;
+  float vcam_latency_ms = 0.0f;
+  uint64_t vcam_sent = 0;
+  uint64_t vcam_dropped = 0;
+  uint64_t vcam_repeated = 0;
+  std::string vcam_detail;
+  std::string vcam_error;
+  bool request_vcam_apply = false;
 };
 
 // Draws the full UI (large preview handled by the main loop; tabbed panel

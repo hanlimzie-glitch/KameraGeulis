@@ -16,6 +16,10 @@ struct Settings {
   float blusher = 0.0f;       // [0,1]
   bool mirror = true;
   bool virtual_camera = false;
+  int vcam_width = 1280;            // M3: resolusi kamera virtual (default 1280x720)
+  int vcam_height = 720;
+  int vcam_fps = 30;                // M3: FPS konstan kamera virtual (default 30)
+  bool vcam_mirror = false;         // M3: default OFF (mirror preview saja)
   bool landmark_enabled = true;  // honored only when a provider is available
   std::string preset = "Natural";   // Natural|Soft|Glam|ClearSkin|Custom
   std::string language = "id";      // id|en

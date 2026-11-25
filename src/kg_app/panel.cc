@@ -256,16 +256,104 @@ void DrawCameraTab(AppUiState& ui) {
   if (cam_disabled) {
     ImGui::EndDisabled();
   }
-  // Virtual camera - disabled until M3 (softcam + registrasi admin).
-  ImGui::BeginDisabled();
-  bool vcam = false;
-  ImGui::Checkbox(s.Get("vcam.toggle").c_str(), &vcam);
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-    ImGui::SetTooltip("%s", s.Get("vcam.need_register").c_str());
+  // ---- M3: Kamera Virtual ("KameraGeulis Camera") ----
+  {
+    const bool reg_ok = ui.vcam_registered;
+    if (!reg_ok) ImGui::BeginDisabled();
+    if (ImGui::Checkbox(s.Get("vcam.toggle").c_str(), &ui.virtual_camera)) {
+      ui.request_vcam_apply = true;
+    }
+    if (!reg_ok) {
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", s.Get("vcam.need_register").c_str());
+      }
+    }
+    ImGui::SameLine();
+    if (ui.vcam_state == 2) {
+      ImGui::TextColored(ImVec4(0.35f, 0.92f, 0.45f, 1.0f), "%s",
+                         s.Get("vcam.status_streaming").c_str());
+    } else if (ui.vcam_state == 1) {
+      ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s",
+                         s.Get("vcam.status_registered_idle").c_str());
+    } else {
+      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f), "%s",
+                         s.Get("vcam.status_not_registered").c_str());
+    }
+
+    if (!reg_ok) {
+      ImGui::TextWrapped("%s", s.Get("vcam.register_hint").c_str());
+      if (!ui.vcam_detail.empty()) {
+        ImGui::TextDisabled("(%s)", ui.vcam_detail.c_str());
+      }
+    } else if (ui.vcam_active) {
+      if (ui.vcam_consumers > 0) {
+        ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1.0f), "%s (>= %d)",
+                           s.Get("vcam.consumers_connected").c_str(),
+                           ui.vcam_consumers);
+      } else if (ui.vcam_consumers == 0) {
+        ImGui::TextDisabled("%s", s.Get("vcam.consumers_none").c_str());
+      } else {
+        ImGui::TextDisabled("%s", s.Get("vcam.consumers_unknown").c_str());
+      }
+      ImGui::Text("Vcam: %.1f fps | %.2f ms (PBO %.2f ms) | drop %llu",
+                  ui.vcam_output_fps, ui.vcam_ms, ui.vcam_readback_ms,
+                  static_cast<unsigned long long>(ui.vcam_dropped));
+    } else if (!ui.vcam_detail.empty()) {
+      ImGui::TextDisabled("Driver: %s", ui.vcam_detail.c_str());
+    }
+    if (!ui.vcam_error.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
+                         ui.vcam_error.c_str());
+    }
+
+    // Resolusi & FPS kamera virtual (terpisah dari kamera fisik).
+    struct VRes { int w, h; };
+    constexpr VRes kVRes[] = {{1280, 720}, {1920, 1080}, {640, 480}};
+    char vres_cur[32];
+    std::snprintf(vres_cur, sizeof(vres_cur), "%dx%d", ui.vcam_width,
+                  ui.vcam_height);
+    ImGui::SetNextItemWidth(160.0f);
+    if (ImGui::BeginCombo(s.Get("vcam.resolution").c_str(), vres_cur)) {
+      for (const auto& r : kVRes) {
+        char lbl[32];
+        std::snprintf(lbl, sizeof(lbl), "%dx%d", r.w, r.h);
+        const bool sel = (r.w == ui.vcam_width && r.h == ui.vcam_height);
+        if (ImGui::Selectable(lbl, sel)) {
+          ui.vcam_width = r.w;
+          ui.vcam_height = r.h;
+          ui.request_vcam_apply = true;
+        }
+        if (sel) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+
+    constexpr int kVFps[] = {15, 24, 30, 60};
+    char vfps_cur[16];
+    std::snprintf(vfps_cur, sizeof(vfps_cur), "%d", ui.vcam_fps);
+    ImGui::SetNextItemWidth(160.0f);
+    if (ImGui::BeginCombo(s.Get("vcam.fps").c_str(), vfps_cur)) {
+      for (int f : kVFps) {
+        char lbl[16];
+        std::snprintf(lbl, sizeof(lbl), "%d", f);
+        const bool sel = (f == ui.vcam_fps);
+        if (ImGui::Selectable(lbl, sel)) {
+          ui.vcam_fps = f;
+          ui.request_vcam_apply = true;
+        }
+        if (sel) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+
+    if (ImGui::Checkbox(s.Get("vcam.mirror").c_str(), &ui.vcam_mirror)) {
+      ui.request_vcam_apply = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", s.Get("vcam.mirror_tip").c_str());
+    }
   }
-  ImGui::EndDisabled();
-  ImGui::SameLine();
-  ImGui::TextDisabled("%s", s.Get("vcam.coming_soon").c_str());
 }
 
 void DrawAboutTab(AppUiState& ui) {
@@ -334,6 +422,12 @@ void DrawAboutTab(AppUiState& ui) {
                                              : ui.seg_status.c_str());
   }
   ImGui::Text("render   %.2f ms", ui.render_ms);
+  if (ui.vcam_active) {
+    ImGui::Text("vcam     %.2f ms (PBO %.2f ms, %.1f fps, lat %.1f ms, drop %llu)",
+                ui.vcam_ms, ui.vcam_readback_ms, ui.vcam_output_fps,
+                ui.vcam_latency_ms,
+                static_cast<unsigned long long>(ui.vcam_dropped));
+  }
   ImGui::TextWrapped("%s", s.Get("debug.unverified").c_str());
   ImGui::Separator();
 

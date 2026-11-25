@@ -190,3 +190,32 @@ TEST_CASE("M2p: camera_rotation dan auto_rotation_prior round-trip dan sanitasi"
   REQUIRE(bad.camera_rotation == -1);
 }
 
+TEST_CASE("M3: vcam settings defaults, round-trip, and clamping") {
+  kgcore::Settings def;
+  REQUIRE_FALSE(def.virtual_camera);
+  REQUIRE(def.vcam_width == 1280);
+  REQUIRE(def.vcam_height == 720);
+  REQUIRE(def.vcam_fps == 30);
+  REQUIRE_FALSE(def.vcam_mirror);
+
+  kgcore::Settings a;
+  a.virtual_camera = true;
+  a.vcam_width = 1920;
+  a.vcam_height = 1080;
+  a.vcam_fps = 60;
+  a.vcam_mirror = true;
+  const std::string path = TempPath();
+  REQUIRE(a.Save(path));
+  kgcore::Settings b;
+  REQUIRE(b.Load(path));
+  REQUIRE(b == a);
+  std::remove(path.c_str());
+
+  kgcore::Settings cl;
+  REQUIRE(cl.FromJson(R"({"vcam_width": 1283, "vcam_height": 719, "vcam_fps": 120, "vcam_mirror": "yes"})"));
+  REQUIRE(cl.vcam_width == 1280);
+  REQUIRE(cl.vcam_height == 716);
+  REQUIRE(cl.vcam_fps == 60);
+  REQUIRE_FALSE(cl.vcam_mirror);
+}
+

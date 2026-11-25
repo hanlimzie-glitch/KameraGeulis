@@ -64,6 +64,36 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Build softcam.dll (x64 + Win32, patched to KameraGeulis Camera)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path build\_softcam) { Remove-Item -Recurse -Force build\_softcam }
+          git clone https://github.com/tshino/softcam.git build\_softcam
+          git -C build\_softcam checkout fa38d892bd931b761588f9b7641ba49f006953f0
+          if ($LASTEXITCODE -ne 0) { throw 'softcam checkout failed' }
+
+          # Patch filter name + shared memory / mutex names so it never clashes with other softcam installs
+          $scCpp = 'build\_softcam\src\softcam\softcam.cpp'
+          (Get-Content $scCpp -Raw).Replace('L"DirectShow Softcam"', 'L"KameraGeulis Camera"') | Set-Content $scCpp -NoNewline
+          $fbCpp = 'build\_softcam\src\softcamcore\FrameBuffer.cpp'
+          $fbText = (Get-Content $fbCpp -Raw).Replace('"DirectShow Softcam/NamedMutex"', '"KameraGeulis Camera/NamedMutex"').Replace('"DirectShow Softcam/SharedMemory"', '"KameraGeulis Camera/SharedMemory"')
+          Set-Content $fbCpp -Value $fbText -NoNewline
+
+          $propsPath = (Join-Path (Resolve-Path 'build\_softcam').Path 'mt_release.props')
+          $propsXml = '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><ItemDefinitionGroup Condition="''$(Configuration)''==''Release''"><ClCompile><RuntimeLibrary>MultiThreaded</RuntimeLibrary></ClCompile></ItemDefinitionGroup></Project>'
+          [System.IO.File]::WriteAllText($propsPath, $propsXml, [System.Text.UTF8Encoding]::new($false))
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild.exe not found' }
+          Write-Host "MSBuild: $msbuild"
+
+          & $msbuild build\_softcam\softcam.sln /t:softcam /p:Configuration=Release /p:Platform=x64 "/p:ForceImportAfterCppTargets=$propsPath" /m /nologo
+          if ($LASTEXITCODE -ne 0) { throw "softcam x64 build failed ($LASTEXITCODE)" }
+          & $msbuild build\_softcam\softcam.sln /t:softcam /p:Configuration=Release /p:Platform=Win32 "/p:ForceImportAfterCppTargets=$propsPath" /m /nologo
+          if ($LASTEXITCODE -ne 0) { throw "softcam Win32 build failed ($LASTEXITCODE)" }
+
       - name: Set up Python (for INT8 seg quantization)
         uses: actions/setup-python@v5
         with:
@@ -157,6 +187,20 @@ jobs:
           $lnk2 = Get-ChildItem -Recurse -Path build -Filter gpupixel.map -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($lnk2) { Copy-Item $lnk2.FullName dist -Force; Write-Host "map: $($lnk2.FullName)" } else { Write-Host '::warning ::gpupixel.map not found' }
           Copy-Item THIRD_PARTY.md, README.md, STATUS.md -Destination dist
+          Copy-Item docs\VIRTUALCAM.md -Destination dist\VIRTUALCAM.md
+          Copy-Item scripts\install_vcam.bat, scripts\uninstall_vcam.bat -Destination dist
+          # Softcam x64 + Win32 DLLs + license
+          $sc64 = Get-ChildItem -Recurse -Path build\_softcam -Filter softcam.dll |
+                    Where-Object { $_.FullName -match 'x64.*Release' } | Select-Object -First 1
+          $sc32 = Get-ChildItem -Recurse -Path build\_softcam -Filter softcam.dll |
+                    Where-Object { $_.FullName -match '(Win32|x86).*Release' -or ($_.FullName -match '\\Release\\' -and $_.FullName -notmatch 'x64') } | Select-Object -First 1
+          if (-not $sc64) { throw 'softcam.dll (x64 Release) not found' }
+          if (-not $sc32) { throw 'softcam.dll (Win32 Release) not found' }
+          Copy-Item $sc64.FullName -Destination dist\softcam.dll -Force
+          New-Item -ItemType Directory -Force -Path dist\win32 | Out-Null
+          Copy-Item $sc32.FullName -Destination dist\win32\softcam.dll -Force
+          New-Item -ItemType Directory -Force -Path dist\licenses | Out-Null
+          Copy-Item build\_softcam\LICENSE -Destination dist\licenses\softcam-LICENSE.txt -Force
           Get-ChildItem dist | ForEach-Object { Write-Host "dist: $($_.Name) ($($_.Length) B)" }
 
       - name: Verify artifact contents (fail build if incomplete)
@@ -165,8 +209,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $required = @(
             'dist\KameraGeulis.exe','dist\gpupixel.dll','dist\onnxruntime.dll',
+            'dist\softcam.dll','dist\win32\softcam.dll',
+            'dist\install_vcam.bat','dist\uninstall_vcam.bat',
+            'dist\licenses\softcam-LICENSE.txt',
             'dist\vcruntime140.dll','dist\vcruntime140_1.dll','dist\msvcp140.dll',
-            'dist\THIRD_PARTY.md','dist\README.md','dist\STATUS.md',
+            'dist\THIRD_PARTY.md','dist\README.md','dist\STATUS.md','dist\VIRTUALCAM.md',
             'dist\res\lookup_gray.png','dist\res\lookup_origin.png','dist\res\lookup_skin.png',
             'dist\res\lookup_light.png','dist\res\lookup_custom.png','dist\res\mouth.png','dist\res\blusher.png',
             'dist\models\face_detection_short_range.onnx','dist\models\face_mesh.onnx',
@@ -204,6 +251,30 @@ jobs:
             throw
           }
 
+      - name: DirectShow Virtual Camera CI test (register, enum, frame readback, unregister)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ciExe = Get-ChildItem -Recurse -Path build -Filter kg_vcam_ci_test.exe |
+                     Where-Object { $_.FullName -notmatch '_deps' } | Select-Object -First 1
+          if (-not $ciExe) { throw 'kg_vcam_ci_test.exe not found' }
+          Write-Host "Using test binary: $($ciExe.FullName)"
+
+          & cmd.exe /c dist\install_vcam.bat --nopause
+          if ($LASTEXITCODE -ne 0) { throw "install_vcam.bat failed ($LASTEXITCODE)" }
+
+          try {
+            & $ciExe.FullName --verify-registered (Resolve-Path dist).Path
+            if ($LASTEXITCODE -ne 0) { throw "kg_vcam_ci_test --verify-registered failed ($LASTEXITCODE)" }
+          } finally {
+            & cmd.exe /c dist\uninstall_vcam.bat --nopause
+            if ($LASTEXITCODE -ne 0) { throw "uninstall_vcam.bat failed ($LASTEXITCODE)" }
+          }
+
+          & $ciExe.FullName --verify-absent (Resolve-Path dist).Path
+          if ($LASTEXITCODE -ne 0) { throw "kg_vcam_ci_test --verify-absent failed ($LASTEXITCODE)" }
+          Write-Host "VCAM DIRECTSHOW CI TEST PASS"
+
       - name: Resolve crash RVA 0x3968a against gpupixel.map
         shell: pwsh
         continue-on-error: true
@@ -212,6 +283,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kamerageulis-m2-windows-x64
+          name: kamerageulis-m3-windows-x64
           path: dist
           retention-days: 14

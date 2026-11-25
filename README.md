@@ -20,7 +20,10 @@ KameraGeulis adalah aplikasi desktop native (C++17/OpenGL) yang mempercantik vid
 
 - CMake build GPUPixel **wajib Release x64** di Windows; MSVC 2019+ (2022 direkomendasikan).
 - **Efek landmark** (face slim, big eyes, lipstick, …): pipeline deteksi+mesh **sudah diimplementasikan** (ONNX Runtime CPU, 468 titik, model Apache-2.0 hasil konversi; rilis `models-v1` **sudah berisi kedua aset** sejak 2026-11-12 — diupload workflow `Models`, I/O diverifikasi di CI), tetapi pemetaan 468→filter GPUPixel (106/111 titik Mars) terbukti tidak kredibel — jadi v1 **tidak mem-wiring** efek landmark; UI menyatakannya jujur **Segera hadir / disabled**. Skin smoothing & whitening dirancang tanpa landmark dan **aktif**.
-- **Kamera virtual memerlukan registrasi 1× dengan admin** (softcam, DirectShow) dan hanya terlihat oleh aplikasi berbasis DirectShow. Windows 11 punya API MFCreateVirtualCamera (didokumentasikan sebagai opsi masa depan).
+- **Kamera virtual (M3):**
+  1. Jalankan `install_vcam.bat` **1× sebagai Administrator** (mendaftarkan `softcam.dll` x64 + `win32\softcam.dll` ke DirectShow sebagai `"KameraGeulis Camera"`, tanpa driver kernel).
+  2. Buka `KameraGeulis.exe` **tanpa hak admin**, masuk ke tab **Kamera**, atur resolusi/FPS virtual (bawaan `1280x720 @ 30`, tanpa mirror agar tidak terbalik di app rapat), lalu centang **Kamera Virtual**.
+  3. Pilih `"KameraGeulis Camera"` di OBS Studio (*Video Capture Device*), Discord, Zoom, atau Chrome (`getUserMedia`). Untuk menghapus registrasi secara bersih, jalankan `uninstall_vcam.bat`. Detail arsitektur, matriks kompatibilitas, dan daftar uji PC ada di [docs/VIRTUALCAM.md](docs/VIRTUALCAM.md).
 
 ### Build singkat
 
@@ -61,4 +64,4 @@ BUILD.md, STATUS.md, THIRD_PARTY.md
 
 ## Lisensi
 
-Kode KameraGeulis: MIT (lihat LICENSE). GPUPixel Apache-2.0, softcam MIT, ImGui MIT, nlohmann/json MIT — detail & atribusi: [THIRD_PARTY.md](THIRD_PARTY.md).
+Tanpa file `LICENSE` pada repo (keputusan pemilik repo; lihat [STATUS.md](STATUS.md)). Dependensi pihak ketiga: GPUPixel Apache-2.0, softcam MIT (`licenses/softcam-LICENSE.txt`), ImGui MIT, nlohmann/json MIT, ONNX Runtime MIT, model turunan MediaPipe Apache-2.0 — detail & atribusi: [THIRD_PARTY.md](THIRD_PARTY.md).

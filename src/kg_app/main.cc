@@ -41,6 +41,10 @@
 #include "kgcore/black_frame_guard.h"  // M2l: swa-uji berkelanjutan frame hitam
 #include "kgcore/camera_orientation.h" // M2p: rotasi kamera + auto-orientasi
 #include "kgcore/landmark_tracking.h"  // M2l: overlay landmark ber-indeks F5
+#include "kgcore/virtual_camera.h"     // M3: konfigurasi + status kamera virtual
+#include "softcam_sink.h"              // M3: DirectShow softcam sink
+#include "vcam_service.h"              // M3: thread pekerja konstan-FPS
+#include "async_pbo_readback.h"        // M3: readback PBO double-buffer asinkron
 
 // M2j kualitas: parameter komposit per mode. Mode kulit:
 //  * smooth_amount DITINGKATKAN (0.45 + 0.55*slider) - guided benar-benar
@@ -129,6 +133,11 @@ kg::Settings UiToSettings(const kg::AppUiState& ui) {
   s.face_slim = ui.face_slim; s.big_eyes = ui.big_eyes;
   s.lipstick = ui.lipstick; s.blusher = ui.blusher;
   s.mirror = ui.mirror; s.landmark_enabled = ui.landmark_enabled;
+  s.virtual_camera = ui.virtual_camera;
+  s.vcam_width = ui.vcam_width;
+  s.vcam_height = ui.vcam_height;
+  s.vcam_fps = ui.vcam_fps;
+  s.vcam_mirror = ui.vcam_mirror;
   s.preset = ui.preset; s.language = ui.language;
   s.camera_device = ui.camera_device;
   s.capture_width = ui.capture_width;
@@ -146,6 +155,11 @@ void ApplySettingsToUi(const kg::Settings& s, kg::AppUiState& ui) {
   ui.face_slim = s.face_slim; ui.big_eyes = s.big_eyes;
   ui.lipstick = s.lipstick; ui.blusher = s.blusher;
   ui.mirror = s.mirror; ui.landmark_enabled = s.landmark_enabled;
+  ui.virtual_camera = s.virtual_camera;
+  ui.vcam_width = s.vcam_width;
+  ui.vcam_height = s.vcam_height;
+  ui.vcam_fps = s.vcam_fps;
+  ui.vcam_mirror = s.vcam_mirror;
   ui.preset = s.preset.empty() ? "Natural" : s.preset;
   ui.language = (s.language == "en") ? "en" : "id";
   ui.camera_device = s.camera_device;
@@ -883,6 +897,30 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
   }
   ui.camera_ok = camera_started;
 
+  kg::VcamService vcam_service(std::make_unique<kg::SoftcamSink>(exe_dir));
+  kg::AsyncPboReadback vcam_pbo;
+  auto make_vcam_cfg = [&]() {
+    kg::VcamConfig c;
+    c.width = ui.vcam_width;
+    c.height = ui.vcam_height;
+    c.fps = ui.vcam_fps;
+    c.mirror = ui.vcam_mirror;
+    kg::NormalizeVcamConfig(&c);
+    return c;
+  };
+  {
+    const bool reg = vcam_service.RefreshRegistration();
+    ui.vcam_registered = reg;
+    ui.vcam_detail = vcam_service.RegistrationDetail();
+    if (ui.virtual_camera && !reg) {
+      ui.virtual_camera = false;
+      kgcore::Log("vcam",
+                  "virtual_camera di settings aktif tetapi driver belum terdaftar -> dimatikan");
+    } else if (ui.virtual_camera && reg) {
+      vcam_service.SetEnabled(true, make_vcam_cfg());
+    }
+  }
+
   PreviewTexture preview;
   glGenTextures(1, &preview.tex);
   glBindTexture(GL_TEXTURE_2D, preview.tex);
@@ -1073,6 +1111,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         ui.notice = kg::Strings::Instance().Get("presets.loaded");
         ui.notice_is_error = false;
         ui.request_camera_apply = true;  // apply loaded camera mode
+        ui.request_vcam_apply = true;
       } else {
         ui.notice = kg::Strings::Instance().Get("presets.load_failed");
         ui.notice_is_error = true;
@@ -1089,10 +1128,42 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
       ui.lipstick = def.lipstick;
       ui.blusher = def.blusher;
       ui.mirror = def.mirror;
+      ui.vcam_width = def.vcam_width;
+      ui.vcam_height = def.vcam_height;
+      ui.vcam_fps = def.vcam_fps;
+      ui.vcam_mirror = def.vcam_mirror;
       ui.camera_rotation = def.camera_rotation;
       ui.preset = def.preset;  // "Natural"
       orient_ctrl.ResetTransient();
+      ui.request_vcam_apply = true;
       ui.request_reset_defaults = false;
+    }
+    if (ui.request_vcam_apply) {
+      ui.request_vcam_apply = false;
+      const kg::VcamConfig vcfg = make_vcam_cfg();
+      ui.vcam_width = vcfg.width;
+      ui.vcam_height = vcfg.height;
+      ui.vcam_fps = vcfg.fps;
+      ui.vcam_mirror = vcfg.mirror;
+      if (ui.virtual_camera && !vcam_service.RefreshRegistration()) {
+        ui.virtual_camera = false;
+        ui.notice = kg::Strings::Instance().Get("vcam.need_register");
+        ui.notice_is_error = true;
+      }
+      vcam_service.SetEnabled(ui.virtual_camera, vcfg);
+      kg::Settings vs;
+      vs.Load(settings_path);
+      vs.virtual_camera = ui.virtual_camera;
+      vs.vcam_width = ui.vcam_width;
+      vs.vcam_height = ui.vcam_height;
+      vs.vcam_fps = ui.vcam_fps;
+      vs.vcam_mirror = ui.vcam_mirror;
+      std::string verr;
+      if (vs.Save(settings_path, &verr)) {
+        kgcore::Log("vcam", "settings: tersimpan (%dx%d@%d active=%d mirror=%d)",
+                    vs.vcam_width, vs.vcam_height, vs.vcam_fps,
+                    vs.virtual_camera ? 1 : 0, vs.vcam_mirror ? 1 : 0);
+      }
     }
     if (ui.request_rotation_save) {
       ui.request_rotation_save = false;
@@ -1343,13 +1414,13 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             pipeline->OutputWidth() > 0 && pipeline->OutputHeight() > 0) {
           const uint8_t* prev_out = pipeline->OutputRGBA();
           const int pw = pipeline->OutputWidth(), ph = pipeline->OutputHeight();
-          preview.Upload(prev_out, pw, ph, ui.mirror, /*src_is_bgra=*/false);
+          preview.Upload(prev_out, pw, ph, /*mirror=*/false, /*src_is_bgra=*/false);
           last_nonblend_out_luma = ComputeMeanLumaRgba(prev_out, pw, ph);
           shown_w = pw;
           shown_h = ph;
         } else if (last_camera_raw_valid) {
           preview.Upload(last_camera_raw.pixels.data(), last_camera_raw.width,
-                         last_camera_raw.height, ui.mirror,
+                         last_camera_raw.height, /*mirror=*/false,
                          /*src_is_bgra=*/last_camera_raw.format == kg::kFormatBGRA);
           last_nonblend_out_luma = last_raw_luma;
           shown_w = last_camera_raw.width;
@@ -1503,7 +1574,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             }
           }
         } else {
-          preview.Upload(out, out_w, out_h, ui.mirror, /*src_is_bgra=*/false);
+          preview.Upload(out, out_w, out_h, /*mirror=*/false, /*src_is_bgra=*/false);
           last_nonblend_out_luma = ComputeMeanLumaRgba(out, out_w, out_h);
           preview_show_blend = false;
         }
@@ -1533,7 +1604,7 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     }
     prev_show_mask = ui.show_mask;
     if (have_frame && (want_raw || !pipeline_frame_ok)) {
-      preview.Upload(frame.pixels.data(), frame.width, frame.height, ui.mirror,
+      preview.Upload(frame.pixels.data(), frame.width, frame.height, /*mirror=*/false,
                      /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
       last_nonblend_out_luma = ComputeMeanLumaFrame(frame);
       preview_show_blend = false;
@@ -1550,14 +1621,14 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     const uint8_t* raw = have_frame ? frame.pixels.data() : nullptr;
     if (ui.compare_held) {
       if (raw) {
-        preview.Upload(raw, frame.width, frame.height, ui.mirror,
+        preview.Upload(raw, frame.width, frame.height, /*mirror=*/false,
                        /*src_is_bgra=*/frame.format == kg::kFormatBGRA);
         shown_w = frame.width;
         shown_h = frame.height;
         if (!frame_is_synthetic) ++uploaded_raw;
       } else if (!compare_uploaded_nonframe && last_camera_raw_valid) {
         preview.Upload(last_camera_raw.pixels.data(), last_camera_raw.width,
-                       last_camera_raw.height, ui.mirror,
+                       last_camera_raw.height, /*mirror=*/false,
                        /*src_is_bgra=*/last_camera_raw.format == kg::kFormatBGRA);
         shown_w = last_camera_raw.width;
         shown_h = last_camera_raw.height;
@@ -1568,6 +1639,40 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
     }
     // M2e requirement 1: glGetError after every preview upload operation.
     drain_gl_errors();
+
+    // ---- M3: Kirim keluaran bersih (setelah mask/efek/rotasi, tanpa F3/F6) via PBO asinkron ----
+    if (vcam_service.IsEnabled() && have_frame && !ui.compare_held &&
+        shown_w > 0 && shown_h > 0) {
+      const GLuint vcam_src_tex =
+          preview_show_blend ? blender.DisplayTex(false) : preview.tex;
+      const int64_t vcam_ts_us =
+          pending_cam_ts_ms > 0
+              ? pending_cam_ts_ms * 1000LL
+              : duration_cast<std::chrono::microseconds>(
+                    clock_type::now().time_since_epoch())
+                    .count();
+      vcam_pbo.CaptureAndSubmit(vcam_src_tex, shown_w, shown_h, vcam_ts_us,
+                                &vcam_service);
+    }
+    {
+      const auto vst = vcam_service.GetStats();
+      ui.vcam_registered = vst.registered;
+      ui.vcam_active = vst.active;
+      ui.vcam_state = static_cast<int>(vst.state);
+      ui.vcam_consumers = vst.consumer_count;
+      ui.vcam_output_fps = vst.output_fps;
+      ui.vcam_ms = vst.worker_ms;
+      ui.vcam_readback_ms = vst.readback_ms;
+      ui.vcam_latency_ms = vst.latency_ms;
+      ui.vcam_sent = vst.frames_sent;
+      ui.vcam_dropped = vst.frames_dropped;
+      ui.vcam_repeated = vst.frames_repeated;
+      ui.vcam_detail = vcam_service.RegistrationDetail();
+      ui.vcam_error = vst.last_error;
+      if (ui.virtual_camera && !vcam_service.IsEnabled()) {
+        ui.virtual_camera = false;
+      }
+    }
 
     // M2e/M2l (F5): dump PNG + metrik bersih.
     if (ui.debug_frame_requests != debug_req_seen) {
@@ -1857,7 +1962,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             "glErr(last=0x%X total=%u) tex=%u %dx%d RGBA8 | ctx=%p | camRunning=%d pipelineOK=%d | "
             "blend=%u %dx%d%s gpu_mask=%d guided=%d | blend_dark=%d/%d (win=%.1f%%) rawY=%.1f outY=%.1f | "
             "lag: oneeuro(mean=%.2f p95=%.2f px) mask_feat_diff=%.2f px seg_age=%.0f fr (%.1fms period=%dms intra=%d spin=%d) "
-            "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu rot=%ddeg(%s) roi_resets=%d (60s=%d/m) hold=%d/%dfr fade_out=%.0fms state=%s",
+            "cam2screen(med=%.1f p95=%.1f ms) qlen=%zu rot=%ddeg(%s) roi_resets=%d (60s=%d/m) hold=%d/%dfr fade_out=%.0fms state=%s | "
+            "vcam(reg=%d active=%d fps=%.1f ms=%.2f pbo=%.2f sent=%llu drop=%llu cons=%d)",
             static_cast<unsigned long long>(cst.received), cst.width, cst.height, cst.stride,
             static_cast<unsigned>(cst.subtype), cst.fps_num, cst.fps_den,
             cst.actual_fps, cst.mf_ts_fps, cst.mean_luma,
@@ -1882,7 +1988,12 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
             diag_st.reset_count, diag_st.resets_in_last_min,
             diag_st.hold_frames, diag_st.total_hold_frames,
             diag_st.last_fade_out_ms,
-            kgcore::TrackingPhaseName(diag_st.tracking_phase));
+            kgcore::TrackingPhaseName(diag_st.tracking_phase),
+            ui.vcam_registered ? 1 : 0, ui.vcam_active ? 1 : 0,
+            ui.vcam_output_fps, ui.vcam_ms, ui.vcam_readback_ms,
+            static_cast<unsigned long long>(ui.vcam_sent),
+            static_cast<unsigned long long>(ui.vcam_dropped),
+            ui.vcam_consumers);
       } else {
         kgcore::Log("diag",
                     "safe mode: MF/pipeline nonaktif | upload: out=%llu raw=%llu | "
@@ -1948,7 +2059,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
                        ui.mirror ? ImVec2(0, 1) : ImVec2(1, 1));
         } else {
           ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(preview.tex)),
-                       image_size, ImVec2(0, 0), ImVec2(1, 1));
+                       image_size, ui.mirror ? ImVec2(1, 0) : ImVec2(0, 0),
+                       ui.mirror ? ImVec2(0, 1) : ImVec2(1, 1));
         }
         // Status overlay di sudut bawah kiri gambar.
         // M2f: F4 tanpa frame kamera wajib bicara ("Tidak ada frame kamera").
@@ -2009,20 +2121,26 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
           dl->AddRect(ImVec2(bx0, b0.y), ImVec2(bx1, b1.y), IM_COL32(0, 229, 255, 230),
                       0.0f, 0, 2.0f);
         }
-        char hud[640];
+        char hud[768];
         char seg_part[64];
+        char vcam_part[64] = "";
         if (ui.seg_ok) {
           std::snprintf(seg_part, sizeof(seg_part), "seg %.1f ms (%+.0f fr)",
                         ui.seg_ms, ui.seg_lag);
         } else {
           std::snprintf(seg_part, sizeof(seg_part), "seg mati");
         }
+        if (ui.vcam_active) {
+          std::snprintf(vcam_part, sizeof(vcam_part), " | vcam %.1f fps (%.2f ms)",
+                        ui.vcam_output_fps, ui.vcam_ms);
+        }
         std::snprintf(hud, sizeof(hud),
                       "FPS %.1f | cap %.2f ms | det %.2f ms | mesh %.2f ms | "
-                      "trk %.2f ms | msk %.2f ms | %s | render %.2f ms | "
+                      "trk %.2f ms | msk %.2f ms | %s | render %.2f ms%s | "
                       "sejak deteksi %d | landmark age %.1f fr | frame #%llu",
                       ui.fps, ui.capture_ms, ui.detect_ms, ui.mesh_ms, ui.track_ms,
-                      ui.mask_ms, seg_part, ui.render_ms, ui.frames_since_detect,
+                      ui.mask_ms, seg_part, ui.render_ms, vcam_part,
+                      ui.frames_since_detect,
                       (lm.valid && last_frame_ts_ms >= lm.ts_ms)
                           ? static_cast<float>(last_frame_ts_ms - lm.ts_ms) / 33.333f
                           : -1.0f,
@@ -2124,6 +2242,8 @@ int RunApp(const kg::StartupArgs& args, const kg::StartupPaths& paths) {
         1000.0f;
   }
 
+  vcam_service.Shutdown();
+  vcam_pbo.Destroy();  // GL context still current - required
   capture.Stop();
   if (pipeline) pipeline->Shutdown();  // GL context still current - required
   blender.Destroy();  // M2h: tekstur/shader blend mask (GL konteks masih ada)

@@ -22,6 +22,8 @@ bool Settings::operator==(const Settings& o) const {
          feq(face_slim, o.face_slim) && feq(big_eyes, o.big_eyes) &&
          feq(lipstick, o.lipstick) && feq(blusher, o.blusher) &&
          mirror == o.mirror && virtual_camera == o.virtual_camera &&
+         vcam_width == o.vcam_width && vcam_height == o.vcam_height &&
+         vcam_fps == o.vcam_fps && vcam_mirror == o.vcam_mirror &&
          landmark_enabled == o.landmark_enabled && preset == o.preset &&
          language == o.language && camera_device == o.camera_device &&
          capture_width == o.capture_width && capture_height == o.capture_height &&
@@ -70,6 +72,12 @@ bool Settings::FromJson(const std::string& text) {
   blusher = ClampUnit(j, "blusher", blusher);
   mirror = ClampBool(j, "mirror", mirror);
   virtual_camera = ClampBool(j, "virtual_camera", virtual_camera);
+  vcam_width = ClampInt(j, "vcam_width", vcam_width, 16, 4096);
+  vcam_height = ClampInt(j, "vcam_height", vcam_height, 16, 4096);
+  vcam_width = std::max(16, (vcam_width / 4) * 4);
+  vcam_height = std::max(16, (vcam_height / 4) * 4);
+  vcam_fps = ClampInt(j, "vcam_fps", vcam_fps, 1, 60);
+  vcam_mirror = ClampBool(j, "vcam_mirror", vcam_mirror);
   landmark_enabled = ClampBool(j, "landmark_enabled", landmark_enabled);
   preset = ClampString(j, "preset", preset, 32);
   language = ClampString(j, "language", language, 8);
@@ -109,6 +117,10 @@ std::string Settings::ToJson() const {
   j["blusher"] = blusher;
   j["mirror"] = mirror;
   j["virtual_camera"] = virtual_camera;
+  j["vcam_width"] = vcam_width;
+  j["vcam_height"] = vcam_height;
+  j["vcam_fps"] = vcam_fps;
+  j["vcam_mirror"] = vcam_mirror;
   j["landmark_enabled"] = landmark_enabled;
   j["preset"] = preset;
   j["language"] = language;

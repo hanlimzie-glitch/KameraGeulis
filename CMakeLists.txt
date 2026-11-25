@@ -53,7 +53,8 @@ add_library(kg_core STATIC
   src/kg_core/src/perf_guard.cc
   src/kg_core/src/black_frame_guard.cc
   src/kg_core/src/landmark_tracking.cc
-  src/kg_core/src/camera_orientation.cc)
+  src/kg_core/src/camera_orientation.cc
+  src/kg_core/src/virtual_camera.cc)
 target_include_directories(kg_core PUBLIC src/kg_core/include)
 target_link_libraries(kg_core PUBLIC nlohmann_json::nlohmann_json)
 
@@ -83,7 +84,8 @@ if(KG_BUILD_TESTS)
     src/kg_tests/perf_guard_test.cc
     src/kg_tests/black_frame_guard_test.cc
     src/kg_tests/landmark_tracking_test.cc
-    src/kg_tests/camera_orientation_test.cc)
+    src/kg_tests/camera_orientation_test.cc
+    src/kg_tests/virtual_camera_test.cc)
   target_link_libraries(kg_tests PRIVATE kg_core Catch2::Catch2WithMain)
   add_test(NAME kg_tests COMMAND kg_tests)
 endif()
@@ -97,10 +99,17 @@ if(WIN32)
   target_include_directories(kg_capture PUBLIC src/kg_capture)
   target_link_libraries(kg_capture PUBLIC kg_core mfplat mf mfreadwrite mfuuid ole32 propsys)
 
-  # Virtual camera sender (softcam via dynamic LoadLibrary — no link-time dep;
-  # if softcam.dll/registration is missing at runtime, vcam reports unavailable)
-  add_library(kg_vcam STATIC src/kg_vcam/softcam_sender.cc)
-  target_link_libraries(kg_vcam PUBLIC kg_core)
+  # Virtual camera sender + service + async GL PBO readback
+  add_library(kg_vcam STATIC
+    src/kg_vcam/softcam_sender.cc
+    src/kg_vcam/softcam_sink.cc
+    src/kg_vcam/vcam_service.cc
+    src/kg_vcam/async_pbo_readback.cc)
+  target_include_directories(kg_vcam PUBLIC src/kg_vcam)
+  target_link_libraries(kg_vcam PUBLIC kg_core glad advapi32)
+
+  add_executable(kg_vcam_ci_test src/kg_vcam/vcam_ci_test.cc)
+  target_link_libraries(kg_vcam_ci_test PRIVATE kg_vcam strmiids ole32 oleaut32)
 
   # Windows: ONNX Runtime (MIT) — CPU provider for the 468-pt landmark
   # pipeline (M1b). Download pinned by SHA-256 at configure time; the zip has
