@@ -22,9 +22,9 @@ if exist "%DLL32%" (
 )
 
 rem Pastikan sisa entri COM/DirectShow di registry bersih total (x64 + WOW6432Node)
-reg delete "HKLM\SOFTWARE\Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance\{AEF3B972-5FA5-4647-9571-358EB472BC9E}" /f /reg:64 >nul 2>&1
+reg delete "HKLM\SOFTWARE\Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance\KameraGeulis Camera" /f /reg:64 >nul 2>&1
 reg delete "HKLM\SOFTWARE\Classes\CLSID\{AEF3B972-5FA5-4647-9571-358EB472BC9E}" /f /reg:64 >nul 2>&1
-reg delete "HKLM\SOFTWARE\Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance\{AEF3B972-5FA5-4647-9571-358EB472BC9E}" /f /reg:32 >nul 2>&1
+reg delete "HKLM\SOFTWARE\Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance\KameraGeulis Camera" /f /reg:32 >nul 2>&1
 reg delete "HKLM\SOFTWARE\Classes\CLSID\{AEF3B972-5FA5-4647-9571-358EB472BC9E}" /f /reg:32 >nul 2>&1
 
 echo.

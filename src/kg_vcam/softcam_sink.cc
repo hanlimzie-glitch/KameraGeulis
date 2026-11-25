@@ -11,7 +11,7 @@ constexpr wchar_t kSoftcamClsidPath[] =
     L"SOFTWARE\\Classes\\CLSID\\{AEF3B972-5FA5-4647-9571-358EB472BC9E}\\InprocServer32";
 constexpr wchar_t kDShowCategoryInstancePath[] =
     L"SOFTWARE\\Classes\\CLSID\\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\Instance\\"
-    L"{AEF3B972-5FA5-4647-9571-358EB472BC9E}";
+    L"KameraGeulis Camera";
 
 bool FileExistsW(const std::wstring& path) {
   if (path.empty()) return false;
